@@ -1,0 +1,21 @@
+[package]
+name = "kadr-media"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes = "=1.12.1"
+futures-util = "=0.3.34"
+http-body-util = "=0.1.5"
+hyper = { version = "=1.12.0", features = ["http1", "server"] }
+hyper-util = { version = "=0.1.21", features = ["tokio"] }
+rand = "=0.8.8"
+tokio = { version = "=1.54.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = "=0.7.20"
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.186"
+
+[dev-dependencies]
+hyper = { version = "=1.12.0", features = ["client"] }
