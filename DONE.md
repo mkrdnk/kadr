@@ -197,3 +197,20 @@ macOS не проверена. Half-close считается отключени�
 
 Сохраняется ранее описанное внешнее future-incompatibility warning
 `proc-macro-error2 2.0.1`; оно не блокирует текущие проверки.
+
+## Итерация 3 — воспроизводимое окружение и CI
+
+- Добавлена CI-матрица Linux/macOS с `fmt`, `check`, Clippy, тестами и сборкой
+  всех targets. Конфигурация ещё не запускалась на GitHub Actions; macOS
+  не считается проверенной.
+- `python3 scripts/smoke-x11.py target/debug/kadr-app` запускает отдельные
+  Xvfb/Openbox без XWayland и проверяет появление окна, resize до 1000×720,
+  обычное закрытие через WM и `Ctrl+Q` (оба выхода — код 0).
+  Настройки теста изолированы от пользовательских.
+- Проверено в Cloud Runner Debian 12, x86_64, Rust 1.100.0:
+  `CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+  cargo test --locked --workspace` — все прежние 28 тестов прошли.
+- **Ограничение:** lifecycle X11 проверен, но первый снимок Xvfb с Mesa 22.3.6
+  содержит чёрную клиентскую область. Отображение содержимого не подтверждено;
+  графическая приёмка X11 остаётся открытой. Скрипт не выдаёт map окна за
+  проверку пикселей.
