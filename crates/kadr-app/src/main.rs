@@ -1,35 +1,19 @@
-use std::{cell::Cell, process::ExitCode, rc::Rc};
+mod backend;
+mod desktop;
 
-use gpui::{
-    App, Application, Bounds, Context, KeyBinding, Menu, MenuItem, TitlebarOptions, Window,
-    WindowBounds, WindowOptions, actions, div, prelude::*, px, rgb, size,
+use std::{
+    cell::{Cell, RefCell},
+    process::ExitCode,
+    rc::Rc,
 };
 
+use gpui::{
+    App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,
+    WindowBounds, WindowOptions, actions, px, size,
+};
+use kadr_ui::{KadrView, UiStatus};
+
 actions!(kadr, [Quit]);
-
-struct Kadr;
-
-impl Render for Kadr {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .justify_center()
-            .items_center()
-            .gap_4()
-            .bg(rgb(0x18181b))
-            .text_color(rgb(0xf4f4f5))
-            .child(div().text_3xl().child("kadr"))
-            .child("Фильмы и сериалы в локальном приложении")
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(0xa1a1aa))
-                    .child("P0 · Прототип окна GPUI. Воспроизведение пока недоступно."),
-            )
-    }
-}
 
 fn request_quit(cx: &App) {
     // Run outside platform callbacks: startup can lose an early quit, and X11 holds a borrow.
@@ -40,6 +24,8 @@ fn request_quit(cx: &App) {
 fn main() -> ExitCode {
     let exit_code = Rc::new(Cell::new(ExitCode::SUCCESS));
     let startup_exit_code = Rc::clone(&exit_code);
+    let desktop = Rc::new(RefCell::new(None::<Rc<RefCell<desktop::Desktop>>>));
+    let running_desktop = desktop.clone();
 
     Application::new().run(move |cx: &mut App| {
         cx.on_action(|_: &Quit, cx| request_quit(cx));
@@ -72,7 +58,17 @@ fn main() -> ExitCode {
 
         if let Err(error) = cx.open_window(options, |window, cx| {
             window.set_window_title("kadr");
-            cx.new(|_| Kadr)
+            let view = cx.new(|_| KadrView::new());
+            match desktop::attach(&view, cx) {
+                Ok(desktop) => *running_desktop.borrow_mut() = Some(desktop),
+                Err(_) => view.update(cx, |view, cx| {
+                    view.set_status(
+                        UiStatus::error("Не удалось запустить фоновый поток приложения."),
+                        cx,
+                    );
+                }),
+            }
+            view
         }) {
             eprintln!("Не удалось открыть окно kadr: {error:#}");
             startup_exit_code.set(ExitCode::FAILURE);
@@ -83,5 +79,13 @@ fn main() -> ExitCode {
         cx.activate(true);
     });
 
+    // GPUI allows only 100ms for quit observers; reap players and flush SQLite
+    // after the event loop, without blocking render or abandoning owned children.
+    if let Some(desktop) = desktop.borrow_mut().take()
+        && !desktop.borrow_mut().join()
+    {
+        eprintln!("Фоновый поток kadr завершился с ошибкой.");
+        exit_code.set(ExitCode::FAILURE);
+    }
     exit_code.get()
 }

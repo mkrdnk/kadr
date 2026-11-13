@@ -94,10 +94,13 @@ def main():
         env.pop(key, None)
     with tempfile.TemporaryDirectory(prefix="kadr-x11-") as directory:
         logs = Path(directory)
+        runtime = logs / "runtime"
+        runtime.mkdir(mode=0o700)
         # Do not write to the user's real settings/history in a smoke check.
         env.update(
             HOME=str(logs), XDG_CONFIG_HOME=str(logs / "config"),
             XDG_DATA_HOME=str(logs / "data"), XDG_CACHE_HOME=str(logs / "cache"),
+            XDG_RUNTIME_DIR=str(runtime),
         )
         read_fd, write_fd = os.pipe()
         xvfb = wm = None

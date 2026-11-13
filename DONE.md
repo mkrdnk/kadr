@@ -20,8 +20,8 @@
 - [ ] Сборка и графическая smoke-проверка macOS.
 - [x] Документарное сравнение BitTorrent API, лицензий и рисков упаковки.
 - [ ] Интеграционный spike BitTorrent: pieces/seek, Linux/macOS и выбор движка.
-- [ ] Прототип mpv IPC: запуск, позиция, длительность, возобновление, завершение.
-- [ ] Прототип VLC: те же проверки, явное обозначение недоступной телеметрии.
+- [x] Прототип mpv IPC: запуск, позиция, длительность, возобновление, завершение (Linux).
+- [x] Прототип VLC: запуск/resume/завершение, телеметрия явно недоступна (Linux).
 - [x] Прототип HTTP Range на Linux: GET/HEAD, 206/416, seek, таймауты и отмена.
 - [ ] Прогон HTTP Range-прототипа на macOS.
 - [ ] Исходные измерения производительности и ADR по выбранным реализациям.
@@ -29,14 +29,14 @@
 ## P1 — каркас
 
 - [x] Разделение приложения на крейты по мере появления реализаций (продолжается).
-- [ ] Окно приложения с навигацией и основными экранами.
+- [x] Окно приложения с навигацией и основными экранами (ранний каркас).
 - [x] Настройки и стандартные пользовательские каталоги (storage API, UI частично).
 - [x] SQLite, версионированные миграции, сохранение настроек между запусками.
 - [ ] Подтверждённый запуск на Linux и macOS.
 
 ## P2 — медиаядро
 
-- [ ] Ручной ввод и проверка HTTP(S), magnet, `.torrent`.
+- [x] Ручной ввод и проверка HTTP(S), magnet, `.torrent` (вставка/picker, без torrent IO).
 - [ ] Метаданные торрента, выбор видеофайла, распознавание эпизодов.
 - [ ] Буферизация, приоритеты частей и seek без полной загрузки.
 - [ ] Защищённый loopback HTTP-сервер с Range.
@@ -251,3 +251,47 @@ HTTP(S)/magnet/`.torrent`, versioned stable ID, приватные диагно�
 Файлы и сеть не открываются; лексическая проверка путей не заменяет
 symlink-safe IO в будущем адаптере. Требование о выборе и исправлении
 эпизодов в UI пока не закрыто. Контракты: [docs/core-models.md](docs/core-models.md).
+
+## Итерация 6 — плееры и интегрированный desktop
+
+- Реальные mpv JSON IPC и VLC oldrc Unix socket: отдельные argv без shell,
+  приватный каталог 0700, bounded startup/commands/stop, отмена,
+  graceful quit и kill/reap. mpv сообщает измеренную позицию/длительность;
+  VLC явно возвращает `Unsupported`, не таймерный «прогресс».
+- `kadr-ui`: пять разделов, явная недоступность ещё не подключённых адаптеров,
+  preview ручного источника, кнопки запуска/остановки и выбора плеера.
+- `kadr-app`: clipboard читается только при нажатии; ввод валидируется core,
+  HTTP запускается в выбранном плеере. SQL и player IO — в отдельном worker.
+  Выбор плеера, история и реальный прогресс mpv сохраняются в SQLite.
+  Обычный запуск предлагает продолжение, отдельная кнопка — «С начала».
+- Закрытие окна/выход отменяют запуск и дожидаются остановки/reaping после
+  platform loop, вне 100-мс quit budget GPUI.
+- Независимое ревью выявило и помогло устранить drop launch future при
+  shutdown, устаревший picker, stale readiness при отказе worker и ложные
+  сообщения об успешном сохранении. Добавлены регрессии generation/status.
+
+Проверки на Debian 12 / Rust 1.100.0, jobs=2, dev/test debug=0:
+
+| Команда/сценарий | Результат |
+|---|---|
+| `cargo test --locked --workspace` | 95 passed, 3 opt-in player-теста ignored |
+| `cargo clippy --locked --workspace --all-targets -- -D warnings` | Успешно |
+| `cargo build --locked --workspace --all-targets` | Успешно |
+| `cargo test --locked -p kadr-media --test players_smoke -- --ignored --nocapture` | 2 passed: реальные headless mpv 0.35.1 / VLC 3.0.24, собственный WAV по HTTP |
+| `cargo test --locked -p kadr-app backend::tests::real_http_mpv_resume -- --ignored --nocapture` | Passed: HTTP → реальный mpv → SQLite → новый worker → resume → с начала → quit при активном плеере |
+| `python3 scripts/smoke-x11.py target/debug/kadr-app` | Обновлённый UI: map, resize, WM_DELETE и Ctrl+Q, оба выхода 0; пиксели не утверждаются |
+| Native Wayland → nested Weston X11 → Xvfb | Подтверждены configure/attach/commit, визуально проверен настоящий экран «Источники», Ctrl+Q через compositor завершил приложение с кодом 0 |
+
+У Wayland используется `weston --backend=x11-backend.so` с реальным `wl_seat`;
+headless backend Weston 10 без seat вызывает panic внутри GPUI 0.2.2
+и не подходит для этой проверки. Обычная bare X11 клиентская область в
+доступном Xvfb/Mesa всё ещё чёрная. Native hardware desktop и macOS не
+подтверждены. Это не заменяет проверку GUI внешних плееров или декодирования
+видео: headless smoke использует собственный PCM WAV.
+
+Каталог, список библиотеки, browser launch, torrent lifecycle в UI,
+cache enforcement и сохранение видео не готовы. Полные URL в БД не хранятся:
+для продолжения нужно снова вставить ту же ссылку. Сетевые/cache настройки
+пока сохранённая конфигурация, не действующие ограничения.
+Контракты: [desktop](docs/desktop.md), [player spike](docs/player-spike.md),
+[UI shell](docs/ui-shell.md).

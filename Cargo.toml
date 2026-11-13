@@ -1,5 +1,11 @@
 [workspace]
-members = ["crates/kadr-app", "crates/kadr-core", "crates/kadr-media", "crates/kadr-storage"]
+members = [
+    "crates/kadr-app",
+    "crates/kadr-core",
+    "crates/kadr-media",
+    "crates/kadr-storage",
+    "crates/kadr-ui",
+]
 resolver = "3"
 
 [workspace.package]

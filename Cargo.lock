@@ -2897,7 +2897,16 @@ dependencies = [
 name = "kadr-app"
 version = "0.1.0"
 dependencies = [
+ "futures-channel",
+ "futures-util",
  "gpui",
+ "kadr-core",
+ "kadr-media",
+ "kadr-storage",
+ "kadr-ui",
+ "tempfile",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -2920,6 +2929,8 @@ dependencies = [
  "hyper-util",
  "libc",
  "rand 0.8.8",
+ "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
 ]
@@ -2931,6 +2942,13 @@ dependencies = [
  "directories",
  "rusqlite",
  "tempfile",
+]
+
+[[package]]
+name = "kadr-ui"
+version = "0.1.0"
+dependencies = [
+ "gpui",
 ]
 
 [[package]]
