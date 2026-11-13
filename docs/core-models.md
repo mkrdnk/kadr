@@ -4,7 +4,7 @@
 §8. It has no GPUI, async runtime, filesystem access, network requests, catalogue
 provider, torrent engine, or player process. Its only dependencies are `url`,
 `sha2` and `regex`; these versions already occur in the workspace lockfile.
-The parent workspace must add `crates/kadr-core` to its members.
+The crate is included in the root workspace and lockfile.
 
 ## Manual sources and privacy
 
@@ -171,8 +171,8 @@ transitions and unavailable telemetry.
 
 The implementation is not end-to-end acceptance of CAT-04, NET-01, PLAY-03/04/09
 or SPEC §10: no source is opened, metadata fetched, torrent parsed or player
-launched by this crate. Linux is tested; macOS runtime/CI integration remains
-with the parent workspace. No large provider/plugin/async trait framework is
+launched by this crate. Linux is tested; macOS runtime/CI remains unverified.
+No large provider/plugin/async trait framework is
 introduced before real IO adapters establish the required interfaces.
 
 ### Checks performed for this change
@@ -182,8 +182,8 @@ On Linux with Rust/Cargo 1.100.0, copied the crate to
 from the existing workspace lock. Initial standalone resolution modified only
 that scratch lock. Compared the resulting package/version set with the root:
 the only additional entry is `kadr-core 0.1.0`; no dependency versions changed.
-Root `Cargo.toml`/`Cargo.lock` were not edited, and root `libc 0.2.186` and
-`mio 1.2.4` pins were preserved.
+This initial isolated check did not edit root `Cargo.toml`/`Cargo.lock`;
+`libc 0.2.186` and `mio 1.2.4` pins were preserved during later integration too.
 
 Final checks (both Cargo commands also used `CARGO_PROFILE_DEV_DEBUG=0`,
 `CARGO_PROFILE_TEST_DEBUG=0`, `CARGO_BUILD_JOBS=2`):
@@ -194,7 +194,8 @@ Final checks (both Cargo commands also used `CARGO_PROFILE_DEV_DEBUG=0`,
 | `cargo clippy --locked --manifest-path "$DELTA_SCRATCH_DIR/core-check/Cargo.toml" --all-targets -- -D warnings` | Pass |
 | `rustfmt --edition 2024 --check crates/kadr-core/src/*.rs crates/kadr-core/tests/*.rs` | Pass on original worktree files |
 
-Whole-workspace tests/builds, `cargo fmt --all`, macOS, actual bencoded files,
-network requests and external-player runtime were **not** tested by this
-isolated crate task. After adding the workspace member, the parent should run
-the workspace's locked checks and update its implementation journal.
+Whole-workspace tests/builds and `cargo fmt --all` subsequently passed after
+integration; see [DONE.md](../DONE.md) for exact final commands/results.
+The isolated core checks above did not exercise macOS, actual bencoded files,
+network requests or external-player runtime. IO evidence belongs to the
+media/torrent/desktop checks, not these pure model tests.

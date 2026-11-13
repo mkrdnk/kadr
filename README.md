@@ -26,6 +26,8 @@ Workspace содержит:
 - `crates/kadr-core` — проверка источников, stable ID, эпизоды и состояния.
 - `crates/kadr-media` — защищённый loopback HTTP Range и mpv/VLC IPC.
 - `crates/kadr-storage` — стандартные каталоги, SQLite, настройки/история/прогресс.
+- `crates/kadr-torrent` — отдельный local-only librqbit spike: private `.torrent`,
+  loopback-пиры и передача проверенных частей через существующий Range-сервер.
 
 Контракты и команды:
 [desktop-сценарий](docs/desktop.md),
@@ -35,7 +37,8 @@ Workspace содержит:
 [модели](docs/core-models.md),
 [UI](docs/ui-shell.md).
 Исследование кандидатов BitTorrent — в
-[docs/bittorrent-spike.md](docs/bittorrent-spike.md).
+[docs/bittorrent-spike.md](docs/bittorrent-spike.md), исполняемый
+[local-only spike и измерения](docs/torrent-integration.md).
 
 ## Сборка и запуск
 
@@ -135,11 +138,13 @@ cargo test --locked --workspace
 
 ```sh
 cargo test --locked -p kadr-media --test players_smoke -- --ignored --nocapture
+cargo test --locked -p kadr-media --test video_smoke -- --ignored --nocapture
 cargo test --locked -p kadr-app backend::tests::real_http_mpv_resume -- --ignored --nocapture
 ```
 
-Они используют собственные PCM-данные и loopback, без скачивания медиа.
-Обычный `cargo test` оставляет эти три теста ignored, а не выдаёт их за
+Они используют собственные PCM-данные и сгенерированное FFmpeg MPEG4/AAC-видео,
+loopback, без скачивания медиа. Для `video_smoke` нужен также `ffmpeg`.
+Обычный `cargo test` оставляет эти четыре теста ignored, а не выдаёт их за
 подтверждённое воспроизведение.
 
 Изолированная X11 lifecycle-проверка (Xvfb/Openbox; пиксели не проверяет):
@@ -147,6 +152,16 @@ cargo test --locked -p kadr-app backend::tests::real_http_mpv_resume -- --ignore
 ```sh
 python3 scripts/smoke-x11.py target/debug/kadr-app
 ```
+
+Native Wayland через nested Weston X11 (нужен дополнительно Weston):
+
+```sh
+python3 scripts/smoke-wayland.py --binary target/debug/kadr-app --timeout 30
+```
+
+Это реальный Wayland-клиент без `DISPLAY`, не native X11 и не проверка
+hardware desktop. `--screenshot` сохраняет снимок для отдельной визуальной
+проверки и требует ImageMagick.
 
 Для `fmt` и `clippy` нужны соответствующие компоненты Rust toolchain.
 На Linux интеграционный тест запускает настоящий бинарник без дисплея

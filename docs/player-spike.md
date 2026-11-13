@@ -15,7 +15,7 @@ IO-прототип, без зависимости от `kadr-core`, GPUI, torre
 | Длительность | JSON IPC `get_property duration` | Явный `Telemetry::Unsupported` |
 | Graceful stop | JSON IPC `quit` | `oldrc` Unix socket `quit` |
 | Завершение | OS child exit / `ExitStatus` | OS child exit / `ExitStatus` |
-| Headless smoke | `--vo=null --ao=null` | `--intf=dummy --no-video --aout=dummy` |
+| Headless smoke | `--vo=null --ao=null` | `--intf=dummy --vout=dummy --aout=dummy` |
 
 `Telemetry::Seconds(f64)` — только конечное неотрицательное число, реально
 сообщённое плеером. `Unavailable` — поддерживаемое свойство пока недоступно
@@ -123,8 +123,8 @@ Ok(())
 | Среда | Фактическое свидетельство |
 |---|---|
 | Debian 12, Linux x86_64, uid 1000 | Rust/Cargo 1.100.0; Python 3.11.6 для fake process/IPC tests |
-| Debian `mpv 0.35.1`, FFmpeg `5.1.9-0+deb12u1` | Реальный headless запуск, JSON time-pos/duration, resume, HTTP Range, quit и natural EOF |
-| Debian VLC `3.0.24 Vetinari`, revision `3.0.24-rc1-0-g6de05adcba` | Реальный `oldrc` Unix socket, HTTP, start-time, quit, natural EOF; Unsupported телеметрия |
+| Debian `mpv 0.35.1`, FFmpeg `5.1.9-0+deb12u1` | Реальный headless запуск WAV и MPEG4/AAC MP4, JSON time-pos/duration, resume, HTTP Range, quit и natural EOF |
+| Debian VLC `3.0.24 Vetinari`, revision `3.0.24-rc1-0-g6de05adcba` | Реальный `oldrc` Unix socket, WAV/MP4 HTTP, start-time, quit, natural EOF; Unsupported телеметрия; установлен `vdummy` output plugin |
 | macOS | Не запускалось и не собиралось; Unix API выбран совместимым по форме, но это не runtime evidence |
 | Иные версии mpv / VLC, VLC 4, Windows | Не проверены; обещания совместимости отсутствуют |
 
@@ -134,13 +134,14 @@ executable paths/PATH, затем отдельный оконный smoke/зак
 
 ## Воспроизведение проверок
 
-После интеграции зависимостей и обновления workspace lockfile:
+Из корня интегрированного workspace:
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
 export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
 cargo test --locked -p kadr-media --all-targets
 cargo test --locked -p kadr-media --test players_smoke -- --ignored --nocapture
+cargo test --locked -p kadr-media --test video_smoke -- --ignored --nocapture
 cargo clippy --locked -p kadr-media --all-targets -- -D warnings
 cargo run --locked -p kadr-media --example player -- mpv /absolute/own.wav 2 --headless
 cargo run --locked -p kadr-media --example player -- vlc /absolute/own.wav 2 --headless
@@ -155,16 +156,19 @@ Real tests намеренно ignored: отсутствие системных �
 
 ### Локальные результаты этой реализации
 
-Чтобы не менять принадлежащий интегратору корневой `Cargo.lock` и не собирать
-GPUI, проверки выполнены на отдельной временной копии **того же `kadr-media`**
-с раскрытыми workspace package fields и скопированным lockfile. Root workspace
-команды выше — инструкция интеграции, не заявление об их прогоне здесь.
+Начальные независимые проверки, чтобы не редактировать общий `Cargo.lock`
+параллельно и не собирать GPUI повторно, выполнены на временной копии
+**того же `kadr-media`** с раскрытыми workspace package fields и скопированным
+lockfile. После интеграции прошли и корневые workspace-команды; точные итоговые
+результаты приведены в [DONE.md](../DONE.md). Ниже — отдельное первоначальное
+свидетельство, а не подмена workspace-прогона.
 Фактический manifest: `$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml`.
 
 | Точная команда (с env выше) | Результат |
 |---|---|
-| `cargo test --offline --manifest-path "$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml" --all-targets` | 41 passed (7 unit, 20 HTTP, 14 player), 2 real smoke ignored; оба examples собраны |
+| `cargo test --offline --manifest-path "$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml" --all-targets` | 41 passed (7 unit, 20 HTTP, 14 player), 3 real smoke ignored; оба examples собраны |
 | `cargo test --offline --manifest-path "$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml" --test players_smoke -- --ignored --nocapture` | 2 passed: реальные mpv/VLC, в том числе HTTP/resume/stop/EOF |
+| `cargo test --offline --manifest-path "$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml" --test video_smoke -- --ignored --nocapture` | 1 passed: новый MP4 video test, оба реальных плеера, HTTP bytes/Range/resume/stop/EOF |
 | `cargo clippy --offline --manifest-path "$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml" --all-targets -- -D warnings` | Passed |
 | `rustfmt --check --edition 2024 crates/kadr-media/src/players.rs crates/kadr-media/tests/players.rs crates/kadr-media/tests/players_smoke.rs crates/kadr-media/examples/player.rs` | Passed |
 | `cargo run --offline --quiet --manifest-path "$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml" --example player -- mpv "$DELTA_SCRATCH_DIR/own-vlc.wav" 7 --headless` (затем та же команда с `vlc`) | Оба exit 0, source path не печатается |
@@ -177,6 +181,55 @@ IPC EOF перед child exit, connect timeout, cancellation и отбрасыв
 launch/snapshot/stop, noisy stdio, graceful quit → kill, process reap,
 natural nonzero exit, missing executable и cleanup socket directory.
 
+## Дополнение: собственное тестовое видео MPEG4/AAC MP4
+
+`crates/kadr-media/tests/video_smoke.rs` добавляет отдельный opt-in video smoke.
+Fixture генерируется установленным FFmpeg argv, без shell, сети и чужих файлов:
+
+```sh
+ffmpeg -nostdin -hide_banner -loglevel error \
+  -filter_threads 1 -filter_complex_threads 1 \
+  -f lavfi -i testsrc2=size=320x180:rate=24 \
+  -f lavfi -i sine=frequency=440:sample_rate=48000 \
+  -t 8 -c:v mpeg4 -q:v 4 -threads:v 2 \
+  -c:a aac -b:a 64k -threads:a 1 -movflags +faststart \
+  "/temporary/private-directory/own test video.mp4"
+```
+
+Генерация ограничена 20 s, при timeout FFmpeg убивается и собирается.
+В проверенном окружении получен MP4 размером 954923 bytes. Существующий
+tokenized HTTP server обслуживает его через обёртку `ByteSource`, которая
+сверяет каждый прочитанный участок с оригинальными bytes и записывает offsets.
+Отдельный реальный HTTP-запрос `Range: bytes=65549-98319` проверяет статус 206,
+точный `Content-Range` и побайтовое равенство выбранного диапазона.
+Статистика этого запроса очищается **до** запуска плеера: он не может
+подменить доказательство, что сам плеер действительно читал MP4.
+
+Для каждого плеера проверены:
+
+1. Resume с 2 s, чтение настоящих MP4 bytes, процесс остаётся жив и завершается
+   через явный `stop()` с кодом 0.
+2. Resume с 6 s, natural EOF с кодом 0 раньше шести секунд wall time —
+   быстрее, чем полное восьмисекундное воспроизведение без resume.
+3. Для mpv — измеренная позиция и длительность до stop/EOF. В фактическом
+   прогоне: `2.000 / 8.000 s` и `6.042 / 8.000 s`.
+4. Для VLC — по-прежнему `Unsupported` position/duration. Wall time служит
+   только грубой проверкой resume, не сохраняется как прогресс.
+
+В Linux-прогоне каждый плеер прочитал не меньше 954923 проверенных bytes;
+mpv при позднем resume повторно читал части файла (1274278 bytes суммарно).
+Это не утверждение о конкретной стратегии запросов плеера: media seek может
+использовать prefetched bytes. HTTP seek доказывается отдельной проверкой
+точного 206, а восстановленная media position — настоящей телеметрией mpv.
+
+VLC headless больше не использует `--no-video`: включён video track с
+`--vout=dummy`, а dummy main interface и audio output сохранены. Таким образом
+тест не отключает video pipeline ради одного аудио. Это не измерение
+отрисованного кадра, визуального качества, A/V sync или torrent playback.
+macOS video smoke не запускался; список проверенных codec/container пока
+ограничен одним сгенерированным MPEG4/AAC MP4 и прежним PCM WAV.
+
 Остаются: macOS evidence, графические Linux Wayland/X11/macOS проверки,
-реальные video/container/codec fixtures, durable history, выбор production
-VLC интерфейса и упаковка. Полные workspace/GPUI проверки здесь не запускались.
+более широкий corpus video/container/codec fixtures, durable history,
+выбор production VLC интерфейса и упаковка.
+Полные workspace/GPUI проверки здесь не запускались.

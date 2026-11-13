@@ -30,10 +30,20 @@ pub struct Desktop {
     source: Option<ManualSource>,
     ready: bool,
     active: bool,
+    player: PlayerPreference,
     source_requests: SourceRequests,
 }
 
 impl Desktop {
+    fn playback_available(&self) -> bool {
+        self.ready
+            && self.player != PlayerPreference::Browser
+            && self
+                .source
+                .as_ref()
+                .is_some_and(|source| source.http_url().is_some())
+    }
+
     pub fn join(&mut self) -> bool {
         self.backend.join()
     }
@@ -46,6 +56,7 @@ pub fn attach(view: &Entity<KadrView>, cx: &mut App) -> std::io::Result<Rc<RefCe
         source: None,
         ready: false,
         active: false,
+        player: PlayerPreference::Mpv,
         source_requests: SourceRequests::default(),
     }));
     let state = desktop.clone();
@@ -177,14 +188,20 @@ pub fn attach(view: &Entity<KadrView>, cx: &mut App) -> std::io::Result<Rc<RefCe
         while let Some(event) = events.next().await {
             let Ok(()) = view.update(cx, |view, cx| match event {
                 Event::Ready(player) => {
-                    state.borrow_mut().ready = true;
+                    {
+                        let mut state = state.borrow_mut();
+                        state.ready = true;
+                        state.player = player;
+                    }
                     view.set_default_player(choice(player), cx);
                     view.set_preferences_status("Настройки сохраняются в SQLite. Сеть BitTorrent в UI ещё не запускается.", cx);
                     view.set_status(UiStatus::info("Готово. Вставьте HTTP(S)-ссылку в разделе «Источники»."), cx);
-                    view.set_playback_available(state.borrow().source.as_ref().is_some_and(|s| s.http_url().is_some()), cx);
+                    view.set_playback_available(state.borrow().playback_available(), cx);
                 }
                 Event::PreferenceSaved(player) => {
+                    state.borrow_mut().player = player;
                     view.set_default_player(choice(player), cx);
+                    view.set_playback_available(state.borrow().playback_available(), cx);
                     view.set_preferences_status("Выбор плеера сохранён. Активный плеер не переключается.", cx);
                 }
                 Event::PlaybackActive(active) => {
@@ -251,7 +268,7 @@ fn select_source(
             state.source = Some(source);
             view.update(cx, |view, cx| {
                 view.set_source_preview(Some(SourcePreview { kind, title: title.into() }), cx);
-                view.set_playback_available(state.ready && http, cx);
+                view.set_playback_available(state.playback_available(), cx);
                 view.show_section(Section::Sources, cx);
                 view.set_status(
                     if http {

@@ -38,7 +38,7 @@ jobs:
             libxcb-randr0-dev libxcb-xfixes0-dev libxcb-shape0-dev \
             libxcb-sync-dev libxcb-render0-dev libxcb-render-util0-dev \
             libxcb-composite0-dev libxcb-damage0-dev libxcb-present-dev \
-            libvulkan1 mesa-vulkan-drivers xvfb openbox xdotool wmctrl \
+            libvulkan1 mesa-vulkan-drivers xvfb openbox weston xdotool wmctrl \
             fonts-dejavu-core
       - name: Select full Xcode
         if: runner.os == 'macOS'
@@ -54,3 +54,6 @@ jobs:
       - name: Native X11 lifecycle smoke
         if: runner.os == 'Linux'
         run: python3 scripts/smoke-x11.py target/debug/kadr-app
+      - name: Native Wayland lifecycle in nested Weston
+        if: runner.os == 'Linux'
+        run: python3 scripts/smoke-wayland.py --binary target/debug/kadr-app --timeout 30

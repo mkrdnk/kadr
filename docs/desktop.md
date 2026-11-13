@@ -70,6 +70,7 @@ VLC 3 RC не предоставляет используемому протот
 ```sh
 cargo test --locked --workspace
 cargo test --locked -p kadr-media --test players_smoke -- --ignored --nocapture
+cargo test --locked -p kadr-media --test video_smoke -- --ignored --nocapture
 cargo test --locked -p kadr-app backend::tests::real_http_mpv_resume -- --ignored --nocapture
 ```
 
@@ -78,7 +79,9 @@ timeout, process reaping, настройки и отказ storage. Opt-in smoke
 собственный PCM WAV через существующий bearer HTTP-сервер. Сценарий worker
 подтверждает реальное mpv-измерение → SQLite → новый worker → resume → явный
 restart с начала → завершение при активном плеере. Это не тест декодирования
-видео, GUI внешнего плеера или macOS.
+видео, GUI внешнего плеера или macOS. Отдельный opt-in `video_smoke` генерирует
+собственное MPEG4/AAC MP4 средствами FFmpeg и подтверждает headless HTTP-
+воспроизведение в обоих плеерах; визуальные кадры и A/V sync он не проверяет.
 
 Сетевые/cache настройки пока являются сохранённой конфигурацией, не
 реализованным enforcement. Desktop торрент-сеть не запускает, временный

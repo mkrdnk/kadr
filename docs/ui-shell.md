@@ -128,12 +128,12 @@ rustc --edition=2024 --test crates/kadr-ui/src/model.rs -o /tmp/kadr-ui-model-te
 /tmp/kadr-ui-model-tests
 ```
 
-После добавления крейта в корневой workspace владельцем интеграции:
+В корневом workspace:
 
 ```sh
-cargo test -p kadr-ui
-cargo check --workspace --all-targets
-cargo clippy --workspace --all-targets -- -D warnings
+cargo test --locked -p kadr-ui
+cargo check --locked --workspace --all-targets
+cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
@@ -144,3 +144,39 @@ cargo fmt --all -- --check
 Обычный unit-test не подтверждает графический рендер, keyboard focus, clipboard,
 диалоги или Linux/macOS runtime — эти проверки должны быть выполнены в
 интегрированном приложении на соответствующей платформе.
+
+### Воспроизводимый native Wayland lifecycle на Linux
+
+`scripts/smoke-wayland.py` запускает отдельные Xvfb (1280×900), Openbox и
+Weston с X11 backend, затем **native Wayland** клиент kadr. X11 backend нужен
+только внешнему Weston: он предоставляет `wl_seat`, которого нет у простого
+headless backend. Самому kadr передаются `WAYLAND_DISPLAY` и `WAYLAND_DEBUG=1`,
+а `DISPLAY` удаляется, чтобы X11 fallback не мог дать ложный успех.
+
+Предварительно нужны установленный Python 3, `Xvfb`, `openbox`, `weston`
+с `x11-backend.so`, `xdotool` и уже собранный бинарник приложения.
+Для опционального снимка нужен ImageMagick `import`.
+
+```sh
+python3 scripts/smoke-wayland.py --binary target/debug/kadr-app --screenshot
+# Необязательно: --artifacts /tmp/kadr-wayland-check-unique --timeout 30
+```
+
+Скрипт сам ничего не собирает. Он создаёт приватный `XDG_RUNTIME_DIR` с правами
+0700 и отдельные HOME/XDG config/data/cache/state, не читая рабочую библиотеку
+или настройки пользователя. Xvfb выбирает свободный display через `-displayfd`.
+Все ожидания ограничены по времени; `try/finally` останавливает группы процессов
+и собирает дочерние процессы при успехе, ошибке и прерывании.
+
+Автоматические утверждения: клиент получил Wayland configure, прикрепил
+ненулевой `wl_buffer` и выполнил commit; после активации окна Weston и отправки
+Ctrl+Q приложение вышло с кодом 0; в trace нет panic/runtime/protocol failure.
+Логи сохраняются в напечатанном каталоге artifacts; `--artifacts` требует новый
+каталог, чтобы не перезаписывать предыдущий результат. Временные пользовательские
+данные и runtime удаляются при завершении.
+
+Опция `--screenshot` сохраняет `native-wayland.png` для **ручного** просмотра.
+Наличие protocol trace или PNG само по себе не доказывает правильность пикселей,
+раскладку всех экранов, работу ввода источника или воспроизведения. Это проверка
+старта, native Wayland buffer lifecycle и штатного выхода, не полная графическая
+приёмка. Она также не заменяет отдельную X11-проверку или macOS smoke.

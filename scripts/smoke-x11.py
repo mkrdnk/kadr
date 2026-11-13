@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import select
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -90,7 +91,11 @@ def main():
             parser.error(f"Missing executable: {command}")
     screenshot = args.screenshot.resolve() if args.screenshot else None
     env = os.environ.copy()
-    for key in ("WAYLAND_DISPLAY", "ZED_HEADLESS"):
+    for key in (
+        "WAYLAND_DISPLAY", "WAYLAND_SOCKET", "WAYLAND_DEBUG", "ZED_HEADLESS",
+        "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "DBUS_STARTER_ADDRESS",
+        "DBUS_STARTER_BUS_TYPE", "AT_SPI_BUS_ADDRESS",
+    ):
         env.pop(key, None)
     with tempfile.TemporaryDirectory(prefix="kadr-x11-") as directory:
         logs = Path(directory)
@@ -100,6 +105,7 @@ def main():
         env.update(
             HOME=str(logs), XDG_CONFIG_HOME=str(logs / "config"),
             XDG_DATA_HOME=str(logs / "data"), XDG_CACHE_HOME=str(logs / "cache"),
+            XDG_STATE_HOME=str(logs / "state"),
             XDG_RUNTIME_DIR=str(runtime),
         )
         read_fd, write_fd = os.pipe()
@@ -136,5 +142,14 @@ def main():
                 os.close(write_fd)
 
 
+def interrupt(signum, frame):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise KeyboardInterrupt
+
+
 if __name__ == "__main__":
-    main()
+    signal.signal(signal.SIGTERM, interrupt)
+    try:
+        main()
+    except KeyboardInterrupt:
+        raise SystemExit(130)

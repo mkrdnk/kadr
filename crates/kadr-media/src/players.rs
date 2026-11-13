@@ -172,7 +172,7 @@ impl PlayerSession {
                     command.arg(format!("--start-time={start}"));
                 }
                 if options.headless {
-                    command.args(["--intf=dummy", "--no-video", "--aout=dummy"]);
+                    command.args(["--intf=dummy", "--vout=dummy", "--aout=dummy"]);
                 }
             }
         }

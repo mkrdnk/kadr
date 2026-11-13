@@ -166,7 +166,7 @@ OS access controls and backup policy still matter.
 
 ## Tests and remaining scope
 
-After parent workspace/lockfile integration:
+From the integrated root workspace:
 
 ```sh
 CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
@@ -184,14 +184,16 @@ ordering, clearing playback data, private debug/errors and Unix permissions.
 Linux path discovery is checked against the current XDG environment without
 mutating global environment variables.
 
-The implementation was tested as a standalone copy on Linux to avoid editing
-the parent's root manifest/lockfile or building GPUI. Workspace graph/lockfile
-integration and macOS runtime validation remain the parent's responsibility.
+Initial implementation checks used a standalone copy on Linux to avoid
+concurrent root lockfile edits and a duplicate GPUI build. The crate is now
+integrated and the root workspace checks passed; see [DONE.md](../DONE.md).
+macOS runtime validation remains open.
 The documented macOS paths follow the directory library's platform mapping;
 they have not been exercised on macOS here.
 
 Not implemented: cache entries/LRU/eviction or actual rate enforcement; active/
 saved-file protection; interruption-safe media copying; catalog metadata/title
 storage; persistent source descriptors; path override UI/moves; migration backup
-or repair UI; async command queue; paginated favorites; encryption. In particular
+or repair UI; an async storage API (the desktop owns its worker/command queue);
+paginated favorites; encryption. In particular
 the configured cache bound alone does **not** complete P4's bounded-cache work.

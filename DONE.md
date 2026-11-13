@@ -347,3 +347,58 @@ upstream tasks. Symlink preflight не защищает от TOCTOU. На каж
 создаётся stream, а lookahead управляется librqbit; production scheduler
 и throughput ещё требуют измерений. Полный P0 BitTorrent (Linux/macOS)
 и P2 end-to-end torrent video пока не закрыты.
+
+## Итерация 8 — видео, графический smoke и итоговая проверка
+
+- Новый opt-in `video_smoke` создаёт собственное восьмисекундное MPEG4/AAC
+  MP4 через FFmpeg, проверяет точные source bytes и unaligned HTTP `206`,
+  затем реальные headless mpv/VLC: resume, stop и natural EOF.
+  VLC headless теперь использует dummy video output, а не отключение видео.
+  Визуальный первый кадр и A/V sync этим не утверждаются.
+- Добавлен воспроизводимый `scripts/smoke-wayland.py`: приватные HOME/XDG,
+  Xvfb + Openbox + Weston X11, app без `DISPLAY`, проверка configure →
+  non-null attach → commit, Ctrl+Q exit 0 и cleanup process groups.
+  Это native Wayland-клиент в nested compositor, не hardware desktop.
+- Проверены указателем все пять разделов. Выбор Browser сохранён в реальной
+  SQLite и остался выбран после перезапуска; предупреждение отображается.
+  Неподключённый browser launch теперь отключает Play, а не только показывает
+  ошибку после нажатия. Сворачивание/остановка описаны в Настройках.
+- CI дополнен nested Wayland lifecycle; оба Linux smoke изолированы от
+  пользовательских настроек. GitHub Actions и macOS ещё не запускались.
+
+**Итоговый прогон текущего workspace, Debian 12 x86_64 / Rust 1.100.0:**
+`CARGO_BUILD_JOBS=2`, `CARGO_PROFILE_DEV_DEBUG=0`, `CARGO_PROFILE_TEST_DEBUG=0`.
+
+| Проверка | Итог |
+|---|---|
+| `cargo fmt --all -- --check` | Успешно |
+| `cargo test --locked --workspace` | **103 passed, 4 opt-in tests ignored**, без ошибок |
+| `cargo check --locked --workspace --all-targets` | Успешно |
+| `cargo clippy --locked --workspace --all-targets -- -D warnings` | Успешно |
+| `cargo build --locked --workspace --all-targets` | Успешно |
+| `cargo test --locked --workspace -- --ignored` | **Все 4 passed**: два real-player WAV smoke, generated MP4 smoke и HTTP/mpv/SQLite/restart/resume |
+| `python3 scripts/smoke-x11.py target/debug/kadr-app` | Map, resize, WM_DELETE и Ctrl+Q, оба выхода 0; bare X11 pixels по-прежнему не подтверждены |
+| `python3 scripts/smoke-wayland.py --binary target/debug/kadr-app --screenshot --timeout 30 --artifacts target/smoke-wayland-final` | Protocol + Ctrl+Q exit 0; итоговый снимок «Источников» визуально проверен |
+| Сборка `local_torrent --help` и отдельный запуск готового CLI | Собственная private-раздача: точные 28 000 байт `206`, SIGINT exit 0, HTTP порт закрыт; нет URL/output path в stderr |
+| Python AST parse обоих smoke-скриптов, `git diff --check` | Успешно |
+
+Сохраняется внешнее future-incompatibility предупреждение
+`proc-macro-error2 2.0.1`; текущие check/build/Clippy проходят.
+Ручная проверка Tab/Shift-Tab/Enter/Space, file picker и настоящего
+GUI-воспроизведения плееров не выполнялась. Изменения не опубликованы
+на remote и не являются релизом.
+
+### Следующий последовательный этап
+
+1. Закрыть macOS build/runtime и bare X11 rendering; CI-матрица пока только
+   добавлена, а не подтверждена удалённым запуском.
+2. Спроектировать и проверить cache ownership/budget/LRU и symlink-safe
+   filesystem IO до подключения публичных торрент-сессий; сохранённые
+   network/cache settings пока нельзя выдавать за enforcement.
+3. Подключить torrent metadata/file selection к UI, согласовать контролируемый
+   lifecycle и приоритеты для файлов больше lookahead, проверить собственное
+   torrent-видео до завершения загрузки и seek во внешнем плеере.
+4. Подключить список библиотеки, связь с каталогом и browser-local-stream
+   lifecycle. Выбрать разрешённые metadata/source API и правила атрибуции.
+5. Затем выполнять сквозные P3/P4 сценарии и упаковку; Flatpak/AppImage/DMG,
+   подпись/notarization и все 13 критериев приёмки ещё не закрыты.
