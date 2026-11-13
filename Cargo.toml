@@ -4,6 +4,7 @@ members = [
     "crates/kadr-core",
     "crates/kadr-media",
     "crates/kadr-storage",
+    "crates/kadr-torrent",
     "crates/kadr-ui",
 ]
 resolver = "3"

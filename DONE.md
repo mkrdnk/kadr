@@ -295,3 +295,55 @@ cache enforcement и сохранение видео не готовы. Полн
 пока сохранённая конфигурация, не действующие ограничения.
 Контракты: [desktop](docs/desktop.md), [player spike](docs/player-spike.md),
 [UI shell](docs/ui-shell.md).
+
+## Итерация 7 — исполняемый BitTorrent spike
+
+Добавлен `kadr-torrent` с `librqbit = 9.1.0`: только собственные private
+`.torrent` и явные loopback-пиры, без DHT, tracker announces, LSD и UPnP.
+Production-движком он пока не объявляется. Адаптер выбранного файла реализует
+существующий `ByteSource`, отдаёт только проверенные части через прежний
+bearer HTTP Range-сервер. Источник не ждёт полного скачивания, независимые
+positional reads не разделяют seek cursor.
+
+Тестовая multi-file раздача генерируется из собственных байтов, две части
+у seed заведомо повреждены/недоступны. Это детерминированно проверяет чтение
+до завершения, а не гонку с быстрым полным скачиванием. Проверены metadata,
+начальные/средние/конечные и конкурентные Range, перемотка назад/вперёд,
+ожидание missing pieces, disconnect/timeout/HTTP shutdown/torrent stop,
+освобождение listener и ошибки инициализации. До записи отклоняются
+неподходящие peers и существующие symlink-компоненты в output.
+
+Два дополнительных результата независимого ревью:
+
+- Upstream error chains могли раскрывать абсолютный output path и имя файла.
+  Теперь ошибки парсинга/файлов/stream/seek/read заменяются безопасными
+  stage-сообщениями, `TorrentFile::Debug` скрывает имя. Регрессия воспроизводит
+  настоящую коллизию файла с каталогом и проверяет все варианты formatting.
+  Статистика также возвращается собственным numeric-only `TorrentCounters`:
+  upstream fatal-error strings с именами файлов не передаются наружу.
+- `disable_trackers`/`TcpOnly` **не** выключают скрытый wildcard IPv6 UDP
+  tracker socket librqbit. Все sockets дополнительно привязаны к `lo`
+  (Linux) / `lo0` (macOS) через upstream interface binding. При ошибке нет
+  unrestricted fallback. Linux-тест в отдельном процессе проверяет
+  `SO_BINDTODEVICE` реальных TCP и UDP sockets, не только TCP address.
+  Проверка без root успешна; macOS-вариант конфигурации пока не проверен.
+
+В workspace на Linux в составе `cargo test --locked --workspace` прошли
+8 torrent-тестов (2 unit, 5 loopback/privacy/path и 1 network-confinement);
+`cargo clippy --locked --workspace --all-targets -- -D warnings` — успешно.
+После добавления зависимостей сохранены `libc 0.2.186` и `mio 1.2.4`.
+Окружение проверок: Rust 1.100.0, jobs=2, dev/test debug=0.
+
+В [docs/torrent-integration.md](docs/torrent-integration.md) зафиксированы
+API, воспроизводимые команды, исходные Linux-измерения и provisional ADR.
+В одном локальном прогоне first verified 1024 B после init — 43.304 ms,
+HTTP Range с полным чтением ответа — 0.526–9.837 ms; это маленький fixture,
+часть данных уже в кэше, **не SLO** и не доказательство оптимального
+порядка piece-запросов. Upstream stop включает паузу около одной секунды.
+
+Ограничения: нет magnet metadata exchange, публичного swarm, UI-интеграции,
+сетевых/cache лимитов, LRU, постоянного сохранения или гарантии join всех
+upstream tasks. Symlink preflight не защищает от TOCTOU. На каждый read
+создаётся stream, а lookahead управляется librqbit; production scheduler
+и throughput ещё требуют измерений. Полный P0 BitTorrent (Linux/macOS)
+и P2 end-to-end torrent video пока не закрыты.
