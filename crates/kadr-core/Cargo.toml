@@ -1,0 +1,10 @@
+[package]
+name = "kadr-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+regex = "1.13.1"
+sha2 = "0.10.9"
+url = "2.5.8"
