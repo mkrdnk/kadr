@@ -78,27 +78,31 @@ jobs:
       - run: cargo check --locked --workspace --all-targets
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
-      - run: cargo build --locked --workspace --all-targets
+      - id: build
+        run: cargo build --locked --workspace --all-targets
       - name: Real HTTP torrent playback and permanent-save acceptance
         run: cargo test --locked -p kadr-app backend::tests::real_ -- --ignored --test-threads=1
+      # Runtime checks are independent; collect all failures, never turn them
+      # into a pass. The candidates job still requires the entire matrix green.
       - name: Real mpv and VLC playback
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
           cargo test --locked -p kadr-media --test players_smoke -- --ignored
           cargo test --locked -p kadr-media --test video_smoke -- --ignored
       - name: Native X11 lifecycle smoke
-        if: runner.os == 'Linux'
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && runner.os == 'Linux' }}
         run: python3 scripts/smoke-x11.py target/debug/kadr-app
       - name: Native Wayland lifecycle in nested Weston
-        if: runner.os == 'Linux'
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && runner.os == 'Linux' }}
         run: python3 scripts/smoke-wayland.py --binary target/debug/kadr-app --timeout 30
       - name: Rendered native X11 acceptance
-        if: runner.os == 'Linux'
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && runner.os == 'Linux' }}
         run: python3 scripts/smoke-xorg.py --binary target/debug/kadr-app --artifacts target/smoke-xorg
       - name: Native macOS rendering and lifecycle
-        if: runner.os == 'macOS'
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && runner.os == 'macOS' }}
         run: python3 scripts/smoke-macos.py --binary target/debug/kadr-app --artifacts target/smoke-macos --screenshot
       - name: Build and open macOS DMG
-        if: runner.os == 'macOS'
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && runner.os == 'macOS' }}
         env:
           # Local unsigned mount/render QA only; no artifact upload/publication.
           KADR_ALLOW_INCOMPLETE_NOTICES: '1'

@@ -948,7 +948,7 @@ fn metainfo(files: &[(&str, Vec<u8>)], private: bool) -> Vec<u8> {
     out
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum HttpBehavior {
     Stable,
     IgnoresRanges,
@@ -1426,10 +1426,9 @@ fn real_http_fallback_saves_origins_without_validators_or_range_support() {
         measured(&storage, &target, 1.0);
         let destination = root.join("permanent.mp4");
         app.command(Command::SaveTo(destination.clone()));
-        eventually(
-            WAIT,
-            "whole-response save commits without Range or ETag",
-            || storage.saved_file(&target).unwrap().is_some(),
+        app.wait(
+            &format!("whole-response save commits without Range or ETag ({behavior:?})"),
+            |_| storage.saved_file(&target).unwrap().is_some(),
         );
         assert_eq!(fs::read(&destination).unwrap(), bytes);
         app.stopped();
