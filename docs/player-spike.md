@@ -183,7 +183,7 @@ lockfile. После интеграции прошли и корневые works
 
 | Точная команда (с env выше) | Результат |
 |---|---|
-| `cargo test --offline --manifest-path "$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml" --all-targets` | 46 passed (7 unit, 20 HTTP, 19 player), 3 real smoke ignored; оба examples собраны |
+| `cargo test --offline --manifest-path "$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml" --all-targets` | 46 passed (8 unit, 20 HTTP, 18 player), 3 real smoke ignored; оба examples собраны |
 | `cargo test --offline --manifest-path "$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml" --test players_smoke -- --ignored --nocapture` | 2 passed: реальные mpv/VLC, HTTP/resume/stop/EOF; mpv completed true только по EOF event, explicit stop false |
 | `cargo test --offline --manifest-path "$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml" --test video_smoke -- --ignored --nocapture` | 1 passed: MP4 video test, оба реальных плеера, HTTP bytes/Range/resume/stop/EOF; mpv actual EOF completion, VLC false |
 | `cargo clippy --offline --manifest-path "$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml" --all-targets -- -D warnings` | Passed |
@@ -201,6 +201,10 @@ EOF-regressions также различают настоящие события 
 request ID или в очереди после child exit), quit/error/exit0 без EOF,
 position==duration, unrelated events, partial JSON, отменённый drain и flood,
 за которым EOF выходит за суммарный бюджет чтения.
+Flood-regression использует `UnixStream::pair` и конкурентные Tokio writer/reader:
+проверяются ровно 64 KiB прочитанных bytes и оставшийся за бюджетом EOF.
+Тест не предполагает, что producer может записать весь flood до начала чтения:
+это зависит от размера kernel socket buffers и не выполняется на Darwin.
 
 ## Дополнение: собственное тестовое видео MPEG4/AAC MP4
 

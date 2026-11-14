@@ -48,8 +48,6 @@ if mode.startswith('queued_'):
     time.sleep(0.05)
     if mode == 'queued_partial':
         c.sendall(b'{{"event":"end-file","reason":"eof"')
-    elif mode == 'queued_flood':
-        c.sendall(b'{{"event":"tick"}}\n' * 5000 + b'{{"event":"end-file","reason":"eof"}}\n')
     elif mode != 'queued_exit0':
         reason = dict(queued_eof='eof', queued_quit='quit', queued_error='error', queued_nonzero='error')[mode]
         c.sendall(json.dumps(dict(event='end-file', reason=reason)).encode() + b'\n')
@@ -542,39 +540,6 @@ async fn queued_eof_is_drained_after_child_exit_but_quit_error_or_zero_exit_are_
         );
         session.stop().await.unwrap();
     }
-}
-
-#[tokio::test]
-async fn exit_drain_has_an_aggregate_budget_and_never_skips_a_flood_to_find_eof() {
-    let fake = Fake::new("queued_flood");
-    let mut session = fake.launch(PlayerKind::Mpv).await;
-    timeout(Duration::from_secs(2), async {
-        while session.try_wait().unwrap().is_none() {
-            sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
-    let snapshot = timeout(
-        Duration::from_millis(300),
-        session.snapshot(&CancellationToken::new()),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert!(
-        !snapshot.completed,
-        "EOF beyond drain budget was not observed"
-    );
-    assert!(
-        !session
-            .snapshot(&CancellationToken::new())
-            .await
-            .unwrap()
-            .completed,
-        "partial drain must close IPC rather than reuse its suffix"
-    );
-    session.stop().await.unwrap();
 }
 
 #[tokio::test]

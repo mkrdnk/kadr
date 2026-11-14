@@ -337,18 +337,7 @@ impl PlayerSession {
             return;
         };
         let deadline = self.command_timeout.min(Duration::from_millis(100));
-        let drain = async {
-            // Aggregate cap, not merely a per-line cap: an inherited socket or
-            // queued event flood cannot consume unbounded input after exit.
-            let mut remaining = MAX_REPLY;
-            while remaining > 0 {
-                let Ok((event, consumed)) = read_json_line(&mut socket, remaining).await else {
-                    break;
-                };
-                remaining -= consumed;
-                self.completed |= is_mpv_eof(&event);
-            }
-        };
+        let drain = drain_mpv_events(&mut socket, &mut self.completed);
         tokio::select! {
             biased;
             () = cancel.cancelled() => {}
@@ -481,6 +470,20 @@ fn shared_player_directory() -> io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Aggregate cap, not merely a per-line cap: an inherited socket or queued
+/// event flood cannot consume unbounded input after exit. The caller also
+/// applies its deadline and discards the stream, including on future drop.
+async fn drain_mpv_events(socket: &mut UnixStream, completed: &mut bool) {
+    let mut remaining = MAX_REPLY;
+    while remaining > 0 {
+        let Ok((event, consumed)) = read_json_line(socket, remaining).await else {
+            break;
+        };
+        remaining -= consumed;
+        *completed |= is_mpv_eof(&event);
+    }
+}
+
 // Deliberately do not buffer beyond a reply's newline. This keeps future-drop
 // semantics simple, and caps a single event/reply independently of peer input.
 async fn read_json_line(socket: &mut UnixStream, limit: usize) -> io::Result<(Value, usize)> {
@@ -525,4 +528,43 @@ fn ipc_unavailable() -> io::Error {
         io::ErrorKind::NotConnected,
         "player IPC is no longer usable",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn exit_drain_consumes_exactly_its_budget_and_leaves_later_eof_unobserved() {
+        let (mut reader, mut writer) = UnixStream::pair().unwrap();
+        let mut payload = b"{\"event\":\"tick\"}\n".repeat(5000);
+        payload.extend_from_slice(b"{\"event\":\"end-file\",\"reason\":\"eof\"}\n");
+        assert!(payload.len() > MAX_REPLY);
+        let expected_remainder = payload[MAX_REPLY..].to_vec();
+
+        // Writer and reader must progress concurrently. Waiting for a producer
+        // to exit first assumes its whole flood fits in the kernel socket
+        // buffer, which is not true on Darwin (or for smaller Linux buffers).
+        let send = async move {
+            writer.write_all(&payload).await.unwrap();
+            writer.shutdown().await.unwrap();
+        };
+        let receive = async move {
+            let mut completed = false;
+            drain_mpv_events(&mut reader, &mut completed).await;
+            assert!(!completed, "EOF beyond the aggregate budget was not read");
+
+            // This checks the byte budget directly, not merely a timeout or
+            // the false flag: neither early return nor over-read can pass.
+            // Production discards this stream rather than reusing the suffix.
+            let mut remainder = Vec::new();
+            reader.read_to_end(&mut remainder).await.unwrap();
+            assert_eq!(remainder, expected_remainder);
+        };
+        timeout(Duration::from_secs(2), async {
+            tokio::join!(send, receive);
+        })
+        .await
+        .expect("concurrent socket producer and consumer must finish");
+    }
 }

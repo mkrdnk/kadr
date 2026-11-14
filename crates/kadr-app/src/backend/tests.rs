@@ -746,6 +746,131 @@ fn clearing_history_preserves_favorites_saved_files_and_reopen_identity() {
     assert!(storage.saved_file(&target).unwrap().is_some());
 }
 
+#[test]
+fn library_item_without_source_cannot_revive_the_previously_selected_input() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = paths(directory.path());
+    let mut storage = Storage::open_default(&paths).unwrap();
+    let favorite = MediaId::new("local:favorite-without-source").unwrap();
+    storage.set_favorite(&favorite, true).unwrap();
+    drop(storage);
+    let mut app = App::start(&paths);
+    let mut settings = app.ready();
+    app.command(Command::SelectSource(
+        ManualSource::parse_link("https://example.invalid/old.mp4").unwrap(),
+    ));
+    app.selected();
+    app.command(Command::OpenLibrary(favorite.as_str().to_owned()));
+    app.wait("library explicitly reports no source", |event| {
+        matches!(
+            event,
+            Event::LibraryOpened {
+                source_available: false
+            }
+        )
+    });
+    settings.default_player = PlayerPreference::Vlc;
+    app.command(Command::UpdateSettings(settings));
+    app.wait(
+        "settings cannot re-enable the unrelated old input",
+        |event| {
+            assert!(!matches!(
+                event,
+                Event::SourceSelected { playable: true, .. }
+            ));
+            matches!(event, Event::CacheUsage(_))
+        },
+    );
+    app.finish();
+}
+
+#[test]
+fn selecting_another_library_torrent_file_recomputes_its_episode_target() {
+    use kadr_torrent::engine::EngineOptions;
+    let directory = tempfile::tempdir().unwrap();
+    let paths = paths(directory.path());
+    let torrent = directory.path().join("owned.torrent");
+    fs::write(
+        &torrent,
+        metainfo(
+            &[
+                ("Own.S01E01.mp4", vec![1; 2 * 1024 * 1024]),
+                ("Own.S01E02.mp4", vec![2; 2 * 1024 * 1024]),
+            ],
+            true,
+        ),
+    )
+    .unwrap();
+    let descriptor = StoredSource::TorrentFile {
+        path: torrent,
+        file_id: Some(0),
+    };
+    let source = descriptor.manual_source().unwrap();
+    let id = MediaId::new("tvmaze:999").unwrap();
+    let first = PlaybackTarget {
+        media_id: id.clone(),
+        episode: Some(EpisodeKey::new(1, 1).unwrap()),
+    };
+    let second = PlaybackTarget {
+        media_id: id,
+        episode: Some(EpisodeKey::new(1, 2).unwrap()),
+    };
+    let mut storage = Storage::open_default(&paths).unwrap();
+    let mut settings = storage.load_settings().unwrap();
+    settings.network.torrents_enabled = true;
+    settings.cache_limit_bytes = 1024 * 1024; // Never reach network/player startup.
+    storage.save_settings(&settings).unwrap();
+    storage
+        .save_source(&descriptor.source_id().unwrap(), &descriptor)
+        .unwrap();
+    storage
+        .upsert_media(&kadr_storage::MediaRecord {
+            id: first.media_id.clone(),
+            title: "Owned series".into(),
+            original_title: None,
+            year: None,
+            kind: kadr_storage::MediaKind::Series,
+            description: String::new(),
+            poster_url: None,
+            attribution: String::new(),
+        })
+        .unwrap();
+    let previous = progress(&source, first.clone(), 37.0, 100);
+    storage
+        .save_progress_for_source(&previous, &descriptor)
+        .unwrap();
+    storage.set_favorite(&first.media_id, true).unwrap();
+    let options = EngineOptions {
+        discovery_enabled: false,
+        ..EngineOptions::default()
+    };
+    let (backend, events) = Backend::start_with_network(Some(paths), true, Some(options)).unwrap();
+    let mut app = App { backend, events };
+    app.ready();
+    app.command(Command::OpenLibrary(library_id(&first)));
+    app.selected();
+    app.command(Command::ChooseTorrentFile(1));
+    app.wait("second filename selected", |event| matches!(event,
+        Event::SourceSelected { suggested_filename, playable: true, .. } if suggested_filename == "Own.S01E02.mp4"));
+    app.command(Command::Play { resume: true });
+    app.wait("quota stops before payload or process", |event| {
+        matches!(event, Event::Status(Level::Error, _))
+    });
+    assert_eq!(storage.load_progress(&first).unwrap(), Some(previous));
+    assert_eq!(
+        storage.source_for_target(&first).unwrap(),
+        Some(descriptor.clone())
+    );
+    assert!(matches!(
+        storage.source_for_target(&second).unwrap(),
+        Some(StoredSource::TorrentFile {
+            file_id: Some(1),
+            ..
+        })
+    ));
+    app.finish();
+}
+
 fn target(source: &ManualSource, episode: Option<EpisodeKey>) -> PlaybackTarget {
     PlaybackTarget {
         media_id: MediaId::new(source.id().as_str()).unwrap(),
