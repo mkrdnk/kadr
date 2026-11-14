@@ -84,6 +84,18 @@ cargo build --locked -p kadr-app
 cargo run --locked -p kadr-app
 ```
 
+При наличии GNU Make можно использовать корневой `Makefile`:
+
+```sh
+make
+make release
+make run
+```
+
+`make` и `make build` собирают debug-бинарник, `make release` — оптимизированный.
+`make run` собирает и запускает приложение через Cargo. Путь к Cargo можно
+переопределить переменной `CARGO`, например `make CARGO='cargo +stable' release`.
+
 Приложение показывает окно `kadr` с пятью разделами, начиная с «Источники».
 В «Поиске» введите название, откройте карточку и запросите источники. Для
 сериала сначала выберите эпизод. Метаданные не гарантируют наличия источника;
@@ -188,6 +200,10 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
 cargo test --locked --workspace -- --ignored --test-threads=1
 ```
+
+Первые четыре команды также доступны как `make fmt`, `make check`,
+`make clippy` и `make test`. Цель `fmt` только проверяет форматирование,
+не изменяя файлы; opt-in `--ignored`-тесты запускаются отдельно.
 
 Отдельные проверки с установленными внешними плеерами:
 
