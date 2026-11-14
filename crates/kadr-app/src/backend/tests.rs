@@ -1007,7 +1007,7 @@ impl HttpOrigin {
                     Ok((mut socket, _)) => {
                         let _ = socket.set_read_timeout(Some(Duration::from_secs(1)));
                         let _ = socket.set_write_timeout(Some(Duration::from_secs(1)));
-                        let _ = serve_origin(
+                        if let Err(error) = serve_origin(
                             &mut socket,
                             &bytes,
                             behavior,
@@ -1015,7 +1015,9 @@ impl HttpOrigin {
                             &head_count,
                             &range_count,
                             &conditional_count,
-                        );
+                        ) {
+                            eprintln!("owned HTTP origin ({behavior:?}): {:?}", error.kind());
+                        }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(2));

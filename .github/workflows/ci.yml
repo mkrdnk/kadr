@@ -66,9 +66,9 @@ jobs:
         run: |
           brew install mpv ffmpeg
           brew install --cask vlc
-          mkdir -p "$RUNNER_TEMP/kadr-player-bin"
-          ln -s /Applications/VLC.app/Contents/MacOS/VLC "$RUNNER_TEMP/kadr-player-bin/vlc"
-          echo "$RUNNER_TEMP/kadr-player-bin" >> "$GITHUB_PATH"
+          # Use the cask's command wrapper so VLC receives its bundle entry path.
+          # A hand-made lowercase symlink is not the installed launcher.
+          command -v vlc
       - run: cargo fmt --all -- --check
       - name: Notice collector regressions
         run: python3 scripts/package-licenses-test.py
@@ -90,6 +90,9 @@ jobs:
         run: |
           cargo test --locked -p kadr-media --test players_smoke -- --ignored
           cargo test --locked -p kadr-media --test video_smoke -- --ignored
+      - name: Diagnose installed macOS VLC entry points with owned local media
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && runner.os == 'macOS' }}
+        run: python3 scripts/diagnose-vlc.py
       - name: Native X11 lifecycle smoke
         if: ${{ !cancelled() && steps.build.outcome == 'success' && runner.os == 'Linux' }}
         run: python3 scripts/smoke-x11.py target/debug/kadr-app

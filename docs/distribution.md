@@ -385,8 +385,11 @@ runner. Requested capture failures fail the smoke honestly rather than turning
 into a skip/pass or capturing the desktop. The script does not grant itself
 permissions, change TCC settings or disable platform protections. On a local Mac,
 use the normal macOS privacy settings if you choose to grant capture permission.
-This harness was statically checked on Linux; Swift compilation and native
-execution remain **unrun until a macOS CI result supplies that evidence**.
+Swift compilation, native execution, backend-ready/frame markers and owned-window
+pixel checks passed on macOS 15 arm64 in CI run `43554313461`, both for the
+workspace debug binary and its mounted unsigned DMG. The two retained window
+captures were visually reviewed and show readable Sources-screen text/controls.
+This does not claim macOS 13 testing or native file-dialog/browser acceptance.
 
 For an authorized signed candidate, supply `CODESIGN_IDENTITY` through your
 external environment and an already-configured keychain. The script uses

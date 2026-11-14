@@ -17,13 +17,13 @@
 - [x] Linux / XWayland: реальный рендер и выход при закрытии окна, код 0.
 - [x] Сборка и графическая smoke-проверка Linux / Wayland (native client, nested Weston).
 - [x] Сборка и графическая smoke-проверка в отдельной нативной X11-сессии (Xorg dummy, исправленный GPUI).
-- [ ] Сборка и графическая smoke-проверка macOS.
+- [x] Сборка и графическая smoke-проверка macOS 15 arm64 (CI + просмотр native screenshots).
 - [x] Документарное сравнение BitTorrent API, лицензий и рисков упаковки.
 - [ ] Интеграционный spike BitTorrent: pieces/seek, Linux/macOS и выбор движка.
 - [x] Прототип mpv IPC: запуск, позиция, длительность, возобновление, завершение (Linux).
 - [x] Прототип VLC: запуск/resume/завершение, телеметрия явно недоступна (Linux).
 - [x] Прототип HTTP Range на Linux: GET/HEAD, 206/416, seek, таймауты и отмена.
-- [ ] Прогон HTTP Range-прототипа на macOS.
+- [x] Прогон HTTP Range-прототипа на macOS (workspace tests и настоящий mpv/torrent seek).
 - [ ] Исходные измерения производительности и ADR по выбранным реализациям.
 
 ## P1 — каркас
@@ -32,7 +32,7 @@
 - [x] Окно приложения с навигацией и основными экранами (ранний каркас).
 - [x] Настройки и стандартные пользовательские каталоги (storage API и полный UI).
 - [x] SQLite, версионированные миграции, сохранение настроек между запусками.
-- [ ] Подтверждённый запуск на Linux и macOS.
+- [x] Подтверждённый запуск на Linux и macOS.
 
 ## P2 — медиаядро
 
@@ -66,7 +66,7 @@
 - [ ] CI: сборки и тесты на Linux/macOS.
 - [x] Smoke-проверки в Wayland и X11 (Linux software rendering).
 - [x] Оптимизированные Flatpak и AppImage: strict package builds и Linux smoke.
-- [ ] macOS DMG: сборка, mount и native window smoke.
+- [x] macOS DMG: unsigned debug candidate построен, смонтирован и запущен; native pixels и exit 0 подтверждены.
 - [x] Объявленные targets: Linux x86_64, macOS arm64; baseline и требования в docs/distribution.md.
 - [ ] Подпись и notarization macOS с внешними Apple credentials.
 - [x] Документация зависимостей, приватности и сетевого поведения.
@@ -513,8 +513,14 @@ macOS runtime/DMG, Apple signing и публичный release до отдель
 
 Linux CI прошёл build/check/Clippy, обычные тесты, real HTTP/torrent/save,
 реальные mpv/VLC, X11 lifecycle, native Wayland и native Xorg pixel smoke.
-macOS 15 arm64 уже подтвердил compilation/check/Clippy; runtime-gates ещё
-перезапускаются после найденных переносимых ошибок **тестовых fixtures**:
+macOS 15 arm64 подтвердил compilation/check/Clippy, полный ordinary suite,
+stable HTTP/mpv/save/resume и torrent playback-before-completion/seek/save.
+Настоящее окно и unsigned DMG прошли native render/lifecycle smoke; оба
+CI-скриншота просмотрены: читаемый текст и элементы UI подтверждены.
+Свидетельство: [CI run 43554313461](https://github.com/mkrdnk/kadr/actions/runs/43554313461).
+Весь run остаётся **красным** из-за full-response HTTP save и VLC IPC startup;
+оптимизированные CI-артефакты ими заблокированы, эти проверки не отключены.
+Ранее устранены переносимые ошибки **тестовых fixtures**:
 
 - socket-flood больше не предполагает, что весь payload помещается в Unix
   send buffer перед чтением; concurrent unit test проверяет точные 64 KiB;

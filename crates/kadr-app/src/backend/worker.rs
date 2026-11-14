@@ -1304,7 +1304,17 @@ impl Worker {
                     let len = download.len();
                     let chunks =
                         futures_util::stream::try_unfold(download, |mut download| async move {
-                            let bytes = download.next_chunk(64 * 1024).await?;
+                            let next = download.next_chunk(64 * 1024).await;
+                            // HttpDownload owns and sanitizes every error before
+                            // this generic reader boundary discards its detail.
+                            #[cfg(test)]
+                            if let Err(error) = &next {
+                                eprintln!(
+                                    "owned HTTP download read failed ({:?}): {error}",
+                                    error.kind()
+                                );
+                            }
+                            let bytes = next?;
                             Ok::<_, io::Error>(if bytes.is_empty() {
                                 None
                             } else {

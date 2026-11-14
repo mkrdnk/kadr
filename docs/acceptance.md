@@ -6,19 +6,19 @@ platform results; historical P0 evidence is not substituted for runtime tests.
 
 | SPEC §10 | Linux evidence | macOS evidence |
 |---|---|---|
-| 1. Search/details/errors | Real Archive and TVmaze requests; native Xorg search, cards, posters, Sherlock seasons/episodes; fixture/cancellation tests | CI build, tests and native window smoke configured; record run result in DONE |
-| 2. Permitted source search | Archive rights re-fetch and allowlist, exact video `206` probe; actual catalogue → source → decoded mpv frame | Provider code shared; native runtime result pending CI |
-| 3. Manual HTTP | Real mpv/VLC tests, fallback for missing validators/ignored Range, atomic whole-response save | Same opt-in real-player tests in CI |
-| 4. Magnet/`.torrent` | Real local BEP9 metadata exchange; native file picker and recognized file choices; real torrent playback measured before completion | Same local integration tests in CI |
-| 5. Range/seek | GET/HEAD/206/416, byte equality, unavailable/corrupt pieces, concurrency, disconnect/timeout; actual mpv forward/backward IPC seek and continued playback | Same real-player test in CI |
-| 6. Player selection/browser | Preferences survive restart, actual mpv/VLC, installed Flatpak host playback; real Firefox decoded owned video from the local tokenized endpoint | Player installs and smoke configured; native result pending |
-| 7. Resume | Real IPC → SQLite → restart/resume; genuine EOF only, no clock-based completion; browser history without invented progress | Same real-player test in CI |
+| 1. Search/details/errors | Real Archive and TVmaze requests; native Xorg search, cards, posters, Sherlock seasons/episodes; fixture/cancellation tests | Provider/worker tests and native Sources-screen pixels passed; native interactive search not claimed |
+| 2. Permitted source search | Archive rights re-fetch and allowlist, exact video `206` probe; actual catalogue → source → decoded mpv frame | Shared adapter fixture tests passed; no separate live Mac catalogue/UI claim |
+| 3. Manual HTTP | Real mpv/VLC tests, fallback for missing validators/ignored Range, atomic whole-response save | Stable HTTP → actual mpv/save passed; fallback save and VLC IPC remain blocking failures |
+| 4. Magnet/`.torrent` | Real local BEP9 metadata exchange; native file picker and recognized file choices; real torrent playback measured before completion | BEP9 engine tests and actual torrent → mpv before completion passed; native picker not claimed |
+| 5. Range/seek | GET/HEAD/206/416, byte equality, unavailable/corrupt pieces, concurrency, disconnect/timeout; actual mpv forward/backward IPC seek and continued playback | Range tests and real torrent/mpv forward/backward seek passed |
+| 6. Player selection/browser | Preferences survive restart, actual mpv/VLC, installed Flatpak host playback; real Firefox decoded owned video from the local tokenized endpoint | Actual mpv WAV passed; VLC IPC failed startup, native browser acceptance unrun |
+| 7. Resume | Real IPC → SQLite → restart/resume; genuine EOF only, no clock-based completion; browser history without invented progress | Real mpv → SQLite → saved-file restart/resume and explicit restart passed |
 | 8. Episodes | S01E01/S01E02 parser, native file-picker choice, ambiguous manual mapping, exact per-target source/file/history/progress isolation | Shared parser/storage tests; native episodes UI not yet claimed |
-| 9. Bounded cache | Durable whole-torrent reservations, physical outstanding demand, inactive LRU, counted active leases, no-follow paths; actual active ClearCache protection | Additional Darwin `/tmp` and `/var` alias test in CI |
-| 10. Permanent save | Native GTK save dialog, exact MP4 bytes, SQL saved record, clear-cache preservation; reader/verified-source atomic cancellation/no-clobber tests | Same atomic-save tests; native save dialog not yet claimed |
+| 9. Bounded cache | Durable whole-torrent reservations, physical outstanding demand, inactive LRU, counted active leases, no-follow paths; actual active ClearCache protection | Cache tests including actual Darwin aliases and real torrent active-lease protection passed |
+| 10. Permanent save | Native GTK save dialog, exact MP4 bytes, SQL saved record, clear-cache preservation; reader/verified-source atomic cancellation/no-clobber tests | Atomic-save tests and real stable HTTP/torrent save/clear/reopen passed; fallback save failed, native save dialog unrun |
 | 11. Security | IPv4 loopback media server, per-session OS-random capability, wrong tokens/traversal rejected; fixed URI source authority; pinned remote resolution/redirect checks; unsafe torrent paths and Unicode aliases rejected | Shared HTTP/path tests; no macOS packet-level claim |
-| 12. Teardown | Owned player stop/reap, HTTP listener release, torrent cancellation, no abandoned save publication, source lifetime retained across player switching | Same opt-in tests and timed UI quit in CI |
-| 13. Distribution | AppImage/Flatpak built and installed, rendered UI, host mpv/VLC; installed-policy permanent-save helper | DMG build/mount/window smoke configured; signing/notarization require credentials |
+| 12. Teardown | Owned player stop/reap, HTTP listener release, torrent cancellation, no abandoned save publication, source lifetime retained across player switching | Actual mpv/torrent teardown and native window/backend-ready/quit passed |
+| 13. Distribution | AppImage/Flatpak built and installed, rendered UI, host mpv/VLC; installed-policy permanent-save helper | Unsigned debug DMG build/mount/native pixels/quit passed; optimized artifact gate blocked by runtime failures, signing/notarization require credentials |
 
 ## Deliberate boundaries
 
