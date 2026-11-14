@@ -4,6 +4,12 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      retain_artifacts:
+        description: Build and retain unsigned candidates after both platform test jobs pass
+        type: boolean
+        default: false
+        required: true
 
 permissions:
   contents: read
@@ -98,3 +104,10 @@ jobs:
           hdiutil attach -nobrowse -readonly "$1" -mountpoint "$RUNNER_TEMP/kadr-dmg"
           trap 'hdiutil detach "$RUNNER_TEMP/kadr-dmg"' EXIT
           python3 scripts/smoke-macos.py --binary "$RUNNER_TEMP/kadr-dmg/kadr.app/Contents/MacOS/kadr" --artifacts target/smoke-dmg --screenshot
+
+  candidates:
+    needs: test
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.retain_artifacts }}
+    uses: ./.github/workflows/release.yml
+    with:
+      retain_artifacts: true

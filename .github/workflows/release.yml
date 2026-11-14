@@ -8,6 +8,12 @@ on:
         type: boolean
         default: false
         required: true
+  workflow_call:
+    inputs:
+      retain_artifacts:
+        description: Retain unsigned candidates only after the caller's platform checks
+        type: boolean
+        required: true
 
 permissions:
   contents: read
@@ -61,7 +67,8 @@ jobs:
         run: python3 scripts/smoke-x11.py target/dist/kadr-*-unsigned.AppImage
       - name: Installed Flatpak host mpv and VLC over loopback HTTP
         run: |
-          export XDG_RUNTIME_DIR=/run/user/$(id -u)
+          XDG_RUNTIME_DIR=/run/user/$(id -u)
+          export XDG_RUNTIME_DIR
           mkdir -p "$XDG_RUNTIME_DIR"
           chmod 700 "$XDG_RUNTIME_DIR"
           scripts/package-test-flatpak.sh target/dist/kadr-*-unsigned.flatpak
@@ -76,7 +83,7 @@ jobs:
         if: ${{ inputs.retain_artifacts }}
         uses: actions/upload-artifact@v4
         with:
-          name: linux-x86_64-unsigned
+          name: kadr-${{ github.sha }}-linux-x86_64-unsigned
           path: target/dist/
           retention-days: 7
           if-no-files-found: error
@@ -118,7 +125,7 @@ jobs:
         if: ${{ inputs.retain_artifacts }}
         uses: actions/upload-artifact@v4
         with:
-          name: macos-arm64-unsigned
+          name: kadr-${{ github.sha }}-macos-arm64-unsigned
           path: target/dist/
           retention-days: 7
           if-no-files-found: error
