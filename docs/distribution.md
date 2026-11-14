@@ -9,10 +9,23 @@ CC0-1.0. Rust dependency notices and GPUI provenance accompany every format;
 the AppImage also carries the bundled native-library notices.
 
 These are **unsigned release candidates**, not production-signed releases.
-The manual `release.yml` workflow builds candidates but does not create GitHub
-releases, push refs, publish packages, or run on tags. Workflow artifact retention
-is off by default: enabling `retain_artifacts` at dispatch explicitly authorizes
-uploading those candidates to that workflow run for seven days.
+The reusable/manual `release.yml` workflow builds candidates but does not create
+GitHub releases, push refs, publish packages, or run on tags. Workflow artifact
+retention is off by default. Dispatching **Build and test** with
+`retain_artifacts=true` first requires both platform test jobs to pass, then
+builds optimized AppImage/Flatpak and arm64 DMG candidates and retains them for
+seven days. Artifact names include the exact Git SHA; package filenames contain
+the workspace version, target and unsigned status. Checksums and dependency/
+notice requirements accompany each package. The same authorized run retains
+only the smoke harnesses' own empty application-window screenshots for visual
+review, never a desktop capture or a real user's browsing/player session.
+
+```sh
+gh workflow run ci.yml --ref mvp/full-desktop -f retain_artifacts=true
+```
+
+This works on a feature branch without merging it into the default branch.
+Ordinary pushes and pull requests run validation but do not upload candidates.
 
 ## Supported targets and minimums
 
@@ -20,7 +33,7 @@ uploading those candidates to that workflow run for seven days.
 | --- | --- | --- |
 | AppImage | Native Linux x86_64, little-endian ELF64 | Intended baseline glibc 2.35 (Ubuntu 22.04 build runner). Actual candidate's complete GLIBC symbol list and bundled package versions are emitted in `.requirements.txt`; a newer build host can raise this floor. Tested locally on Debian 12/glibc 2.36, not on every glibc 2.35 distribution. |
 | Flatpak | Native Linux x86_64 | Flatpak 1.14+ tooling tested; Freedesktop Platform/SDK **25.08**. Runtime supplies userspace ABI and GPU extension; host must support Flatpak, graphics and its required kernel features. No host glibc floor is inferred from the AppImage. |
-| DMG | Native macOS arm64 (Apple Silicon) | **macOS 13.0** deployment target and `LSMinimumSystemVersion`. Script verifies Mach-O arm64, `vtool` minos ≤13.0, and rejects non-system dylibs. This is a declared build target, **not a macOS runtime test result**: no macOS runner was available during implementation. Intel/universal DMGs are not supported by these scripts. |
+| DMG | Native macOS arm64 (Apple Silicon) | **macOS 13.0** deployment target and `LSMinimumSystemVersion`. Script verifies Mach-O arm64, `vtool` minos ≤13.0, and rejects non-system dylibs. This is a declared minimum, **not a macOS 13 runtime test result**; CI uses macOS 15 arm64. Intel/universal DMGs are not supported by these scripts. |
 
 Linux GPUI uses Vulkan, not a bundled browser engine. Blade 0.7.1's adapter
 inspection requires Vulkan ≥1.1 **and its required device extensions/features**;
@@ -224,8 +237,17 @@ only the media smoke-test executable, exposes that executable's directory
 read-only for a single test invocation, and runs the existing real mpv/VLC
 HTTP/resume/telemetry/stop/EOF checks **inside the installed Flatpak**. The
 one-run test filesystem override is not part of the normal manifest.
-It starts a session bus if absent, but a working **system bus** must already
-exist. Headless CI/cloud containers may also need their normal `/run/user/UID`
+The helper always creates its **own private session bus**, even when invoked
+from a desktop or an outer `dbus-run-session`; it never stops an existing desktop
+bus or its services. Activated private-bus services inherit a regular log file,
+not the caller's PTY. After the command exits or is interrupted, bounded
+TERM/KILL cleanup covers only the helper's newly created process group, including
+services whose original launcher already exited. This prevents an orphaned
+accessibility/document service from holding the terminal open after the footer.
+`python3 scripts/package-private-bus-test.py` exercises real D-Bus activation,
+PTY EOF, cancellation and preservation of an existing separate bus without a
+Cargo/GPUI build. A working **system bus** must already exist.
+Headless CI/cloud containers may also need their normal `/run/user/UID`
 directory provisioned; a nonstandard host runtime directory is not a substitute
 because the host and sandbox IPC paths must match.
 
@@ -378,15 +400,17 @@ No signing/notarization was performed during Linux implementation.
 
 ## Recorded implementation evidence and limits
 
-- Debian 12 x86_64: actual AppImage and Flatpak bundles rebuilt from the parent's
-  integrated MVP debug `kadr-app`, without duplicating a full GPUI release build.
-  The input ELF SHA-256 recorded by both packages was
-  `5387b4b6d082d36146e79b050528ad250c8633066892c3809061d58d87062dbf`.
-  The final AppImage closure's highest required GLIBC version was **2.35**;
-  `.requirements.txt` and SHA-256 sidecars were generated.
-- AppImage extract-and-run: isolated Xvfb/Openbox window map, resize, WM close
-  and Ctrl+Q all exited 0. Screenshot inspection confirmed the Sources screen's
-  text, controls and layout. This is not a FUSE mount or video-decoding test.
+- Debian 12 x86_64: optimized integrated MVP `cargo build --release --locked -p
+  kadr-app`, followed by strict AppImage and Flatpak builds, passed. The final
+  input ELF SHA-256 recorded by both packages was
+  `7bddee7e941400d3b11bd51ce2d73efcf6849e5f6eab2dd84e808e4429debb88`.
+  The AppImage closure's highest required GLIBC version was **2.35**;
+  `.requirements.txt` and verified SHA-256 sidecars were generated.
+- Optimized AppImage extract-and-run: private **native Xorg** map, resize,
+  nonblack/nonuniform client pixels, WM close and Ctrl+Q all passed with exit 0.
+  Native Wayland in nested Weston configured, attached/committed a non-null
+  buffer and exited through Ctrl+Q with code 0. This is not a FUSE mount or
+  hardware-driver matrix test.
 - Flatpak bundle installed locally against Platform 25.08: window map, resize,
   WM close and Ctrl+Q exited 0 under isolated X11. Root-window screenshot
   inspection confirmed the rendered Sources screen and `dev.kadr.Kadr` WM_CLASS.
@@ -397,8 +421,10 @@ No signing/notarization was performed during Linux implementation.
 - Normal integration tests cover both player argv, shared directory privacy,
   Flatpak's precreated 0755 directory, symlink/writable-parent rejection,
   missing runtime and overlong paths. Existing direct-player tests also pass.
-- **Not run:** integrated optimized release build, macOS compilation/DMG
-  mount/launch, Apple signing/notarization, hardware GPU matrix, packaged
-  Wayland session, package manager/store publication, browser/video visual
-  acceptance. The manual workflow provides build/verification jobs, not claims
-  that those jobs have already run.
+- Actual native GTK open/save dialogs, visible decoded mpv video, Firefox
+  local-stream playback/history, and permanent-save survival after GUI cache
+  clearing are recorded separately in `docs/acceptance.md` and `DONE.md`.
+- **Not claimed:** Apple signing/notarization, hardware GPU matrix,
+  package manager/store publication, native macOS dialog/browser acceptance.
+  Native macOS compilation/DMG/window results must come from a completed CI run,
+  not from the existence of a workflow.

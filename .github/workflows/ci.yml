@@ -44,7 +44,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config clang cmake libssl-dev \
+            build-essential pkg-config clang cmake libssl-dev dbus \
             libfontconfig1-dev libwayland-dev libxcb1-dev libx11-xcb-dev \
             libxkbcommon-dev libxkbcommon-x11-dev libxcb-xkb-dev \
             libxcb-randr0-dev libxcb-xfixes0-dev libxcb-shape0-dev \
@@ -72,6 +72,9 @@ jobs:
       - run: cargo fmt --all -- --check
       - name: Notice collector regressions
         run: python3 scripts/package-licenses-test.py
+      - name: Private packaging-session teardown regressions
+        if: runner.os == 'Linux'
+        run: python3 scripts/package-private-bus-test.py
       - run: cargo check --locked --workspace --all-targets
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
@@ -107,6 +110,18 @@ jobs:
           hdiutil attach -nobrowse -readonly "$1" -mountpoint "$RUNNER_TEMP/kadr-dmg"
           trap 'hdiutil detach "$RUNNER_TEMP/kadr-dmg"' EXIT
           python3 scripts/smoke-macos.py --binary "$RUNNER_TEMP/kadr-dmg/kadr.app/Contents/MacOS/kadr" --artifacts target/smoke-dmg --screenshot
+
+      - name: Retain only owned smoke-window screenshots on authorized dispatch
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.retain_artifacts }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kadr-${{ github.sha }}-${{ runner.os }}-smoke-windows
+          path: |
+            target/smoke-xorg/*.png
+            target/smoke-macos/*.png
+            target/smoke-dmg/*.png
+          retention-days: 7
+          if-no-files-found: warn
 
   candidates:
     needs: test

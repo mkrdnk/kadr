@@ -15,8 +15,8 @@
 - [x] Native Wayland: создание toplevel и передача буферов подтверждены trace.
 - [x] Linux: регрессионный тест завершения с ошибкой при отсутствии дисплея.
 - [x] Linux / XWayland: реальный рендер и выход при закрытии окна, код 0.
-- [ ] Сборка и графическая smoke-проверка Linux / Wayland.
-- [ ] Сборка и графическая smoke-проверка в отдельной нативной X11-сессии.
+- [x] Сборка и графическая smoke-проверка Linux / Wayland (native client, nested Weston).
+- [x] Сборка и графическая smoke-проверка в отдельной нативной X11-сессии (Xorg dummy, исправленный GPUI).
 - [ ] Сборка и графическая smoke-проверка macOS.
 - [x] Документарное сравнение BitTorrent API, лицензий и рисков упаковки.
 - [ ] Интеграционный spike BitTorrent: pieces/seek, Linux/macOS и выбор движка.
@@ -30,44 +30,46 @@
 
 - [x] Разделение приложения на крейты по мере появления реализаций (продолжается).
 - [x] Окно приложения с навигацией и основными экранами (ранний каркас).
-- [x] Настройки и стандартные пользовательские каталоги (storage API, UI частично).
+- [x] Настройки и стандартные пользовательские каталоги (storage API и полный UI).
 - [x] SQLite, версионированные миграции, сохранение настроек между запусками.
 - [ ] Подтверждённый запуск на Linux и macOS.
 
 ## P2 — медиаядро
 
-- [x] Ручной ввод и проверка HTTP(S), magnet, `.torrent` (вставка/picker, без torrent IO).
-- [ ] Метаданные торрента, выбор видеофайла, распознавание эпизодов.
-- [ ] Буферизация, приоритеты частей и seek без полной загрузки.
-- [ ] Защищённый loopback HTTP-сервер с Range.
-- [ ] mpv/VLC, браузер с предупреждением об ограничениях.
-- [ ] Состояния сессии, сетевые лимиты, отмена и освобождение ресурсов.
-- [ ] Сквозная проверка воспроизведения разрешённого тестового видео.
+- [x] Ручной ввод и проверка HTTP(S), magnet, `.torrent` (вставка/picker, реальный engine IO после consent).
+- [x] Метаданные торрента, выбор видеофайла, распознавание эпизодов (Linux).
+- [x] Буферизация, приоритеты частей и seek без полной загрузки (Linux).
+- [x] Защищённый loopback HTTP-сервер с Range.
+- [x] mpv/VLC, браузер с предупреждением об ограничениях (Linux).
+- [x] Состояния сессии, сетевые лимиты, отмена и освобождение ресурсов (Linux).
+- [x] Сквозная проверка воспроизведения разрешённого тестового видео (Linux).
 
 ## P3 — каталог
 
-- [ ] Выбор разрешённых API метаданных и источников, правила атрибуции.
-- [ ] Поиск, карточки фильмов/сериалов, сезоны и эпизоды.
-- [ ] Встроенный реальный адаптер поиска разрешённых источников.
-- [ ] Ручной источник со связью с каталогом и без неё.
-- [ ] Loading/empty/success/error и отмена длительных операций.
-- [ ] Сквозной поиск и запуск разрешённого источника.
+- [x] Выбор разрешённых API метаданных и источников, правила атрибуции.
+- [x] Поиск, карточки фильмов/сериалов, сезоны и эпизоды (Linux UI).
+- [x] Встроенный реальный адаптер поиска разрешённых источников.
+- [x] Ручной источник со связью с каталогом и без неё.
+- [x] Loading/empty/success/error и отмена длительных операций.
+- [x] Сквозной поиск и запуск разрешённого источника (Linux native GUI).
 
 ## P4 — библиотека
 
-- [ ] Избранное, история, стабильные идентификаторы локальных элементов.
-- [ ] Прогресс и возобновление по фильму/эпизоду для управляемых плееров.
-- [ ] Ограниченный кэш, LRU неактивных данных, защита активных/сохранённых файлов.
-- [ ] Сохранение файла вне временного кэша с обработкой прерывания и нехватки места.
-- [ ] Тесты прогресса, политики кэша и сохранения.
+- [x] Избранное, история, стабильные идентификаторы локальных элементов.
+- [x] Прогресс и возобновление по фильму/эпизоду (mpv; VLC явно unavailable).
+- [x] Ограниченный кэш, LRU неактивных данных, защита активных/сохранённых файлов.
+- [x] Сохранение файла вне временного кэша с обработкой прерывания и нехватки места.
+- [x] Тесты прогресса, политики кэша и сохранения.
 
 ## P5 — релиз
 
 - [ ] CI: сборки и тесты на Linux/macOS.
-- [ ] Smoke-проверки в Wayland и X11.
-- [ ] Flatpak, AppImage, macOS DMG.
-- [ ] Минимальные ОС/архитектуры, подпись и notarization macOS.
-- [ ] Документация зависимостей, приватности и сетевого поведения.
+- [x] Smoke-проверки в Wayland и X11 (Linux software rendering).
+- [x] Оптимизированные Flatpak и AppImage: strict package builds и Linux smoke.
+- [ ] macOS DMG: сборка, mount и native window smoke.
+- [x] Объявленные targets: Linux x86_64, macOS arm64; baseline и требования в docs/distribution.md.
+- [ ] Подпись и notarization macOS с внешними Apple credentials.
+- [x] Документация зависимостей, приватности и сетевого поведения.
 - [ ] Все 13 критериев приёмки из §10 SPEC.md проверены на целевых платформах.
 
 ## Итерация 1 — минимальное окно GPUI
@@ -446,3 +448,85 @@ patch его два цвета были лишь чёрным фоном и бе
 Полный UI/worker и сквозные app-тесты интегрируются и проверяются следующим
 коммитом. Сертификаты macOS, нативный macOS runtime и удалённый CI здесь
 ещё не считаются подтверждёнными.
+
+## Итерация 10 — полный пользовательский путь и регрессии интеграции
+
+UI теперь не каркас: редактируемый поиск/настройки, карточки с постерами,
+сезоны/эпизоды, реальные источники, native file/save dialogs, выбор файлов,
+ручная коррекция эпизода, избранное/история/продолжение, статистика и сохранение.
+Worker связывает все реализации; IO не выполняется в render loop.
+
+На Linux проверено не только отдельными крейтами:
+
+- Настоящий native Xorg: Sherlock → TVmaze details → S01E01 → честно пустые
+  источники; Night of the Living Dead → Archive details/права → MP4 → настоящий
+  декодированный кадр mpv → Stop. Xvfb и native Wayland также проверены с
+  реальным вводом, выделением и удалением текста.
+- Настоящий GTK portal Open File выбирает собственную раздачу S01E01/S01E02,
+  UI распознаёт оба файла, при выключенной сети не запускает player/session.
+- Native Save File: собственное HTTP-видео сохранено с точным сравнением
+  1 282 057 байт, path записан в SQLite; GUI ClearCache не изменил файл/запись.
+- Настоящий Firefox получает **локальный** capability URL, декодирует собственное
+  видео; проверены точные GET и `206`, Stop закрывает порт. В БД есть история,
+  но нет выдуманного прогресса. Найденный History-filter bug исправлен:
+  schema v4 хранит actual opens отдельно для каждого target, UI использует
+  `opened_at`, а Continue — только настоящую незавершённую позицию. Повторная
+  native GUI проверка History/Continue и v3→v4 прошла.
+- Настоящий torrent → HTTP → mpv измеряется **до завершения файла**, затем
+  проверены настоящий mpv forward/backward seek и продолжение, защита active
+  cache, точное verified atomic save, очистка и offline saved-copy resume.
+- HTTP без validators или без Range воспроизводится напрямую; конечный файл
+  с известным размером сохраняется отдельным цельным GET через общий atomic
+  writer. Unknown-length/live не выдаётся за завершённый конечный файл.
+
+Независимое интеграционное ревью помогло устранить перепутанные episode-target
+при выборе другого файла, потерю queued OpenIn при teardown, старые save-progress
+в новой сессии, гонку Stop после atomic publication, потерю poster opt-out,
+сохранение в старом cache root и двойной physical-space admission save+torrent.
+Darwin system aliases и Unicode filename aliases обработаны отдельными общими
+правилами, без разрешения произвольных symlink-переходов.
+
+Подтверждены root `fmt --check`, `check --locked --workspace --all-targets`,
+Clippy `-D warnings`, обычные workspace tests, полный ignored-прогон
+`cargo test --locked --workspace -- --ignored --test-threads=1` и
+`build --locked --workspace --all-targets`. Ignored-прогон включает три
+app-сценария, реальные mpv/VLC WAV/MP4 и live-каталог. Индекс всех 13 критериев:
+[docs/acceptance.md](docs/acceptance.md).
+
+Подготовлены реальные AppImage/Flatpak/DMG recipes, host-player integration,
+native macOS renderer smoke и package notices. Итоговый оптимизированный
+Linux ELF и strict AppImage/Flatpak построены; AppImage прошёл native Xorg
+pixel/resize/WM-close/Ctrl+Q и native Wayland buffer/quit проверки.
+SHA-256 ELF: `7bddee7e941400d3b11bd51ce2d73efcf6849e5f6eab2dd84e808e4429debb88`.
+Строгий collector собрал 670 packages / 1222 notice/metadata entries,
+0 warnings; пять точных случаев используют authenticated declared-SPDX policy
+с сохранением найденных реальных notices, без выдуманных copyright-строк.
+14 collector regressions, ShellCheck, AST checks и workflow actionlint прошли.
+
+Отдельная ветка `mvp/full-desktop` опубликована без изменения remote `master`.
+CI теперь может выдавать SHA/version-labelled unsigned artifacts после обоих
+platform test jobs по явному `workflow_dispatch retain_artifacts=true`.
+macOS runtime/DMG, Apple signing и публичный release до отдельного свидетельства
+не помечаются завершёнными.
+
+## Итерация 11 — реальные platform CI и оптимизированные пакеты
+
+Linux CI прошёл build/check/Clippy, обычные тесты, real HTTP/torrent/save,
+реальные mpv/VLC, X11 lifecycle, native Wayland и native Xorg pixel smoke.
+macOS 15 arm64 уже подтвердил compilation/check/Clippy; runtime-gates ещё
+перезапускаются после найденных переносимых ошибок **тестовых fixtures**:
+
+- socket-flood больше не предполагает, что весь payload помещается в Unix
+  send buffer перед чтением; concurrent unit test проверяет точные 64 KiB;
+- torrent fixtures создаются под физическим временным parent; `/var` alias
+  не ослабляет production-политику отказа от symlink-выходов;
+- HTTP truncation test принимает ранний abort до headers, но по-прежнему
+  запрещает успешный EOF, padding и любые неправильные байты; 2000 stress runs;
+- notice-collector fixtures используют физический root, как production entry
+  point; все 14 тестов прошли и с явно symlinked `TMPDIR`.
+
+Оптимизированный установленный Flatpak повторно прошёл оба настоящих host-player
+smoke и завершил helper с кодом 0. Найден и устранён orphan a11y-bus, который
+после завершения тестов удерживал PTY. Helper теперь создаёт отдельный private
+bus/process group, не трогает существующий desktop bus, ограниченно завершает
+свои activation services; пять D-Bus/PTY/signal регрессий прошли.

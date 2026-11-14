@@ -112,10 +112,13 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/kadr-dmg"
           hdiutil attach target/dist/kadr-*-unsigned.dmg -mountpoint "$RUNNER_TEMP/kadr-dmg" -nobrowse -readonly
+          trap 'hdiutil detach "$RUNNER_TEMP/kadr-dmg"' EXIT
           test -x "$RUNNER_TEMP/kadr-dmg/kadr.app/Contents/MacOS/kadr"
           codesign --verify --strict --verbose=2 "$RUNNER_TEMP/kadr-dmg/kadr.app"
           plutil -lint "$RUNNER_TEMP/kadr-dmg/kadr.app/Contents/Info.plist"
+          python3 scripts/smoke-macos.py --binary "$RUNNER_TEMP/kadr-dmg/kadr.app/Contents/MacOS/kadr" --artifacts target/smoke-release-macos --screenshot
           hdiutil detach "$RUNNER_TEMP/kadr-dmg"
+          trap - EXIT
       - name: Reject incomplete notices before any authorized upload
         if: ${{ inputs.retain_artifacts }}
         run: |
@@ -128,6 +131,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kadr-${{ github.sha }}-macos-arm64-unsigned
-          path: target/dist/
+          path: |
+            target/dist/
+            target/smoke-release-macos/*.png
           retention-days: 7
           if-no-files-found: error

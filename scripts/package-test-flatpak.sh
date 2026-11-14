@@ -3,14 +3,21 @@
 set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
+CREATE_PRIVATE_BUS=1
+if [[ ${1:-} == --private-bus-child ]]; then
+  shift
+  CREATE_PRIVATE_BUS=0
+fi
 [[ $# == 1 ]] || { echo "Usage: $0 path/to/unsigned.flatpak" >&2; exit 2; }
 [[ ${XDG_RUNTIME_DIR:-} == "/run/user/$(id -u)" ]] || {
   echo "Run in a desktop session with canonical XDG_RUNTIME_DIR=/run/user/$(id -u)" >&2
   exit 1
 }
-if [[ -z ${DBUS_SESSION_BUS_ADDRESS:-} ]]; then
-  exec dbus-run-session -- "$0" "$@"
+if [[ "$CREATE_PRIVATE_BUS" == 1 ]]; then
+  exec python3 "$ROOT/scripts/package-private-bus.py" -- \
+    "$ROOT/scripts/package-test-flatpak.sh" --private-bus-child "$@"
 fi
+[[ -n ${DBUS_SESSION_BUS_ADDRESS:-} ]] || { echo "Private session bus was not created" >&2; exit 1; }
 mkdir -p target/packaging
 STATE=$(mktemp -d "$ROOT/target/packaging/player-smoke.XXXXXXXX")
 trap 'rm -rf -- "$STATE"' EXIT

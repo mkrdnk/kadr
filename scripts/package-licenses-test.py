@@ -23,7 +23,9 @@ class LicenseCollectionTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        # Match the collector entry point's physical project boundary. macOS
+        # exposes its authorized temporary parent through /var -> /private/var.
+        self.root = Path(self.temporary.name).resolve()
         for name in ("Cargo.toml", "Cargo.lock", "LICENSE", "kadr-app"):
             (self.root / name).write_text(name + "\n")
         self.packages = []
