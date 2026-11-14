@@ -64,10 +64,10 @@
 ## P5 — релиз
 
 - [x] CI: сборки, тесты, real playback/save и native render на Linux/macOS.
-- [ ] Единый зелёный workflow с опубликованными unsigned CI-кандидатами обоих targets.
+- [x] Единый зелёный workflow с опубликованными unsigned CI-кандидатами обоих targets.
 - [x] Smoke-проверки в Wayland и X11 (Linux software rendering).
 - [x] Оптимизированные Flatpak и AppImage: strict package builds и Linux smoke.
-- [x] macOS DMG: unsigned debug candidate построен, смонтирован и запущен; native pixels и exit 0 подтверждены.
+- [x] macOS DMG: optimized unsigned candidate построен, смонтирован и запущен; native pixels и exit 0 подтверждены.
 - [x] Объявленные targets: Linux x86_64, macOS arm64; baseline и требования в docs/distribution.md.
 - [ ] Подпись и notarization macOS с внешними Apple credentials.
 - [x] Документация зависимостей, приватности и сетевого поведения.
@@ -583,3 +583,56 @@ Release jobs выявили отдельные ошибки bootstrap: offline m
 CI явно выполняет locked target fetch; fake startup теперь наследует production
 budget и проверяется дополнительным delayed-start тестом. Специальные короткие
 timeout/cancellation cases и production deadlines не изменены.
+
+## Итерация 13 — финальная проверка и доступные сборки
+
+**Функциональный MVP реализован; полный CI зелёный.**
+[Run 43561951626](https://github.com/mkrdnk/kadr/actions/runs/43561951626)
+проверил код `d78b61beba4b05558eac587cc53975bf5e9fc859`:
+
+- Linux Ubuntu 24.04 и macOS 15 arm64: fmt/check/Clippy/build, обычные тесты,
+  настоящие HTTP/torrent/mpv/SQLite/save/resume сценарии; каждый из трёх
+  дополнительных full-response save прогонов также прошёл.
+- Настоящие mpv/VLC WAV/MP4 на обеих ОС; isolated ownership двух VLC-сеансов.
+- Linux X11 lifecycle, native Xorg pixels и native Wayland; macOS native pixels,
+  backend-ready/frame markers и штатный выход.
+- Linux Ubuntu 22.04: optimized AppImage и Flatpak, AppImage lifecycle и
+  установленные Flatpak host mpv/VLC. Строгий collector — 0 warnings.
+- macOS: optimized arm64 DMG, minos **13.0**, SDK 15.5, mount, codesign structure,
+  native optimized-window pixels и exit 0. Строгий collector — 0 warnings.
+  Скачанный CI-скриншот optimized DMG отдельно просмотрен.
+
+Артефакты сохранены на семь дней:
+[Linux AppImage/Flatpak](https://github.com/mkrdnk/kadr/actions/runs/43561951626/artifacts/14100902780),
+[macOS DMG](https://github.com/mkrdnk/kadr/actions/runs/43561951626/artifacts/14101425537).
+Все три пакета скачаны родителем; `sha256sum -c` прошёл:
+
+| Пакет | SHA-256 |
+|---|---|
+| `kadr-0.1.0-linux-x86_64-unsigned.AppImage` | `8356d1fad6ecae1cecafae2465a59839b96f03a4d6c1375ca48e24478ebb7411` |
+| `kadr-0.1.0-linux-x86_64-unsigned.flatpak` | `847fbc21da42768698779ff788df048b1c736830b217d367901e3ee70fc2a4ba` |
+| `kadr-0.1.0-macos-arm64-unsigned.dmg` | `94332a1b6b9ffd64c1c8a875aeffd719527f2856a14a7f74d9fa909b700590c6` |
+
+Именно скачанный CI AppImage дополнительно прошёл native Xorg pixels/resize/
+WM-close/Ctrl+Q и native Wayland buffer/quit на Debian 12. Скачанный CI Flatpak
+установлен с проверкой точного commit и повторно прошёл оба host mpv/VLC smoke;
+helper завершился 0 с cleanup private bus/services.
+
+Linux CI-пакеты содержат один ELF SHA-256
+`d00f036346c76351c3a98e31b34e2199813b4343efe45f3e5056df15ce6af7f1`;
+полная AppImage closure требует максимум GLIBC 2.35. Это отдельная Ubuntu
+сборка, а не побайтовое обещание совпадения с локальным Debian ELF.
+Для Mac input executable SHA-256:
+`37232d175dc552117993130063764211cbe10950ddcbb65cdb1df165e94fa3d9`.
+
+Финальный локальный прогон того же кода также прошёл: точные workspace
+fmt/check/Clippy/test/build команды, полный `--ignored --test-threads=1`
+(включая live-каталог), 20 notice regressions, 5 private-bus regressions,
+ShellCheck, actionlint и `git diff --check`.
+
+**Не объявляется:** Apple Developer ID signing/notarization, legal approval,
+hardware GPU matrix, отдельная ручная macOS file-dialog/browser приёмка или
+официальный store/release. Эти границы и индекс всех 13 критериев остаются
+явными в [docs/acceptance.md](docs/acceptance.md). Подписанных сертификатов не
+выдумывали, remote `master` не меняли; финальные изменения после проверенного
+кода относятся только к документации.

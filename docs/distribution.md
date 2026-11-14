@@ -444,5 +444,10 @@ No signing/notarization was performed during Linux implementation.
   clearing are recorded separately in `docs/acceptance.md` and `DONE.md`.
 - **Not claimed:** Apple signing/notarization, hardware GPU matrix,
   package manager/store publication, native macOS dialog/browser acceptance.
-  Native macOS compilation/DMG/window results must come from a completed CI run,
-  not from the existence of a workflow.
+- Final [CI run 43561951626](https://github.com/mkrdnk/kadr/actions/runs/43561951626)
+  is green for both platform test jobs and both optimized package jobs. It
+  retained Linux x86_64 AppImage/Flatpak and macOS arm64 DMG with checksum/
+  requirements sidecars for seven days. All three downloaded packages passed
+  their SHA-256 checks; the optimized mounted Mac window capture was visually
+  reviewed. AppImage's observed GLIBC ceiling is 2.35; the Mac executable reports
+  minos 13.0 and SDK 15.5, with runtime smoke on macOS 15, not macOS 13.

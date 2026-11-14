@@ -4,6 +4,12 @@ This is an evidence index, not a declaration that every target platform or a
 publicly signed release has passed. `DONE.md` records exact final commands and
 platform results; historical P0 evidence is not substituted for runtime tests.
 
+Final automated platform/package matrix:
+[successful CI run 43561951626](https://github.com/mkrdnk/kadr/actions/runs/43561951626),
+code `d78b61b`. Both optimized target packages were retained; downloaded SHA-256
+sidecars were checked. Separate manual Mac picker/browser and hardware-matrix
+claims remain excluded below.
+
 | SPEC §10 | Linux evidence | macOS evidence |
 |---|---|---|
 | 1. Search/details/errors | Real Archive and TVmaze requests; native Xorg search, cards, posters, Sherlock seasons/episodes; fixture/cancellation tests | Provider/worker tests and native Sources-screen pixels passed; native interactive search not claimed |
@@ -18,7 +24,7 @@ platform results; historical P0 evidence is not substituted for runtime tests.
 | 10. Permanent save | Native GTK save dialog, exact MP4 bytes, SQL saved record, clear-cache preservation; reader/verified-source atomic cancellation/no-clobber tests | Atomic-save tests and real stable/fallback HTTP and torrent save/clear/reopen passed; native save dialog unrun |
 | 11. Security | IPv4 loopback media server, per-session OS-random capability, wrong tokens/traversal rejected; fixed URI source authority; pinned remote resolution/redirect checks; unsafe torrent paths and Unicode aliases rejected | Shared HTTP/path tests; no macOS packet-level claim |
 | 12. Teardown | Owned player stop/reap, HTTP listener release, torrent cancellation, no abandoned save publication, source lifetime retained across player switching | Actual mpv/torrent teardown and native window/backend-ready/quit passed |
-| 13. Distribution | AppImage/Flatpak built and installed, rendered UI, host mpv/VLC; installed-policy permanent-save helper | Strict-notice unsigned debug DMG build/mount and earlier native pixels/quit passed; optimized CI artifact result recorded in DONE; signing/notarization require credentials |
+| 13. Distribution | Optimized CI AppImage/Flatpak built, installed/smoked and retained; rendered UI, host mpv/VLC; installed-policy permanent-save helper | Optimized strict-notice unsigned DMG build/mount/native pixels/quit passed and retained; signing/notarization require credentials |
 
 ## Deliberate boundaries
 

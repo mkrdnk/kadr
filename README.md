@@ -29,6 +29,22 @@ smoke, реальные mpv/VLC и сквозные HTTP/torrent/save/resume-п�
 описанных в
 [документации дистрибуции](docs/distribution.md).
 
+## Готовые сборки 0.1.0
+
+[Полный зелёный CI и артефакты](https://github.com/mkrdnk/kadr/actions/runs/43561951626)
+для проверенного кода `d78b61b`:
+
+- [Linux x86_64 — AppImage и Flatpak](https://github.com/mkrdnk/kadr/actions/runs/43561951626/artifacts/14100902780).
+- [macOS arm64 — DMG](https://github.com/mkrdnk/kadr/actions/runs/43561951626/artifacts/14101425537).
+
+В архивах есть SHA-256 и `.requirements.txt`. CI хранит артефакты семь дней;
+после этого доступны исходники и воспроизводимые команды сборки. Это
+**unsigned-кандидаты**, не notarized-релиз. mpv/VLC устанавливаются отдельно.
+На macOS фактические runtime-проверки выполнены на 15 arm64; deployment target
+13.0 не означает отдельного тестирования macOS 13.
+
+## Структура проекта
+
 Workspace содержит:
 
 - `crates/kadr-app` — окно, контроллер и отдельный worker SQLite/плееров.
