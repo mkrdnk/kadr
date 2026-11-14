@@ -95,6 +95,25 @@ impl App {
         panic!("timed out waiting for {description}; observed {observed:?}");
     }
 
+    fn until(&mut self, timeout: Duration, description: &str, predicate: impl Fn() -> bool) {
+        let deadline = Instant::now() + timeout;
+        let mut statuses = Vec::new();
+        while Instant::now() < deadline {
+            if predicate() {
+                return;
+            }
+            if let Ok(event) = self.events.try_recv() {
+                assert_public_feedback_is_private(&event);
+                if let Event::Status(level, message) = event {
+                    statuses.push(format!("{level:?}: {message}"));
+                }
+            } else {
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        panic!("timed out waiting for {description}; observed statuses {statuses:?}");
+    }
+
     fn ready(&mut self) -> Settings {
         match self.wait("Ready", |event| matches!(event, Event::Ready { .. })) {
             Event::Ready { settings, cache } => {
@@ -604,7 +623,7 @@ fn stop_interrupts_pending_http_probe_before_player_launch() {
     app.command(Command::SelectSource(source));
     app.selected();
     app.command(Command::Play { resume: false });
-    eventually(
+    app.until(
         Duration::from_secs(3),
         "origin must receive pending HEAD",
         || origin.heads.load(Ordering::Relaxed) > 0,
@@ -1426,9 +1445,10 @@ fn real_http_fallback_saves_origins_without_validators_or_range_support() {
         measured(&storage, &target, 1.0);
         let destination = root.join("permanent.mp4");
         app.command(Command::SaveTo(destination.clone()));
-        app.wait(
+        app.until(
+            WAIT,
             &format!("whole-response save commits without Range or ETag ({behavior:?})"),
-            |_| storage.saved_file(&target).unwrap().is_some(),
+            || storage.saved_file(&target).unwrap().is_some(),
         );
         assert_eq!(fs::read(&destination).unwrap(), bytes);
         app.stopped();

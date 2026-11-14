@@ -77,10 +77,11 @@ jobs:
         run: python3 scripts/package-private-bus-test.py
       - run: cargo check --locked --workspace --all-targets
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - run: cargo test --locked --workspace
       - id: build
         run: cargo build --locked --workspace --all-targets
+      - run: cargo test --locked --workspace
       - name: Real HTTP torrent playback and permanent-save acceptance
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: cargo test --locked -p kadr-app backend::tests::real_ -- --ignored --test-threads=1
       # Runtime checks are independent; collect all failures, never turn them
       # into a pass. The candidates job still requires the entire matrix green.
