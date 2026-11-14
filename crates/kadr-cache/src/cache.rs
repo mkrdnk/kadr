@@ -249,6 +249,9 @@ pub struct CacheUsage {
 
 impl CacheManager {
     pub fn open(root: PathBuf, limit: u64) -> Result<Self> {
+        // Store the physical Darwin system prefix too: the external torrent
+        // writer receives this path and independently rejects symlink ancestors.
+        let root = fs::normalized_path(&root)?;
         let dir = fs::absolute_dir(&root, true)?;
         let metadata = rustix::fs::fstat(&dir).map_err(|error| io_error(error.into()))?;
         if metadata.st_mode & 0o077 != 0 || metadata.st_uid != rustix::process::geteuid().as_raw() {

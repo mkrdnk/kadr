@@ -16,6 +16,61 @@ fn put(manager: &CacheManager, key: &str, length: u64) -> PathBuf {
     path
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn darwin_system_aliases_produce_physical_leases_and_safe_save_parents() {
+    for (alias, physical) in [("/tmp", "/private/tmp"), ("/var/tmp", "/private/var/tmp")] {
+        // Intentionally do not canonicalize: exercise the standard OS spelling.
+        let temp = tempfile::tempdir_in(alias).unwrap();
+        let manager = CacheManager::open(temp.path().join("cache"), 8).unwrap();
+        let lease = manager.reserve("torrent", 8).unwrap();
+        assert!(lease.path().starts_with(physical));
+        assert!(!lease.path().starts_with(alias));
+        // A second no-follow walker (as in the torrent engine) can use the
+        // physical lease path without depending on system-alias normalization.
+        let mut dir =
+            cap_std::fs::Dir::open_ambient_dir("/", cap_std::ambient_authority()).unwrap();
+        for component in lease.path().components().skip(1) {
+            dir = fs::open_dir(&dir, Path::new(component.as_os_str())).unwrap();
+        }
+        std::fs::write(lease.path().join("payload"), b"data").unwrap();
+        manager.check_save_space(temp.path(), 4).unwrap();
+        let source = Arc::new(
+            kadr_media::LocalFile::open(lease.path().join("payload"))
+                .await
+                .unwrap(),
+        );
+        let destination = temp.path().join("saved");
+        crate::save_source(
+            source.clone(),
+            destination.clone(),
+            &tokio_util::sync::CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(destination).unwrap(), b"data");
+        std::fs::create_dir(temp.path().join("real")).unwrap();
+        let linked = temp.path().join("linked");
+        symlink(temp.path().join("real"), &linked).unwrap();
+        assert_eq!(
+            CacheManager::open(linked.join("cache"), 8).unwrap_err(),
+            Error::UnsafePath
+        );
+        assert_eq!(manager.check_save_space(&linked, 4), Err(Error::UnsafePath));
+        assert_eq!(
+            crate::save_source(
+                source,
+                linked.join("saved"),
+                &tokio_util::sync::CancellationToken::new(),
+                |_| {},
+            )
+            .await,
+            Err(Error::UnsafePath)
+        );
+    }
+}
+
 #[test]
 fn lru_touch_evicts_only_inactive_whole_torrents() {
     let (_temp, manager) = setup(30);

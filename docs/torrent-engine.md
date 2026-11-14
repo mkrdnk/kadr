@@ -23,7 +23,9 @@ server, player, UI, or persistent library.
    for this hash. Never start two sessions concurrently in the same root.
 5. `prepared.start(file_id, cache_output, options, cancel).await` opens storage
    under the fixed `cache_output/payload` subfolder, rehashes existing blocks,
-   and starts downloading only the selected file and its boundary pieces.
+   and registers a selected-file stream **while paused**, before allowing any
+   peer requests. It then starts downloading only the selected file and its
+   boundary pieces, unless the download limit explicitly remains paused.
    `PreparedTorrent` is `Clone`; `start` borrows it for reopening/reselection.
 6. Give `playback.source.clone(): Arc<dyn ByteSource>` to the existing
    loopback-only `kadr_media::Server`. The torrent library's own HTTP/API server
@@ -37,12 +39,24 @@ attributes, duplicate case-insensitive names, and file/directory collisions
 are rejected before opening payload storage. The torrent's display `name` is
 never used as an output directory.
 
+File collision keys use **NFKC → full default Unicode case folding → NFD**
+per component, deterministically on every platform. Both exact-path duplicates
+and file/directory prefix collisions use those keys. This rejects aliases such
+as `é.mp4` / `e` + combining acute + `.mp4`, `Straße.mp4` / `STRASSE.mp4`,
+and Greek sigma variants before two metadata files can share one physical
+file on a normalizing or case-insensitive filesystem. Otherwise later writes
+could invalidate bytes already marked hash-verified. Normalized components
+must also pass the same safe-component checks: compatibility characters must
+not introduce separators, traversal or reserved names. This deliberately
+conservative policy can reject distinct Linux filenames that would alias
+elsewhere. Original display/storage names, including distinct Cyrillic names,
+are preserved; the normalized strings are validation keys only.
+
 Existing symlink components in the cache root, its ancestors, and all payload
 paths are rejected. This is **preflight**, not a race-free sandbox: the cache
 manager must prevent other processes/users from modifying this private tree.
-External edits of already verified files are unsupported. Unicode-normalizing
-filesystems can impose additional filename equivalences not detected by the
-lexical checks; initialization errors are reported without private paths.
+External edits of already verified files are unsupported; initialization errors
+are reported without private paths.
 
 ## Options, limits and consent
 
@@ -111,9 +125,16 @@ bytes. Dropping a read removes its stream and availability waker. Concurrent
 range requests never share a cursor.
 
 Active seeks update upstream's 32 MiB lookahead window. Each read drops its
-lookahead when done, while normal selected-file downloading continues. This is
-the upstream streaming scheduler, not a custom piece deadline algorithm or a
-throughput/SLO guarantee.
+lookahead when done, while normal selected-file downloading continues.
+Production startup retains a separate stream at offset zero until the first
+real read has registered and sought its replacement stream. This installs
+contiguous-prefix priority before the initial peer request burst instead of
+spending that burst on upstream's ordinary first/last/middle file-piece order.
+The startup stream is then dropped even if the first read seeks elsewhere,
+so a stale prefix lookahead does not compete with later requests. The original
+P0 `LocalSession` does not register this startup stream. This is the upstream
+streaming scheduler, not a custom piece deadline algorithm or a throughput/SLO
+guarantee.
 
 `stats() -> EngineStats` exposes numeric counters/rates/peer count and
 `EngineState::{Initializing, Downloading, Ready, Paused, Stopped, Error}` only.
@@ -167,9 +188,12 @@ They cover offline metadata, consent rejection before payload creation,
 metadata-only public-marked magnet exchange against an explicit loopback peer,
 selected-file first/last reads, full save readiness, cached restart with the
 seed stopped, real upload-disable configuration, paused limits, cancellation,
-listener release, unsafe paths and symlink rejection. No test joins an external
-swarm. Existing P0 `LocalSession`, Range, privacy and socket-confinement tests
-remain in place.
+listener release, unsafe paths and symlink rejection. A rate-limited startup
+regression also verifies the fourth contiguous prefix piece is present in the
+initial four-piece request burst, before a player has registered any reads;
+the same assertion fails without paused startup stream registration. No test
+joins an external swarm. Existing P0 `LocalSession`, Range, privacy and
+socket-confinement tests remain in place.
 
 After the parent workspace integrates dependency lockfile changes:
 

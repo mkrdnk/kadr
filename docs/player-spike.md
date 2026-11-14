@@ -69,9 +69,26 @@ Ok(())
 - `try_wait()` не блокируется; `snapshot()` содержит `exit: Option<ExitStatus>`.
   Процесс мог завершиться с ошибкой или по закрытию окна: это не доказательство
   достижения конца видео, и нельзя автоматически ставить «просмотрено».
+- `PlayerSnapshot.completed` — **только подтверждённый mpv EOF**: реально
+  прочитанный JSON event `{"event":"end-file","reason":"eof"}`. События
+  распознаются независимо от request ID. Код выхода 0, близость к длительности,
+  wall clock, `reason: quit/error` и транспортный EOF не устанавливают этот
+  флаг. VLC всегда возвращает false — подтверждение окончания не поддержано.
+  False означает «EOF не подтверждён», а не доказательство неполного просмотра.
 - Нет фонового опроса: вызывающий код сохраняет только реально полученные
   данные. После выхода mpv последняя позиция не запрашивается; её нужно
   запоминать по мере воспроизведения.
+- При обнаруженном child exit `snapshot()` забирает IPC stream и читает
+  оставшиеся события максимум `min(command_timeout, 100 ms)` и суммарно 64 KiB.
+  Так `end-file/eof` можно получить даже после выхода процесса между опросами.
+  После drain stream всегда закрывается, в том числе при timeout, partial JSON,
+  отмене или отбрасывании future; суффикс ответа не переиспользуется.
+  Потерянное, слишком позднее либо выходящее за бюджет событие не угадывается:
+  `completed` остаётся false. Снимайте natural-exit snapshot **до** `stop()`,
+  который освобождает IPC.
+- `completed: true` не создаёт новую позицию. Вызывающая сессия может отдельно
+  отметить завершение у последнего измеренного sample; нельзя подставлять
+  `position = duration` или превращать Unavailable в выдуманные seconds.
 - Дефолты: connect 5 s, IPC command 1 s, stop grace 2 s и kill/reap 2 s.
   Нулевые timeout отвергаются. Snapshot делает максимум два запроса; при
   transport EOF дополнительно ждёт child exit не дольше command timeout.
@@ -166,9 +183,9 @@ lockfile. После интеграции прошли и корневые works
 
 | Точная команда (с env выше) | Результат |
 |---|---|
-| `cargo test --offline --manifest-path "$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml" --all-targets` | 41 passed (7 unit, 20 HTTP, 14 player), 3 real smoke ignored; оба examples собраны |
-| `cargo test --offline --manifest-path "$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml" --test players_smoke -- --ignored --nocapture` | 2 passed: реальные mpv/VLC, в том числе HTTP/resume/stop/EOF |
-| `cargo test --offline --manifest-path "$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml" --test video_smoke -- --ignored --nocapture` | 1 passed: новый MP4 video test, оба реальных плеера, HTTP bytes/Range/resume/stop/EOF |
+| `cargo test --offline --manifest-path "$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml" --all-targets` | 46 passed (7 unit, 20 HTTP, 19 player), 3 real smoke ignored; оба examples собраны |
+| `cargo test --offline --manifest-path "$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml" --test players_smoke -- --ignored --nocapture` | 2 passed: реальные mpv/VLC, HTTP/resume/stop/EOF; mpv completed true только по EOF event, explicit stop false |
+| `cargo test --offline --manifest-path "$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml" --test video_smoke -- --ignored --nocapture` | 1 passed: MP4 video test, оба реальных плеера, HTTP bytes/Range/resume/stop/EOF; mpv actual EOF completion, VLC false |
 | `cargo clippy --offline --manifest-path "$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml" --all-targets -- -D warnings` | Passed |
 | `rustfmt --check --edition 2024 crates/kadr-media/src/players.rs crates/kadr-media/tests/players.rs crates/kadr-media/tests/players_smoke.rs crates/kadr-media/examples/player.rs` | Passed |
 | `cargo run --offline --quiet --manifest-path "$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml" --example player -- mpv "$DELTA_SCRATCH_DIR/own-vlc.wav" 7 --headless` (затем та же команда с `vlc`) | Оба exit 0, source path не печатается |
@@ -180,6 +197,10 @@ Unavailable/Unsupported, malformed/oversized/negative/partial/flood/EOF replies,
 IPC EOF перед child exit, connect timeout, cancellation и отбрасывание futures
 launch/snapshot/stop, noisy stdio, graceful quit → kill, process reap,
 natural nonzero exit, missing executable и cleanup socket directory.
+EOF-regressions также различают настоящие события (в том числе с чужим
+request ID или в очереди после child exit), quit/error/exit0 без EOF,
+position==duration, unrelated events, partial JSON, отменённый drain и flood,
+за которым EOF выходит за суммарный бюджет чтения.
 
 ## Дополнение: собственное тестовое видео MPEG4/AAC MP4
 

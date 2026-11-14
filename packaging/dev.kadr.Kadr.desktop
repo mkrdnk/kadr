@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=kadr
+Comment=Watch video with your own sources and external player
+Exec=kadr
+Icon=dev.kadr.Kadr
+Terminal=false
+Categories=AudioVideo;Video;
+StartupWMClass=dev.kadr.Kadr
+StartupNotify=true

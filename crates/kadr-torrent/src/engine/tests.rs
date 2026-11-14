@@ -20,6 +20,31 @@ fn write_seed(fixture: &fixture::Fixture, output: &Path) {
     std::fs::write(output.join("kadr-fixture/selected.bin"), &fixture.selected).unwrap();
 }
 
+/// Canonical bencode for tiny, locally generated metadata with arbitrary UTF-8
+/// path components. One byte per file; no networking or filesystem needed.
+fn torrent_with_paths(paths: &[&[&str]]) -> Bytes {
+    use sha1::{Digest, Sha1};
+
+    fn string(output: &mut Vec<u8>, value: &[u8]) {
+        output.extend_from_slice(format!("{}:", value.len()).as_bytes());
+        output.extend_from_slice(value);
+    }
+    let mut output = b"d4:infod5:filesl".to_vec();
+    for path in paths {
+        output.extend_from_slice(b"d6:lengthi1e4:pathl");
+        for component in *path {
+            string(&mut output, component.as_bytes());
+        }
+        output.extend_from_slice(b"ee");
+    }
+    output.extend_from_slice(b"e4:name");
+    string(&mut output, b"unicode-fixture");
+    output.extend_from_slice(b"12:piece lengthi16384e6:pieces");
+    string(&mut output, &Sha1::digest(vec![42; paths.len()]));
+    output.extend_from_slice(b"7:privatei1eee");
+    output.into()
+}
+
 async fn read_all(source: &dyn ByteSource) -> Vec<u8> {
     let mut bytes = Vec::new();
     while (bytes.len() as u64) < source.len() {
@@ -110,6 +135,67 @@ fn limits_never_interpret_paused_or_zero_as_unlimited() {
     options.peer_limit = 1;
     options.initial_peers = vec!["192.0.2.1:1234".parse().unwrap()];
     assert!(options.validate().is_err());
+}
+
+#[test]
+fn unicode_aliases_are_rejected_before_payload_storage_on_every_host() {
+    for (first, second) in [
+        ("é.mp4", "e\u{301}.mp4"),
+        ("Straße.mp4", "STRASSE.mp4"),
+        ("Σ.mp4", "σ.mp4"),
+        ("σ.mp4", "ς.mp4"),
+        ("ФИЛЬМ.mp4", "фильм.mp4"),
+        ("Ａ.mp4", "A.mp4"),
+    ] {
+        for (first, second) in [(first, second), (second, first)] {
+            let result = PreparedTorrent::from_bytes(torrent_with_paths(&[&[first], &[second]]));
+            let error = result.expect_err("aliased metadata paths must be rejected");
+            assert!(
+                !format!("{error:?} {error:#}").contains(first),
+                "path rejection must not expose private metadata"
+            );
+        }
+    }
+}
+
+#[test]
+fn normalized_directory_prefixes_and_unsafe_components_are_rejected() {
+    for (file, directory) in [("É", "e\u{301}"), ("Straße", "STRASSE"), ("Σ", "ς")] {
+        assert!(
+            PreparedTorrent::from_bytes(torrent_with_paths(&[&[file], &[directory, "child.mp4"]]))
+                .is_err()
+        );
+        assert!(
+            PreparedTorrent::from_bytes(torrent_with_paths(&[&[directory, "child.mp4"], &[file]]))
+                .is_err()
+        );
+    }
+    for component in [
+        "／secret.mp4", // FULLWIDTH SOLIDUS becomes a separator.
+        "＼secret.mp4", // FULLWIDTH REVERSE SOLIDUS becomes a separator.
+        "．．",         // FULLWIDTH FULL STOP becomes parent traversal.
+        "ＣＯＮ.mp4",   // Compatibility characters become a reserved name.
+        "file：ads.mp4",
+        "name\u{a0}", // NBSP becomes a forbidden trailing space.
+    ] {
+        assert!(PreparedTorrent::from_bytes(torrent_with_paths(&[&[component]])).is_err());
+    }
+}
+
+#[test]
+fn distinct_russian_paths_keep_original_names_and_sizes() {
+    let paths: &[&[&str]] = &[
+        &["Сериал", "Серия 01.mp4"],
+        &["Сериал", "Серия 02.mp4"],
+        &["Фильмы", "Ёжик.mp4"],
+        &["Фильмы", "Ежик.mp4"],
+    ];
+    let prepared = PreparedTorrent::from_bytes(torrent_with_paths(paths)).unwrap();
+    assert_eq!(prepared.total_bytes, paths.len() as u64);
+    for (file, components) in prepared.files.iter().zip(paths) {
+        assert_eq!(file.relative_filename, PathBuf::from(components.join("/")));
+        assert_eq!(file.len, 1);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -401,6 +487,63 @@ async fn disabled_uploads_refuse_payload_and_live_limits_are_applied() {
         assert_eq!(leecher.stats().state, EngineState::Paused);
         leecher.stop().await;
         seed.stop().await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_scheduler_spends_initial_burst_on_contiguous_prefix() {
+    timeout(Duration::from_secs(10), async {
+        let fixture = fixture::Fixture::new(true);
+        let seed_dir = tempfile::tempdir().unwrap();
+        write_seed(&fixture, seed_dir.path());
+        let seed = LocalSession::new(seed_dir.path().into()).await.unwrap();
+        let _seed_file = seed
+            .add_selected(fixture.torrent.clone(), 1, vec![], true)
+            .await
+            .unwrap();
+        let prepared = PreparedTorrent::from_bytes(fixture.torrent).unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let playback = prepared
+            .start(
+                1,
+                output.path().into(),
+                EngineOptions {
+                    download_limit: RateLimit::Bps(65_536),
+                    upload_limit: RateLimit::Paused,
+                    initial_peers: vec![seed.listen_addr()],
+                    ..local_options()
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        // Wait until the initial four-request token burst has arrived, before
+        // registering any player read. Ordinary upstream scheduling spends
+        // its second request on the last piece instead of the fourth prefix
+        // piece. A startup stream must change that ordering before unpause.
+        while playback.stats().progress_bytes < (4 * fixture::PIECE) as u64 {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        let before = playback.stats();
+        assert!(!before.selected_file_ready);
+        let offset = 3 * fixture::PIECE - fixture::PREFIX;
+        let prefix = timeout(
+            Duration::from_millis(80),
+            playback.source.read_at(offset as u64, 1),
+        )
+        .await;
+        playback.stop().await;
+        seed.stop().await;
+        assert!(
+            prefix.is_ok(),
+            "fourth prefix piece missed initial burst: {before:?}"
+        );
+        assert_eq!(
+            &prefix.unwrap().unwrap()[..],
+            &fixture.selected[offset..offset + 1]
+        );
     })
     .await
     .unwrap();

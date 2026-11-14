@@ -271,6 +271,7 @@ impl LocalSession {
                 handle,
                 file_id,
                 length,
+                startup_stream: std::sync::Mutex::new(None),
             }),
         })
     }
@@ -294,6 +295,9 @@ pub struct TorrentByteSource {
     handle: Arc<ManagedTorrent>,
     file_id: usize,
     length: u64,
+    // Production registers this stream while paused, before any peer requests.
+    // Type erasure is drop-only: upstream's FileStream type isn't re-exported.
+    startup_stream: std::sync::Mutex<Option<Box<dyn Send>>>,
 }
 
 impl TorrentByteSource {
@@ -330,6 +334,15 @@ impl ByteSource for TorrentByteSource {
                     .seek(SeekFrom::Start(offset))
                     .await
                     .map_err(|error| io::Error::new(error.kind(), "torrent seek failed"))?;
+                // The replacement is registered and positioned before removing
+                // the startup prefix priority. Never retain an obsolete prefix
+                // lookahead when the first real request is a seek elsewhere.
+                let startup_stream = self
+                    .startup_stream
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                drop(startup_stream);
                 let size = (max_len.min(64 * 1024) as u64).min(self.length - offset) as usize;
                 let mut bytes = vec![0; size];
                 // A single read returns a verified prefix, possibly only to the

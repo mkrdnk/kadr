@@ -23,6 +23,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -39,21 +42,57 @@ jobs:
             libxcb-sync-dev libxcb-render0-dev libxcb-render-util0-dev \
             libxcb-composite0-dev libxcb-damage0-dev libxcb-present-dev \
             libvulkan1 mesa-vulkan-drivers xvfb openbox weston xdotool wmctrl \
-            fonts-dejavu-core
+            fonts-dejavu-core imagemagick xserver-xorg-core xserver-xorg-video-dummy \
+            mpv vlc-bin vlc-plugin-base ffmpeg
       - name: Select full Xcode
         if: runner.os == 'macOS'
         run: |
           test -d /Applications/Xcode.app/Contents/Developer
           sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
           xcrun --find metal
+      - name: Install macOS test players
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+        run: |
+          brew install mpv ffmpeg
+          brew install --cask vlc
+          mkdir -p "$RUNNER_TEMP/kadr-player-bin"
+          ln -s /Applications/VLC.app/Contents/MacOS/VLC "$RUNNER_TEMP/kadr-player-bin/vlc"
+          echo "$RUNNER_TEMP/kadr-player-bin" >> "$GITHUB_PATH"
       - run: cargo fmt --all -- --check
       - run: cargo check --locked --workspace --all-targets
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
       - run: cargo build --locked --workspace --all-targets
+      - name: Real HTTP torrent playback and permanent-save acceptance
+        run: cargo test --locked -p kadr-app backend::tests::real_ -- --ignored --test-threads=1
+      - name: Real mpv and VLC playback
+        run: |
+          cargo test --locked -p kadr-media --test players_smoke -- --ignored
+          cargo test --locked -p kadr-media --test video_smoke -- --ignored
       - name: Native X11 lifecycle smoke
         if: runner.os == 'Linux'
         run: python3 scripts/smoke-x11.py target/debug/kadr-app
       - name: Native Wayland lifecycle in nested Weston
         if: runner.os == 'Linux'
         run: python3 scripts/smoke-wayland.py --binary target/debug/kadr-app --timeout 30
+      - name: Rendered native X11 acceptance
+        if: runner.os == 'Linux'
+        run: python3 scripts/smoke-xorg.py --binary target/debug/kadr-app --artifacts target/smoke-xorg
+      - name: Native macOS rendering and lifecycle
+        if: runner.os == 'macOS'
+        run: python3 scripts/smoke-macos.py --binary target/debug/kadr-app --artifacts target/smoke-macos --screenshot
+      - name: Build and open macOS DMG
+        if: runner.os == 'macOS'
+        env:
+          # Local unsigned mount/render QA only; no artifact upload/publication.
+          KADR_ALLOW_INCOMPLETE_NOTICES: '1'
+        run: |
+          scripts/package-dmg.sh --binary target/debug/kadr-app
+          set -- target/dist/*.dmg
+          test "$#" -eq 1
+          mkdir -p "$RUNNER_TEMP/kadr-dmg"
+          hdiutil attach -nobrowse -readonly "$1" -mountpoint "$RUNNER_TEMP/kadr-dmg"
+          trap 'hdiutil detach "$RUNNER_TEMP/kadr-dmg"' EXIT
+          python3 scripts/smoke-macos.py --binary "$RUNNER_TEMP/kadr-dmg/kadr.app/Contents/MacOS/kadr" --artifacts target/smoke-dmg --screenshot

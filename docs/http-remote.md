@@ -83,3 +83,57 @@ locations, or response bodies. The adapter performs no logging.
 `tests/remote.rs` uses real loopback TCP sockets with controlled HEAD/GET/redirect
 responses, without external network access. Private unit tests check the public
 redirect address guard and the full-operation timeout using paused Tokio time.
+
+## Sequential saving without Range or validators
+
+`kadr_media::HttpDownload` is a separate, sequential API for saving an approved
+HTTP source when positional `RemoteSource` is unavailable:
+
+```rust,ignore
+let mut download = kadr_media::HttpDownload::open(approved_url, cancel.clone()).await?;
+let length = download.len(); // exact, immutable length; use for disk checks
+loop {
+    let bytes = download.next_chunk(64 * 1024).await?;
+    if bytes.is_empty() {
+        break; // validated EOF
+    }
+    // Write to the atomic saver’s private temporary file, never final output.
+    temporary_file.write_all(&bytes).await?;
+}
+// Flush/sync and publish without clobbering only after successful completion.
+```
+
+Opening sends one full GET (no HEAD and no Range) and requires status 200,
+explicit `Content-Length`, and identity content encoding. No ETag or modification
+date is needed: all returned bytes belong to that single HTTP response. A server
+that ignores Range or has no validators can therefore still be saved. Saving
+starts a new request; bytes buffered inside an external player cannot be reused.
+
+This type **does not implement ByteSource**: its mutable `next_chunk` API is
+sequential, and cannot be mistaken for arbitrary positional reading. It must not
+be supplied directly to the loopback range server. Each call returns at most
+64 KiB (or the caller's smaller limit). Retained data is at most one transport
+chunk, explicitly capped at 512 KiB, plus bounded HTTP buffers. Neither a large
+advertised length nor the full file is allocated in memory.
+
+The final nonempty chunk is withheld until response EOF is validated. This
+ensures length-driven savers cannot publish a file before the last framing/body
+error is known. Short bodies and excess decoded body bytes fail; ambiguous
+Content-Range/Transfer-Encoding responses are rejected. HTTP Content-Length
+defines the framed body: transport bytes after that body are not part of the
+download and are never appended to saved output.
+
+URL validation, safe redirects (maximum five), DNS pinning, no-proxy behavior,
+identity encoding, header limits, redacted diagnostics, and connection timeout
+all reuse the same implementation as `RemoteSource`. Opening and **each chunk
+read** have a 30-second deadline. There is no 30-second whole-download deadline:
+large saves can take longer, while stalled reads remain bounded. Cancellation
+or a read error poisons the download and releases its response. Dropping the
+download closes the body; dropping just a `next_chunk` future preserves its
+cursor and pending bytes for a retry.
+
+Unknown-length/chunked-only origins are explicitly unsupported, rather than
+inventing a length or weakening the atomic saver's disk-space/accounting rules.
+Supporting those requires a separately designed unknown-length saving path.
+`tests/download.rs` covers full-GET saving with loopback origins, without public
+network access.

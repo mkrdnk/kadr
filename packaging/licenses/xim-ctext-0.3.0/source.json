@@ -1,0 +1,17 @@
+{
+  "name": "xim-ctext",
+  "version": "0.3.0",
+  "license_expression": "MIT",
+  "vcs_sha1": "65f77e44524ba487285a63aac4080faf2c05b4ed",
+  "path_in_vcs": "xim-ctext",
+  "repository": "https://github.com/Riey/xim-rs",
+  "evidence": "Published crate Cargo metadata and .cargo_vcs_info.json identify repository, exact commit and path; xim-ctext/Cargo.toml at that commit confirms package name/version/license. Workspace-root legal files apply to the published member.",
+  "files": [
+    {
+      "path": "_texts/efa1224931b98468f5005f77285457f8d2eab0a77a15941aa10abbab1ae9a74e.txt",
+      "upstream_path": "LICENSE",
+      "url": "https://raw.githubusercontent.com/Riey/xim-rs/65f77e44524ba487285a63aac4080faf2c05b4ed/LICENSE",
+      "sha256": "efa1224931b98468f5005f77285457f8d2eab0a77a15941aa10abbab1ae9a74e"
+    }
+  ]
+}

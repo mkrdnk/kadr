@@ -1,0 +1,17 @@
+{
+  "name": "xim-parser",
+  "version": "0.2.2",
+  "license_expression": "MIT",
+  "vcs_sha1": "7300de35a111de2df1a694bf70454532a8419685",
+  "path_in_vcs": "xim-parser",
+  "repository": "https://github.com/Riey/xim-rs",
+  "evidence": "Published crate Cargo metadata and .cargo_vcs_info.json identify repository, exact commit and path; xim-parser/Cargo.toml at that commit confirms package name/version/license. Workspace-root legal files apply to the published member.",
+  "files": [
+    {
+      "path": "_texts/efa1224931b98468f5005f77285457f8d2eab0a77a15941aa10abbab1ae9a74e.txt",
+      "upstream_path": "LICENSE",
+      "url": "https://raw.githubusercontent.com/Riey/xim-rs/7300de35a111de2df1a694bf70454532a8419685/LICENSE",
+      "sha256": "efa1224931b98468f5005f77285457f8d2eab0a77a15941aa10abbab1ae9a74e"
+    }
+  ]
+}

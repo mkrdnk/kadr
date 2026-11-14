@@ -38,7 +38,8 @@ fn worker_example() -> kadr_storage::Result<()> {
     let target = PlaybackTarget { media_id: media.clone(), episode: None };
     storage.set_favorite(&media, true)?;
     storage.link_source(&target, &source)?;
-    storage.record_opened(&media, &source, 1_700_000_000)?;
+    // Only after the player/browser launch actually succeeds:
+    storage.record_opened_target(&target, &source, 1_700_000_000)?;
     let _resume = storage.load_progress(&target)?;
 
     // Only when a managed player actually reports this observation:
@@ -143,6 +144,9 @@ The public connection is opaque; callers cannot bypass validation via it.
    optional cache directory. Existing history/progress IDs and settings survive.
    Old IDs cannot recover previously discarded URLs: legacy items show without
    resumable input until the user selects a source again.
+4. Exact per-target actual-open history with immutable source/file selections.
+   Existing media-wide v3 open timestamps migrate to item-level history only.
+   Neither measured progress nor a source link invents an episode open timestamp.
 
 Opening uses `BEGIN IMMEDIATE`, checks the version, applies the entire missing
 migration chain and updates `user_version` in **one transaction**. Any failure
@@ -170,11 +174,18 @@ OS error strings. Fine-grained retry/recovery UX is left to the application.
 
 - `set_favorite` changes only the favorite flag; `library_entry` looks up one
   item and `favorites` returns favorites in stable ID order.
-- `record_opened` records only media ID, source ID and nonnegative Unix seconds.
-  It cannot turn an open/launch into fabricated playback telemetry. `history`
+- `record_opened_target(&PlaybackTarget, &SourceId, opened_at)` records an actual
+  successful player/browser launch for that exact item/episode, with a snapshot
+  of its linked source/file selection. Call it **after** launch success, never
+  during source selection or after a failed launch. Same-ID selection requires
+  `save_source` + `link_source` before launch. No progress row is created.
+  `record_opened(media, source, time)` remains an item-level compatibility wrapper.
+  Target history and the media-wide history summary update atomically; newest
+  timestamp wins independently per target, so an older episode's first open
+  can be retained without overwriting a newer media-wide open. `history`
   returns 1..=1000 entries, newest first with an ID tie-breaker. Older open
-  events cannot overwrite newer history. It creates an item-level source link,
-  but does not itself save the source descriptor.
+  events cannot overwrite newer history. Recording an open links that exact
+  target but does not itself save the source descriptor.
 - `PlaybackTarget` is media ID plus optional `EpisodeKey`. Season 0 is allowed
   for specials; episodes start at 1. Item-level progress and each season/episode
   are independent. The internal `(-1, -1)` item sentinel is never accepted as
@@ -195,7 +206,8 @@ OS error strings. Fine-grained retry/recovery UX is left to the application.
   descriptors not referenced by those links are deleted, including unlinked
   inputs and the original URLs of non-favorite saved copies. Favorite source
   inputs/selections remain so the user can reopen them, but measured positions
-  and history timestamps are removed. Unretained media snapshots are deleted.
+  and all target-history timestamps/selections are removed. Unretained media
+  snapshots are deleted.
   This is **not forensic erasure** of free pages, journals, backups or snapshots.
 
 ### Durable sources and episode selection
@@ -245,14 +257,15 @@ to this record. Attribution is display text, not code. Poster URLs must be
 HTTP(S); storage never downloads them. `upsert_media` and `media_record` write/
 read validated snapshots without making a catalog-only result a library item.
 
-`library(limit)` returns 1..=1000 `LibraryItem` snapshots, ordered by newest open
-timestamp then media ID. Each has `entry`, `target`, optional `media`, optional latest
+`library(limit)` accepts a limit of 1..=1000 `LibraryItem` snapshots, ordered by
+newest media open timestamp then media ID. Each has `entry`, `target`, `opened_at`,
+optional `media`, optional latest
 measured `progress` (including the exact episode target), and optional `source`.
 Progress-only items, favorites and saved-copy items are included. Missing
 metadata/descriptors remain `None`, not guessed titles/URLs. If progress exists,
 its matching source/selection is returned: a newer browser launch must never
-pair an old position with a different source. Without progress, the item-level
-history source or a retained source link is available for reopening from start.
+pair an old position with a different source. Without progress, the latest
+actual-open target or a retained source link is available for reopening from start.
 Use `item.target` for playback, not an assumed item-level target: a retained
 favorite or saved-copy episode can have no progress after clearing history.
 With multiple retained links but no history/progress, the highest season/episode
@@ -263,14 +276,14 @@ saved target. Opening a different episode uses `source_for_target` explicitly.
 For an episode-selectable library, use
 `library_targets(limit) -> Result<Vec<LibraryItem>>`. It returns **one row per
 distinct `PlaybackTarget`**, taking the union of measured progress, source links
-and saved copies, plus item-level history. A favorite with no concrete targets
+and saved copies, plus exact target history. A favorite with no concrete targets
 gets one item-level row; favoriting a series never fabricates episode targets.
 The favorite flag remains media-level and is shared by that media's target rows.
 Source-only and saved-only episodes remain selectable even without telemetry.
 Targets present in several tables appear only once.
 
-Rows are ordered by the newest relevant progress/saved timestamp (or item-level
-open timestamp), then media ID, season and episode ascending. Source-only links
+Rows are ordered by the newest relevant progress/saved/target-open timestamp,
+then media ID, season and episode ascending. Source-only links
 have no timestamp and sort after dated rows with the same stable tie-breakers.
 The accepted limit is 1..=1000 **target rows**, not media items.
 `library_target(&PlaybackTarget) -> Result<Option<LibraryItem>>` reloads exactly
@@ -280,6 +293,16 @@ Both calls read consistent transactional snapshots. For progress-bearing rows,
 the source and file selection come from that target's immutable progress
 snapshot, even if a newer browser open or file selection changed the media's
 last source/current link.
+
+**History filters must use `item.opened_at.is_some()`**, not playback position,
+progress presence, or `item.entry.last_opened_at`. `opened_at` is the actual-open
+timestamp for `item.target`; the entry timestamp is a media-wide summary and
+may belong to another episode. Browser opens have real history but no measured
+progress. A merely linked source (including a failed launch), a saved copy, or
+progress without a recorded launch has no invented history timestamp. Without
+progress, an opened target resumes using its actual-open source/file snapshot,
+not a later prelaunch selection. `library()` also reports only its chosen
+target's exact `opened_at`, even when another episode has newer media history.
 
 The UI may encode a row key from media ID plus season/episode, but must pass the
 typed `PlaybackTarget` back to storage. A composite UI key containing `@` is not

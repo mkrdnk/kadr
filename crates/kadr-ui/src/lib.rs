@@ -1,18 +1,18 @@
-//! Small, controller-driven GPUI shell for kadr.
+//! Controller-driven GPUI presentation layer for kadr.
 //!
 //! Subscribe to [`UiEvent`] before showing the view. The controller owns all
-//! clipboard/dialog access, validation, persistence, network and player work.
+//! source clipboard/dialog access, validation, persistence, network and player work.
 //! Setters only change display state and notify GPUI; rendering performs no IO.
 
+mod input;
 mod model;
+mod screens;
 
-pub use model::{
-    PlayerChoice, Section, SectionState, SourceKind, SourcePreview, StatusLevel, UiEvent, UiStatus,
-};
+pub use model::*;
 
 use gpui::{
-    Context, Div, EventEmitter, FocusHandle, KeyDownEvent, Stateful, Window, div, prelude::*, px,
-    rgb,
+    Context, Div, ElementId, EventEmitter, FocusHandle, KeyDownEvent, Stateful, Window, div,
+    prelude::*, px, rgb,
 };
 use model::ShellModel;
 
@@ -34,6 +34,11 @@ const ERROR: u32 = 0xf2a6a6;
 pub struct KadrView {
     model: ShellModel,
     focus: Option<FocusHandle>,
+    inputs: Option<screens::Inputs>,
+    library_filter: screens::LibraryFilter,
+    preferences_loaded: bool,
+    applied_catalog_enabled: bool,
+    detail_open: bool,
 }
 
 impl EventEmitter<UiEvent> for KadrView {}
@@ -42,6 +47,13 @@ impl EventEmitter<UiEvent> for KadrView {}
 enum Command {
     Navigate(Section),
     Emit(UiEvent),
+    Search,
+    SavePreferences,
+    AssignEpisode,
+    ToggleTorrents,
+    ToggleCatalog,
+    FilterLibrary(screens::LibraryFilter),
+    BackToResults,
 }
 
 impl KadrView {
@@ -97,17 +109,126 @@ impl KadrView {
         cx.notify();
     }
 
+    pub fn set_search_results(&mut self, rows: Vec<MediaCard>, cx: &mut Context<Self>) {
+        self.model.results = rows;
+        self.detail_open = false;
+        cx.notify();
+    }
+
+    pub fn set_media_detail(&mut self, media: Option<MediaCard>, cx: &mut Context<Self>) {
+        self.detail_open = media.is_some();
+        self.model.media = media;
+        self.model.selected_episode = None;
+        self.model.media_favorite = false;
+        cx.notify();
+    }
+
+    pub fn set_media_favorite(&mut self, favorite: bool, cx: &mut Context<Self>) {
+        self.model.media_favorite = favorite;
+        cx.notify();
+    }
+
+    pub fn set_cache_directory(&mut self, directory: String, cx: &mut Context<Self>) {
+        self.model.preferences.cache_directory = directory.clone();
+        if let Some(inputs) = &self.inputs {
+            inputs
+                .cache_directory
+                .update(cx, |input, cx| input.set_value(directory, cx));
+        }
+        cx.notify();
+    }
+
+    pub fn set_sources(&mut self, rows: Vec<SourceRow>, cx: &mut Context<Self>) {
+        self.model.sources = rows;
+        cx.notify();
+    }
+
+    pub fn set_torrent_files(&mut self, rows: Vec<TorrentFileRow>, cx: &mut Context<Self>) {
+        self.model.files = rows;
+        self.model.selected_file = None;
+        cx.notify();
+    }
+
+    pub fn set_library(&mut self, rows: Vec<LibraryRow>, cx: &mut Context<Self>) {
+        self.model.library = rows;
+        cx.notify();
+    }
+
+    pub fn set_transfer(&mut self, transfer: Option<TransferView>, cx: &mut Context<Self>) {
+        self.model.transfer = transfer;
+        cx.notify();
+    }
+
+    pub fn set_preferences(&mut self, preferences: PreferencesDraft, cx: &mut Context<Self>) {
+        if let Some(inputs) = &self.inputs {
+            inputs.set_preferences(&preferences, cx);
+        }
+        self.applied_catalog_enabled = preferences.catalog_enabled;
+        self.model.preferences = preferences;
+        self.preferences_loaded = true;
+        cx.notify();
+    }
+
     fn run_command(&mut self, command: &Command, cx: &mut Context<Self>) {
         match command {
             Command::Navigate(section) => self.show_section(*section, cx),
-            Command::Emit(event) if self.model.accepts(event) => cx.emit(event.clone()),
+            Command::Emit(event) if self.model.accepts(event) => {
+                match event {
+                    UiEvent::SelectEpisode { season, number } => {
+                        self.model.selected_episode = Some((*season, *number));
+                        cx.notify();
+                    }
+                    UiEvent::ChooseTorrentFile(index) => {
+                        self.model.selected_file = Some(*index);
+                        if let Some(file) =
+                            self.model.files.iter().find(|file| file.index == *index)
+                            && let Some(inputs) = &self.inputs
+                        {
+                            inputs.season.update(cx, |input, cx| {
+                                input.set_value(
+                                    file.season.map(|n| n.to_string()).unwrap_or_default(),
+                                    cx,
+                                )
+                            });
+                            inputs.episode.update(cx, |input, cx| {
+                                input.set_value(
+                                    file.episode.map(|n| n.to_string()).unwrap_or_default(),
+                                    cx,
+                                )
+                            });
+                        }
+                        cx.notify();
+                    }
+                    _ => {}
+                }
+                cx.emit(event.clone());
+            }
             Command::Emit(_) => {}
+            Command::Search => self.submit_search(cx),
+            Command::SavePreferences => self.submit_preferences(cx),
+            Command::AssignEpisode => self.submit_episode(cx),
+            Command::ToggleTorrents => {
+                self.model.preferences.torrents_enabled = !self.model.preferences.torrents_enabled;
+                cx.notify();
+            }
+            Command::ToggleCatalog => {
+                self.model.preferences.catalog_enabled = !self.model.preferences.catalog_enabled;
+                cx.notify();
+            }
+            Command::FilterLibrary(filter) => {
+                self.library_filter = *filter;
+                cx.notify();
+            }
+            Command::BackToResults => {
+                self.detail_open = false;
+                cx.notify();
+            }
         }
     }
 
     fn button(
         &self,
-        id: &'static str,
+        id: impl Into<ElementId>,
         label: impl Into<String>,
         command: Command,
         selected: bool,
@@ -188,7 +309,7 @@ impl KadrView {
                     .pt_4()
                     .text_xs()
                     .text_color(rgb(MUTED))
-                    .child("P1 / локальное приложение"),
+                    .child("Локальное приложение"),
             )
     }
 
@@ -240,34 +361,6 @@ impl KadrView {
         )
     }
 
-    fn search(&self, cx: &mut Context<Self>) -> Div {
-        column().child(self.state_card(Section::Search, cx)).child(
-            panel()
-                .child(eyebrow("БЕЗ РЕКОМЕНДАЦИЙ И ПОДБОРОК"))
-                .child(body(
-                    "Здесь будет поиск фильмов и сериалов по названию. \
-                         Провайдер метаданных пока не выбран; вымышленных результатов здесь нет.",
-                ))
-                .child(self.open_source_button(cx)),
-        )
-    }
-
-    fn library(&self, cx: &mut Context<Self>) -> Div {
-        column().child(self.state_card(Section::Library, cx)).child(
-            panel()
-                .child(eyebrow("ВАША ЛОКАЛЬНАЯ БИБЛИОТЕКА"))
-                .child(body(
-                    "Список избранного и истории появится здесь после подключения \
-                         экрана библиотеки. Сейчас отдельные записи не отображаются.",
-                ))
-                .child(body(
-                    "Продолжение с сохранённой позиции требует телеметрии плеера. \
-                         Для произвольного браузера она не гарантируется.",
-                ))
-                .child(self.open_source_button(cx)),
-        )
-    }
-
     fn sources(&self, cx: &mut Context<Self>) -> Div {
         let can_paste = self.model.accepts(&UiEvent::PasteSource);
         let can_open = self.model.accepts(&UiEvent::OpenTorrent);
@@ -307,6 +400,9 @@ impl KadrView {
                 )),
         );
 
+        content = content
+            .child(self.source_rows(cx))
+            .child(self.torrent_files(cx));
         if let Some(source) = &self.model.source {
             content = content.child(
                 panel()
@@ -317,6 +413,23 @@ impl KadrView {
                         "Плеер по умолчанию: {}",
                         self.model.default_player.label()
                     )))
+                    .child(
+                        div().flex().flex_wrap().gap_2().children(
+                            PlayerChoice::ALL
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, player)| {
+                                    self.button(
+                                        ("source-player", index),
+                                        player.label(),
+                                        Command::Emit(UiEvent::SetDefaultPlayer(player)),
+                                        self.model.default_player == player,
+                                        !self.model.playback_active,
+                                        cx,
+                                    )
+                                }),
+                        ),
+                    )
                     .child(
                         div()
                             .flex()
@@ -360,7 +473,7 @@ impl KadrView {
                         ))
                     })
                     .when(!self.model.playback_available, |card| {
-                        card.child(body("Запуск плеера ещё не подключён."))
+                        card.child(body("Источник ещё не готов к запуску. Дождитесь проверки или выберите другой."))
                     })
                     .when(self.model.playback_active, |card| {
                         card.child(body(
@@ -371,12 +484,12 @@ impl KadrView {
         }
         // A preview is a real controller-provided success state; don't also show
         // the default "empty" card. Loading and errors remain visible.
-        if self.model.source.is_none()
-            || !matches!(
-                self.model.states[Section::Sources.index()],
-                SectionState::Empty(_)
-            )
-        {
+        if self.show_state(
+            Section::Sources,
+            self.model.source.is_some()
+                || !self.model.sources.is_empty()
+                || !self.model.files.is_empty(),
+        ) {
             content = content.child(self.state_card(Section::Sources, cx));
         }
         content
@@ -389,30 +502,6 @@ impl KadrView {
                          у вас есть права. BitTorrent может отдавать загруженные части \
                          другим участникам сети.",
             )))
-    }
-
-    fn transfers(&self, cx: &mut Context<Self>) -> Div {
-        column()
-            .child(self.state_card(Section::Transfers, cx))
-            .child(
-                panel()
-                    .child(eyebrow("СОСТОЯНИЕ СЕССИИ"))
-                    .child(body(
-                        "Здесь появятся этап буферизации, загрузка и отдача, скорость и пиры. \
-                         Неизвестные значения не заменяются нулями или демонстрационным прогрессом.",
-                    ))
-                    .child(self.button(
-                        "stop-transfer",
-                        "Остановить сессию",
-                        Command::Emit(UiEvent::Stop),
-                        false,
-                        self.model.playback_active,
-                        cx,
-                    ))
-                    .when(!self.model.playback_active, |card| {
-                        card.child(self.open_source_button(cx))
-                    }),
-            )
     }
 
     fn settings(&self, cx: &mut Context<Self>) -> Div {
@@ -443,7 +532,11 @@ impl KadrView {
                 self.model.default_player == PlayerChoice::Browser,
                 |content| content.child(browser_warning()),
             )
-            .child(self.state_card(Section::Settings, cx))
+            .child(self.preference_fields(cx))
+            .when(
+                self.show_state(Section::Settings, self.preferences_loaded),
+                |content| content.child(self.state_card(Section::Settings, cx)),
+            )
             .child(
                 panel()
                     .child(eyebrow("ЛОКАЛЬНО И БЕЗ АККАУНТА"))
@@ -461,6 +554,10 @@ impl KadrView {
 
 impl Render for KadrView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.inputs.is_none() {
+            input::init(cx);
+            self.inputs = Some(screens::Inputs::new(&self.model.preferences, cx));
+        }
         // Establish the root keyboard focus once. Subsequent renders preserve
         // the user's focused control. This is GPUI state, not platform IO.
         if self.focus.is_none() {
@@ -522,7 +619,7 @@ impl Render for KadrView {
                             .p_6()
                             .border_b_1()
                             .border_color(rgb(BORDER))
-                            .child(eyebrow("KADR / РАННИЙ КАРКАС"))
+                            .child(eyebrow("KADR"))
                             .child(div().text_2xl().child(section.title()))
                             .child(body(subtitle)),
                     )

@@ -249,6 +249,14 @@ async fn real_mpv_vlc_generated_mp4_http_resume_stop_and_eof() {
         sleep(Duration::from_millis(250)).await;
         assert!(session.try_wait().unwrap().is_none());
         assert!(session.stop().await.unwrap().success());
+        assert!(
+            !session
+                .snapshot(&CancellationToken::new())
+                .await
+                .unwrap()
+                .completed,
+            "explicit stop is not natural EOF"
+        );
         assert_player_reads(kind, &source);
         server.shutdown().await.unwrap();
 
@@ -272,6 +280,12 @@ async fn real_mpv_vlc_generated_mp4_http_resume_stop_and_eof() {
         assert!(
             started.elapsed() < Duration::from_secs(6),
             "resumed eight-second MP4 must finish earlier than unresumed video"
+        );
+        let snapshot = session.snapshot(&CancellationToken::new()).await.unwrap();
+        assert_eq!(
+            snapshot.completed,
+            kind == PlayerKind::Mpv,
+            "only mpv reports actual end-file/eof; VLC stays unsupported"
         );
         assert!(session.stop().await.unwrap().success());
         assert_player_reads(kind, &source);

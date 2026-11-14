@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.kadr.Kadr</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <name>kadr</name>
+  <summary>Watch video with your own sources and external player</summary>
+  <description>
+    <p>kadr is a desktop video application for user-provided sources. Playback uses
+    a separately installed mpv or VLC. Only access content you are authorized to use.</p>
+    <p>The Flatpak edition launches the player on the host and requires permission
+    to execute host commands. It is not an isolation boundary for untrusted code.</p>
+  </description>
+  <launchable type="desktop-id">dev.kadr.Kadr.desktop</launchable>
+  <url type="homepage">https://github.com/mkrdnk/kadr</url>
+  <url type="bugtracker">https://github.com/mkrdnk/kadr/issues</url>
+  <provides><binary>kadr</binary></provides>
+  <content_rating type="oars-1.1"/>
+</component>

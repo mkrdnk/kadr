@@ -1,5 +1,6 @@
 mod backend;
 mod desktop;
+mod posters;
 
 use std::{
     cell::{Cell, RefCell},
@@ -22,12 +23,20 @@ fn request_quit(cx: &App) {
 }
 
 fn main() -> ExitCode {
+    // An unattended platform smoke still creates the real window/renderer.
+    // It never opens a source or sends a catalogue query.
+    let smoke_ui = std::env::args_os().any(|argument| argument == "--smoke-ui");
     let exit_code = Rc::new(Cell::new(ExitCode::SUCCESS));
     let startup_exit_code = Rc::clone(&exit_code);
     let desktop = Rc::new(RefCell::new(None::<Rc<RefCell<desktop::Desktop>>>));
     let running_desktop = desktop.clone();
 
-    Application::new().run(move |cx: &mut App| {
+    let application = Application::new();
+    let application = match posters::Posters::new() {
+        Ok(client) => application.with_http_client(std::sync::Arc::new(client)),
+        Err(_) => application,
+    };
+    application.run(move |cx: &mut App| {
         cx.on_action(|_: &Quit, cx| request_quit(cx));
         cx.bind_keys([
             KeyBinding::new("ctrl-q", Quit, None),
@@ -52,7 +61,7 @@ fn main() -> ExitCode {
                 title: Some("kadr".into()),
                 ..Default::default()
             }),
-            app_id: Some("kadr".into()),
+            app_id: Some("dev.kadr.Kadr".into()),
             ..Default::default()
         };
 
@@ -67,6 +76,17 @@ fn main() -> ExitCode {
                         cx,
                     );
                 }),
+            }
+            if smoke_ui {
+                window.on_next_frame(|_, _| eprintln!("kadr-ui-smoke: frame"));
+                let timer = cx
+                    .background_executor()
+                    .timer(std::time::Duration::from_secs(5));
+                cx.spawn(async move |cx| {
+                    timer.await;
+                    let _ = cx.update(|cx| request_quit(cx));
+                })
+                .detach();
             }
             view
         }) {

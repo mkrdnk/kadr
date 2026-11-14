@@ -1,5 +1,5 @@
-//! Display-only state. Raw source URLs, credentials and filesystem paths belong
-//! to the application controller, not to this model.
+//! Display-only state. Source URLs and credentials belong to the controller.
+//! Metadata, public poster URLs and user-configured cache paths are display data.
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Section {
@@ -84,6 +84,7 @@ pub enum SourceKind {
     Http,
     Magnet,
     TorrentFile,
+    LocalFile,
 }
 
 impl SourceKind {
@@ -92,6 +93,7 @@ impl SourceKind {
             Self::Http => "HTTP(S)",
             Self::Magnet => "Magnet",
             Self::TorrentFile => ".torrent",
+            Self::LocalFile => "Локальное видео",
         }
     }
 }
@@ -180,6 +182,141 @@ pub enum UiEvent {
     SetDefaultPlayer(PlayerChoice),
     Retry(Section),
     Cancel(Section),
+    Search(String),
+    OpenMedia(String),
+    FindSources,
+    SelectEpisode { season: u16, number: u16 },
+    ChooseSource(usize),
+    ToggleFavorite,
+    SetFavorite { id: String, favorite: bool },
+    OpenLibrary(String),
+    ChooseTorrentFile(usize),
+    AssignEpisode { season: u16, number: u16 },
+    Save,
+    OpenIn(PlayerChoice),
+    SavePreferences(PreferencesDraft),
+    ChooseCacheDirectory,
+    ClearCache,
+    ClearHistory,
+    UnlinkMedia,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaKind {
+    Movie,
+    Series,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EpisodeRow {
+    pub season: u16,
+    pub number: u16,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaCard {
+    pub id: String,
+    pub title: String,
+    pub original_title: Option<String>,
+    pub year: Option<u16>,
+    pub description: Option<String>,
+    /// Public metadata URL only, never a playback or authenticated URL.
+    pub poster_url: Option<String>,
+    pub kind: MediaKind,
+    pub episodes: Vec<EpisodeRow>,
+    pub attribution: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceRow {
+    pub index: usize,
+    pub title: String,
+    pub kind: SourceKind,
+    pub quality: Option<String>,
+    pub language: Option<String>,
+    pub origin: String,
+    pub license: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TorrentFileRow {
+    pub index: usize,
+    pub name: String,
+    pub size: u64,
+    pub season: Option<u16>,
+    pub episode: Option<u16>,
+    pub ambiguous: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LibraryRow {
+    pub id: String,
+    pub title: String,
+    pub details: String,
+    pub favorite: bool,
+    /// Actual successful source open, independently of player telemetry.
+    pub opened_at: Option<i64>,
+    pub completed: bool,
+    /// Measured playback position and duration in seconds, not byte progress.
+    pub position: Option<u64>,
+    pub duration: Option<u64>,
+}
+
+impl LibraryRow {
+    pub fn has_history(&self) -> bool {
+        self.opened_at.is_some()
+    }
+
+    pub fn can_resume(&self) -> bool {
+        !self.completed
+            && self.position.is_some_and(|position| position > 0)
+            && self.position != self.duration
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransferView {
+    pub stage: String,
+    pub download_bps: Option<u64>,
+    pub upload_bps: Option<u64>,
+    pub peers: Option<usize>,
+    pub done: Option<u64>,
+    pub total: Option<u64>,
+    pub buffered: Option<u64>,
+    pub saving: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RateLimit {
+    Paused,
+    Unlimited,
+    Bps(u64),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreferencesDraft {
+    pub cache_limit_bytes: u64,
+    pub download_limit: RateLimit,
+    pub upload_limit: RateLimit,
+    pub peer_limit: u32,
+    pub torrents_enabled: bool,
+    pub catalog_enabled: bool,
+    pub cache_directory: String,
+}
+
+impl Default for PreferencesDraft {
+    fn default() -> Self {
+        Self {
+            cache_limit_bytes: 10 * 1024 * 1024 * 1024,
+            download_limit: RateLimit::Unlimited,
+            upload_limit: RateLimit::Unlimited,
+            peer_limit: 50,
+            torrents_enabled: true,
+            catalog_enabled: true,
+            cache_directory: String::new(),
+        }
+    }
 }
 
 pub(crate) struct ShellModel {
@@ -191,6 +328,16 @@ pub(crate) struct ShellModel {
     pub playback_active: bool,
     pub status: UiStatus,
     pub preferences_status: String,
+    pub results: Vec<MediaCard>,
+    pub media: Option<MediaCard>,
+    pub sources: Vec<SourceRow>,
+    pub files: Vec<TorrentFileRow>,
+    pub library: Vec<LibraryRow>,
+    pub transfer: Option<TransferView>,
+    pub preferences: PreferencesDraft,
+    pub selected_episode: Option<(u16, u16)>,
+    pub selected_file: Option<usize>,
+    pub media_favorite: bool,
 }
 
 impl Default for ShellModel {
@@ -198,32 +345,31 @@ impl Default for ShellModel {
         Self {
             section: Section::Sources,
             states: [
-                SectionState::Unavailable(
-                    "Каталог ещё не подключён. Поиск не отправляет запросы в сеть.".into(),
-                ),
-                SectionState::Unavailable(
-                    "Библиотека ещё не подключена. Избранное и история не загружены.".into(),
-                ),
+                SectionState::Empty("Введите название фильма или сериала.".into()),
+                SectionState::Empty("Нет избранного и истории просмотра.".into()),
                 SectionState::Empty(
                     "Добавьте HTTP(S)- или magnet-ссылку из буфера обмена либо выберите файл .torrent."
                         .into(),
                 ),
-                SectionState::Unavailable(
-                    "Медиадвижок ещё не подключён. Данных о загрузках, скорости и пирах нет.".into(),
-                ),
-                SectionState::Unavailable(
-                    "Пути, объём кэша и сетевые лимиты появятся после подключения хранилища и медиадвижка."
-                        .into(),
-                ),
+                SectionState::Empty("Нет активной сессии.".into()),
+                SectionState::Empty("Настройки ещё не загружены.".into()),
             ],
             default_player: PlayerChoice::Mpv,
             source: None,
             playback_available: false,
             playback_active: false,
-            status: UiStatus::info(
-                "Каркас P1 · Каталог и торрент-движок ещё не подключены.",
-            ),
-            preferences_status: "Сохранение настроек ещё не подключено.".into(),
+            status: UiStatus::info("Откройте источник или найдите фильм в каталоге."),
+            preferences_status: "Изменения применяются после сохранения.".into(),
+            results: Vec::new(),
+            media: None,
+            sources: Vec::new(),
+            files: Vec::new(),
+            library: Vec::new(),
+            transfer: None,
+            preferences: PreferencesDraft::default(),
+            selected_episode: None,
+            selected_file: None,
+            media_favorite: false,
         }
     }
 }
@@ -257,7 +403,29 @@ impl ShellModel {
             UiEvent::Cancel(section) => {
                 matches!(self.states[section.index()], SectionState::Loading(_))
             }
-            UiEvent::SetDefaultPlayer(_) => true,
+            UiEvent::ChooseSource(index) => {
+                self.sources.iter().any(|row| row.index == *index)
+                    && self.accepts(&UiEvent::PasteSource)
+            }
+            UiEvent::ChooseTorrentFile(index) => {
+                self.files.iter().any(|row| row.index == *index) && !self.playback_active
+            }
+            UiEvent::AssignEpisode { .. } => self.selected_file.is_some(),
+            UiEvent::FindSources | UiEvent::ToggleFavorite => self.media.is_some(),
+            UiEvent::SelectEpisode { season, number } => self.media.as_ref().is_some_and(|media| {
+                media
+                    .episodes
+                    .iter()
+                    .any(|episode| episode.season == *season && episode.number == *number)
+            }),
+            UiEvent::OpenMedia(id) => self.results.iter().any(|media| media.id == *id),
+            UiEvent::OpenLibrary(id) | UiEvent::SetFavorite { id, .. } => {
+                self.library.iter().any(|row| row.id == *id)
+            }
+            UiEvent::UnlinkMedia => self.media.is_some(),
+            UiEvent::Save | UiEvent::OpenIn(_) => self.source.is_some() && self.playback_active,
+            UiEvent::Search(query) => !query.trim().is_empty(),
+            _ => true,
         }
     }
 }
@@ -265,6 +433,33 @@ impl ShellModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_history_does_not_require_or_invent_resume_position() {
+        let mut row = LibraryRow {
+            id: "local:item".into(),
+            title: "Own video".into(),
+            details: String::new(),
+            favorite: false,
+            opened_at: Some(100),
+            completed: false,
+            position: None,
+            duration: None,
+        };
+        assert!(row.has_history());
+        assert!(!row.can_resume());
+        row.opened_at = None;
+        assert!(!row.has_history());
+        row.position = Some(12);
+        row.duration = Some(30);
+        assert!(row.can_resume());
+        row.completed = true;
+        assert!(!row.can_resume());
+        assert!(
+            !row.has_history(),
+            "a measurement is not an invented open timestamp"
+        );
+    }
 
     #[test]
     fn starts_without_fabricated_results_or_playback() {
@@ -280,11 +475,11 @@ mod tests {
         assert!(!model.accepts(&UiEvent::Stop));
         assert!(matches!(
             model.states[Section::Search.index()],
-            SectionState::Unavailable(_)
+            SectionState::Empty(_)
         ));
         assert!(matches!(
             model.states[Section::Library.index()],
-            SectionState::Unavailable(_)
+            SectionState::Empty(_)
         ));
     }
 
@@ -378,5 +573,51 @@ mod tests {
         assert_eq!(UiStatus::info("Готово").level, StatusLevel::Info);
         assert_eq!(UiStatus::warning("Ограничение").level, StatusLevel::Warning);
         assert_eq!(UiStatus::error("Ошибка").level, StatusLevel::Error);
+    }
+
+    #[test]
+    fn stale_source_file_and_library_controls_do_not_emit() {
+        let mut model = ShellModel::default();
+        assert!(!model.accepts(&UiEvent::ChooseSource(7)));
+        model.sources.push(SourceRow {
+            index: 7,
+            title: "Public source".into(),
+            kind: SourceKind::Http,
+            quality: None,
+            language: None,
+            origin: "Provider".into(),
+            license: None,
+        });
+        assert!(model.accepts(&UiEvent::ChooseSource(7)));
+        assert!(!model.accepts(&UiEvent::ChooseSource(0)));
+        model.playback_active = true;
+        assert!(!model.accepts(&UiEvent::ChooseSource(7)));
+        assert!(!model.accepts(&UiEvent::OpenLibrary("missing".into())));
+        assert!(!model.accepts(&UiEvent::ChooseTorrentFile(0)));
+        assert!(!model.accepts(&UiEvent::AssignEpisode {
+            season: 1,
+            number: 1
+        }));
+        assert!(!model.accepts(&UiEvent::ToggleFavorite));
+        assert!(!model.accepts(&UiEvent::SelectEpisode {
+            season: 1,
+            number: 1
+        }));
+    }
+
+    #[test]
+    fn active_source_is_required_for_session_actions() {
+        let mut model = ShellModel::default();
+        assert!(!model.accepts(&UiEvent::Save));
+        model.source = Some(SourcePreview {
+            kind: SourceKind::LocalFile,
+            title: "Video".into(),
+        });
+        assert!(!model.accepts(&UiEvent::Save));
+        model.playback_active = true;
+        assert!(model.accepts(&UiEvent::Save));
+        assert!(model.accepts(&UiEvent::OpenIn(PlayerChoice::Vlc)));
+        model.source = None;
+        assert!(!model.accepts(&UiEvent::OpenIn(PlayerChoice::Vlc)));
     }
 }

@@ -1,7 +1,9 @@
-use std::{ffi::OsString, io::Write, path::PathBuf, sync::Arc};
+use std::{ffi::OsString, future::Future, io::Write, path::PathBuf, sync::Arc};
 
+use bytes::Bytes;
 use cap_std::fs::Dir;
 use kadr_media::ByteSource;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_util::sync::CancellationToken;
 
 use crate::{Error, Result, fs, io_error};
@@ -83,6 +85,46 @@ impl Drop for Abandon {
     }
 }
 
+trait Input: Send {
+    fn read(&mut self, offset: u64, max: usize) -> impl Future<Output = Result<Bytes>> + Send;
+    fn finish(&mut self) -> impl Future<Output = Result<()>> + Send;
+}
+
+struct SourceInput(Arc<dyn ByteSource>);
+
+impl Input for SourceInput {
+    async fn read(&mut self, offset: u64, max: usize) -> Result<Bytes> {
+        self.0.read_at(offset, max).await.map_err(|_| Error::Source)
+    }
+
+    async fn finish(&mut self) -> Result<()> {
+        // ByteSource's stable length is its EOF contract; do not request a
+        // torrent piece after EOF or issue reads at all for an empty source.
+        Ok(())
+    }
+}
+
+struct ReaderInput<R>(R);
+
+impl<R: AsyncRead + Unpin + Send> Input for ReaderInput<R> {
+    async fn read(&mut self, _: u64, max: usize) -> Result<Bytes> {
+        let mut buffer = vec![0; max];
+        let count = self.0.read(&mut buffer).await.map_err(|_| Error::Source)?;
+        buffer.truncate(count);
+        Ok(Bytes::from(buffer))
+    }
+
+    async fn finish(&mut self) -> Result<()> {
+        // A sequential response must contain exactly its advertised length,
+        // including a zero-length body. Publication waits for this EOF probe.
+        let mut extra = [0u8; 1];
+        match self.0.read(&mut extra).await {
+            Ok(0) => Ok(()),
+            _ => Err(Error::Source),
+        }
+    }
+}
+
 /// Stream verified/available prefixes to a permanent, no-clobber destination.
 ///
 /// The source must obey ByteSource's stable length/contents contract. Torrent
@@ -98,12 +140,48 @@ pub async fn save_source(
     source: Arc<dyn ByteSource>,
     destination: PathBuf,
     cancel: &CancellationToken,
+    progress: impl FnMut(SaveProgress) + Send,
+) -> Result<()> {
+    let total = source.len();
+    save_input(SourceInput(source), total, destination, cancel, progress).await
+}
+
+/// Save one known-length sequential response without requiring Range support
+/// or a validator. The transport must provide one coherent decoded byte stream.
+///
+/// Uses the same destination, space, cancellation and atomic-publication rules
+/// as [`save_source`]. Reads at most 64 KiB at a time and requires exact EOF:
+/// truncated/excess bodies fail before publication. A cancellable one-byte EOF
+/// probe is performed even for an empty response. Unknown lengths are unsupported.
+/// Call CacheManager::check_save_space on the worker before starting the job,
+/// and keep application save/reservation serialization until it completes.
+pub async fn save_reader<R: AsyncRead + Unpin + Send + 'static>(
+    reader: R,
+    total_bytes: u64,
+    destination: PathBuf,
+    cancel: &CancellationToken,
+    progress: impl FnMut(SaveProgress) + Send,
+) -> Result<()> {
+    save_input(
+        ReaderInput(reader),
+        total_bytes,
+        destination,
+        cancel,
+        progress,
+    )
+    .await
+}
+
+async fn save_input(
+    mut input: impl Input,
+    total: u64,
+    destination: PathBuf,
+    cancel: &CancellationToken,
     mut progress: impl FnMut(SaveProgress) + Send,
 ) -> Result<()> {
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);
     }
-    let total = source.len();
     let abandon = Abandon(CancellationToken::new());
     let mut writer = tokio::task::spawn_blocking(move || Writer::open(destination, total))
         .await
@@ -118,7 +196,7 @@ pub async fn save_source(
         let bytes = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(Error::Cancelled),
-            result = source.read_at(written, max) => result.map_err(|_| Error::Source)?,
+            result = input.read(written, max) => result?,
         };
         if bytes.is_empty() || bytes.len() > max {
             return Err(Error::Source);
@@ -135,6 +213,11 @@ pub async fn save_source(
             written_bytes: written,
             total_bytes: total,
         });
+    }
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(Error::Cancelled),
+        result = input.finish() => result?,
     }
     let cancel = cancel.clone();
     let abandoned = abandon.0.clone();

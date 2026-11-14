@@ -17,6 +17,7 @@ use std::{
 
 use anyhow::{Result, anyhow, bail};
 use bytes::Bytes;
+use caseless::Caseless;
 use kadr_core::torrent::TorrentRelativePath;
 use kadr_media::ByteSource;
 use librqbit::{
@@ -25,6 +26,7 @@ use librqbit::{
     limits::LimitsConfig,
 };
 pub use tokio_util::sync::CancellationToken;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::{TorrentByteSource, TorrentFile, reject_symlink};
 
@@ -142,16 +144,18 @@ impl PreparedTorrent {
             // Validate components separately too: a literal '/' in a bencoded
             // component must not change the on-disk tree after joining.
             let components = file.filename.to_vec();
+            let mut canonical_components = Vec::with_capacity(components.len());
             for component in &components {
                 if component.contains('/') {
                     bail!("invalid torrent file path");
                 }
                 TorrentRelativePath::new(component.clone())
                     .map_err(|_| anyhow!("invalid torrent file path"))?;
+                canonical_components.push(path_component_collision_key(component)?);
             }
             let path = TorrentRelativePath::new(components.join("/"))
                 .map_err(|_| anyhow!("invalid torrent file path"))?;
-            if file.attrs().symlink || !paths.insert(path.as_str().to_lowercase()) {
+            if file.attrs().symlink || !paths.insert(canonical_components.join("/")) {
                 bail!("conflicting or unsupported torrent file paths");
             }
             total_bytes = total_bytes
@@ -163,8 +167,9 @@ impl PreparedTorrent {
                 len: file.len,
             });
         }
-        // Reject file/directory collisions, including case-folded names for
-        // portability to common macOS filesystems.
+        // Apply the same Unicode collision rule to file/directory prefixes.
+        // Distinct metadata files must never alias one physical file: later
+        // writes could otherwise invalidate bytes already marked verified.
         for path in &paths {
             for (index, _) in path.match_indices('/') {
                 if paths.contains(&path[..index]) {
@@ -261,7 +266,9 @@ impl PreparedTorrent {
                     sub_folder: Some("payload".into()),
                     only_files: Some(vec![selected_file]),
                     overwrite: true,
-                    paused: options.download_limit == RateLimit::Paused,
+                    // Install streaming priorities before peers can queue the
+                    // ordinary first/last/middle piece order.
+                    paused: true,
                     initial_peers: Some(initial_peers),
                     disable_trackers: !options.discovery_enabled,
                     peer_limit: Some(options.peer_limit),
@@ -279,12 +286,29 @@ impl PreparedTorrent {
                 result.map_err(|_| anyhow!("cannot initialize torrent files"))?;
             }
         }
+        let startup_stream = tokio::select! {
+            biased;
+            () = token.cancelled() => bail!("torrent start cancelled"),
+            result = handle.clone().stream(selected_file) => {
+                result.map_err(|_| anyhow!("cannot initialize torrent stream"))?
+            }
+        };
         let source: Arc<dyn ByteSource> = Arc::new(TorrentByteSource {
             session: session.clone(),
             handle: handle.clone(),
             file_id: selected_file,
             length: selected.len,
+            startup_stream: std::sync::Mutex::new(Some(Box::new(startup_stream))),
         });
+        if options.download_limit != RateLimit::Paused {
+            tokio::select! {
+                biased;
+                () = token.cancelled() => bail!("torrent start cancelled"),
+                result = session.unpause(&handle) => {
+                    result.map_err(|_| anyhow!("cannot start torrent download"))?;
+                }
+            }
+        }
         cancel_guard.disarm();
         Ok(PlaybackTorrent {
             source,
@@ -302,6 +326,20 @@ impl PreparedTorrent {
             }),
         })
     }
+}
+
+fn path_component_collision_key(component: &str) -> Result<String> {
+    // Conservative, deterministic on every host: compatibility normalization,
+    // full non-Turkic case folding, then canonical decomposition. This key is
+    // for validation only; actual display/storage filenames remain unchanged.
+    let key: String = component.nfkc().default_case_fold().nfd().collect();
+    // Compatibility forms can introduce path syntax (e.g. FULLWIDTH SOLIDUS)
+    // or reserved names; validate as ONE component, not an already joined path.
+    if key.contains('/') {
+        bail!("invalid torrent file path");
+    }
+    TorrentRelativePath::new(key.clone()).map_err(|_| anyhow!("invalid torrent file path"))?;
+    Ok(key)
 }
 
 /// Safe UI state, never upstream error strings.

@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
 };
 
 use cap_std::fs::Dir;
@@ -19,11 +19,73 @@ pub(crate) fn open_dir(parent: &Dir, name: &Path) -> Result<Dir> {
     Ok(Dir::from_std_file(File::from(fd)))
 }
 
-/// Walk every component with O_NOFOLLOW, including ancestors of the chosen root.
-pub(crate) fn absolute_dir(path: &Path, create: bool) -> Result<Dir> {
-    if !path.is_absolute() {
+fn validate_absolute(path: &Path) -> Result<()> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+        || path.as_os_str().as_encoded_bytes().contains(&0)
+    {
         return Err(Error::InvalidInput);
     }
+    Ok(())
+}
+
+/// Normalize only Darwin's fixed, root-owned system aliases. Never
+/// canonicalize user-controlled descendants or change other platforms' paths.
+pub(crate) fn normalized_path(path: &Path) -> Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        darwin_alias_path(path, |alias| {
+            let metadata = std::fs::symlink_metadata(alias).map_err(io_error)?;
+            if metadata.file_type().is_symlink() {
+                let target = std::fs::read_link(alias).map_err(io_error)?;
+                Ok(Some((metadata.uid(), target)))
+            } else {
+                Ok(None)
+            }
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        validate_absolute(path)?;
+        Ok(path.to_owned())
+    }
+}
+
+/// The inspection callback receives only a fixed root entry, never a suffix.
+/// Keeping this decision pure lets Linux tests exercise the Darwin allowlist.
+#[cfg(any(target_os = "macos", test))]
+fn darwin_alias_path(
+    path: &Path,
+    inspect: impl FnOnce(&Path) -> Result<Option<(u32, PathBuf)>>,
+) -> Result<PathBuf> {
+    validate_absolute(path)?;
+    for (alias, physical, relative) in [
+        ("/tmp", "/private/tmp", "private/tmp"),
+        ("/var", "/private/var", "private/var"),
+    ] {
+        if let Ok(suffix) = path.strip_prefix(alias) {
+            if let Some((owner, target)) = inspect(Path::new(alias))? {
+                if owner != 0
+                    || (target.as_os_str() != Path::new(physical).as_os_str()
+                        && target.as_os_str() != Path::new(relative).as_os_str())
+                {
+                    return Err(Error::UnsafePath);
+                }
+                return Ok(Path::new(physical).join(suffix));
+            }
+            return Ok(path.to_owned());
+        }
+    }
+    Ok(path.to_owned())
+}
+
+/// Walk every component with O_NOFOLLOW after the fixed Darwin prefix rule.
+pub(crate) fn absolute_dir(path: &Path, create: bool) -> Result<Dir> {
+    let path = normalized_path(path)?;
     let mut dir = Dir::open_ambient_dir("/", cap_std::ambient_authority()).map_err(io_error)?;
     for component in path.components() {
         match component {
@@ -163,4 +225,102 @@ pub(crate) fn token() -> String {
     let mut bytes = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut bytes);
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn darwin_aliases_accept_only_expected_root_owned_targets() {
+        for (alias, physical, relative) in [
+            ("/tmp", "/private/tmp", "private/tmp"),
+            ("/var", "/private/var", "private/var"),
+        ] {
+            for target in [physical, relative] {
+                for suffix in ["", "user/cache"] {
+                    let path = Path::new(alias).join(suffix);
+                    let normalized = darwin_alias_path(&path, |inspected| {
+                        assert_eq!(inspected, Path::new(alias));
+                        Ok(Some((0, PathBuf::from(target))))
+                    })
+                    .unwrap();
+                    assert_eq!(normalized, Path::new(physical).join(suffix));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn darwin_aliases_reject_untrusted_owners_and_nonexact_targets() {
+        for (owner, target) in [
+            (1000, "/private/tmp"),
+            (0, "/private/var"),
+            (0, "/somewhere/tmp"),
+            (0, "private/./tmp"),
+            (0, "/private//tmp"),
+            (0, "/private/tmp/../escape"),
+            (0, "../private/tmp"),
+        ] {
+            assert_eq!(
+                darwin_alias_path(Path::new("/tmp/user"), |_| {
+                    Ok(Some((owner, PathBuf::from(target))))
+                }),
+                Err(Error::UnsafePath)
+            );
+        }
+        assert_eq!(
+            darwin_alias_path(Path::new("/var/user"), |_| {
+                Ok(Some((0, PathBuf::from("/private/tmp"))))
+            }),
+            Err(Error::UnsafePath)
+        );
+    }
+
+    #[test]
+    fn darwin_alias_decision_does_not_inspect_or_resolve_other_components() {
+        for path in [
+            "/tmpfoo/user",
+            "/variable/user",
+            "/private/tmp/user",
+            "/Users/example/tmp",
+            "/home/example/var",
+            "/",
+        ] {
+            assert_eq!(
+                darwin_alias_path(Path::new(path), |_| panic!("unexpected root inspection")),
+                Ok(PathBuf::from(path))
+            );
+        }
+        assert_eq!(
+            darwin_alias_path(Path::new("/tmp/link/child"), |_| {
+                Ok(Some((0, PathBuf::from("private/tmp"))))
+            }),
+            Ok(PathBuf::from("/private/tmp/link/child"))
+        );
+        assert_eq!(
+            darwin_alias_path(Path::new("/tmp/user"), |_| Ok(None)),
+            Ok(PathBuf::from("/tmp/user"))
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            normalized_path(Path::new("/tmp/user")),
+            Ok(PathBuf::from("/tmp/user"))
+        );
+    }
+
+    #[test]
+    fn darwin_alias_decision_rejects_invalid_paths_before_inspection() {
+        for path in [
+            "tmp/user",
+            "/tmp/../elsewhere",
+            "/var/user/../cache",
+            "/tmp/\0bad",
+        ] {
+            assert_eq!(
+                darwin_alias_path(Path::new(path), |_| panic!("invalid path inspected")),
+                Err(Error::InvalidInput)
+            );
+        }
+    }
 }

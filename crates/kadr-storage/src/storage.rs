@@ -10,7 +10,7 @@ use crate::{
     snapshots::link_source_row,
 };
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Synchronous connection, intended to be owned by one background worker.
 /// No raw connection is exposed, so writes always pass validation.
@@ -160,9 +160,30 @@ impl Storage {
         source_id: &SourceId,
         opened_at: i64,
     ) -> Result<()> {
+        self.record_opened_target(
+            &PlaybackTarget {
+                media_id: media_id.clone(),
+                episode: None,
+            },
+            source_id,
+            opened_at,
+        )
+    }
+
+    /// Call only after a successful player/browser launch. Records exact target
+    /// history and its selected file without inventing measured playback.
+    /// Newest timestamp wins independently per target and for media history.
+    pub fn record_opened_target(
+        &mut self,
+        target: &PlaybackTarget,
+        source_id: &SourceId,
+        opened_at: i64,
+    ) -> Result<()> {
+        target.validate()?;
         validate_timestamp(opened_at)?;
+        let (season, episode) = target.sql_episode();
         let transaction = self.connection.transaction()?;
-        let changed = transaction.execute(
+        transaction.execute(
             "INSERT INTO library(media_id, favorite, last_opened_at, last_source_id)
              VALUES (?1, 0, ?2, ?3)
              ON CONFLICT(media_id) DO UPDATE SET
@@ -170,19 +191,30 @@ impl Storage {
                  last_source_id = excluded.last_source_id
              WHERE library.last_opened_at IS NULL
                 OR excluded.last_opened_at >= library.last_opened_at",
-            params![media_id.as_str(), opened_at, source_id.as_str()],
+            params![target.media_id.as_str(), opened_at, source_id.as_str()],
+        )?;
+        let changed = transaction.execute(
+            "INSERT INTO target_history(media_id, season, episode, source_id, file_id, opened_at)
+             VALUES (?1, ?2, ?3, ?4,
+                 CASE WHEN EXISTS (SELECT 1 FROM target_sources
+                     WHERE media_id = ?1 AND season = ?2 AND episode = ?3 AND source_id = ?4)
+                 THEN (SELECT file_id FROM target_sources
+                     WHERE media_id = ?1 AND season = ?2 AND episode = ?3 AND source_id = ?4)
+                 ELSE (SELECT file_id FROM sources WHERE source_id = ?4) END, ?5)
+             ON CONFLICT(media_id, season, episode) DO UPDATE SET
+                 source_id = excluded.source_id, file_id = excluded.file_id,
+                 opened_at = excluded.opened_at
+             WHERE excluded.opened_at >= target_history.opened_at",
+            params![
+                target.media_id.as_str(),
+                season,
+                episode,
+                source_id.as_str(),
+                opened_at
+            ],
         )?;
         if changed != 0 {
-            link_source_row(
-                &transaction,
-                &PlaybackTarget {
-                    media_id: media_id.clone(),
-                    episode: None,
-                },
-                source_id,
-                false,
-                None,
-            )?;
+            link_source_row(&transaction, target, source_id, false, None)?;
         }
         transaction.commit()?;
         Ok(())
@@ -373,6 +405,7 @@ impl Storage {
     pub fn clear_playback_data(&mut self) -> Result<()> {
         let transaction = self.connection.transaction()?;
         transaction.execute("DELETE FROM playback_progress", [])?;
+        transaction.execute("DELETE FROM target_history", [])?;
         // Keep episode selections only for favorites. Saved copies need only
         // their own paths, not private origin URLs or torrent paths.
         transaction.execute(
@@ -583,6 +616,32 @@ fn migrate(connection: &mut Connection) -> Result<()> {
                      source_id = excluded.source_id;",
         )?;
         transaction.pragma_update(None, "user_version", 3)?;
+    }
+    if version < 4 {
+        transaction.execute_batch(
+            "CREATE TABLE target_history (
+                 media_id TEXT NOT NULL REFERENCES library(media_id) ON DELETE CASCADE,
+                 season INTEGER NOT NULL,
+                 episode INTEGER NOT NULL,
+                 source_id TEXT NOT NULL,
+                 file_id INTEGER CHECK(file_id >= 0),
+                 opened_at INTEGER NOT NULL CHECK(opened_at >= 0),
+                 PRIMARY KEY(media_id, season, episode),
+                 CHECK ((season = -1 AND episode = -1)
+                     OR (season BETWEEN 0 AND 65535 AND episode BETWEEN 1 AND 65535))
+             ) STRICT;
+             CREATE INDEX target_history_opened ON target_history(opened_at DESC, media_id);
+             INSERT INTO target_history(media_id, season, episode, source_id, file_id, opened_at)
+                 SELECT l.media_id, -1, -1, l.last_source_id,
+                     CASE WHEN t.source_id IS NOT NULL THEN t.file_id ELSE s.file_id END,
+                     l.last_opened_at
+                 FROM library AS l
+                 LEFT JOIN target_sources AS t ON t.media_id = l.media_id
+                     AND t.season = -1 AND t.episode = -1 AND t.source_id = l.last_source_id
+                 LEFT JOIN sources AS s ON s.source_id = l.last_source_id
+                 WHERE l.last_opened_at IS NOT NULL;",
+        )?;
+        transaction.pragma_update(None, "user_version", 4)?;
     }
     if version < 1 {
         write_settings(&transaction, &Settings::default())?;

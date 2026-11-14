@@ -35,6 +35,14 @@ pub async fn save_source(
     progress: impl FnMut(SaveProgress) + Send,
 ) -> Result<()>
 
+pub async fn save_reader<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
+    reader: R,
+    total_bytes: u64,
+    destination: PathBuf,
+    cancel: &tokio_util::sync::CancellationToken,
+    progress: impl FnMut(SaveProgress) + Send,
+) -> Result<()>
+
 pub struct SaveProgress {
     pub written_bytes: u64,
     pub total_bytes: u64,
@@ -155,13 +163,20 @@ no persistent BitTorrent resume-state format in this crate.
 
 ## Filesystem boundary and privacy
 
-The implementation targets Linux/macOS. All root/destination ancestor walking
+The implementation targets Linux/macOS. Root/destination ancestor walking
 opens directories relative to pinned handles with `O_NOFOLLOW`; `..` and
 symlink ancestors are rejected, even if a symlink would point within the root.
-If a trusted user intentionally chooses a symlinked location, resolve it
-explicitly in the application's path-selection workflow before passing the
-approved canonical path. macOS temporary-directory aliases may likewise need
-canonicalization.
+The sole exception is macOS's fixed first-component system aliases: `/tmp`
+and `/var` are substituted with `/private/tmp` and `/private/var` only when
+the root entry is a root-owned symlink with exactly that expected absolute
+target or its root-relative spelling (`private/tmp` / `private/var`).
+Unexpected targets/owners are rejected. No descendant is canonicalized or
+followed, `/tmpfoo` is not an alias, and other platforms are unchanged.
+The manager stores this physical prefix so `lease.path()` is suitable for an
+external torrent writer that also rejects symlink ancestors. Save/preflight
+opening uses the same rule while callers may retain their original destination
+spelling. Any other intentionally symlinked user location requires an explicit
+trusted path-selection workflow to supply an approved physical path.
 
 Accounting rejects symlinks and special files. Recursive eviction uses
 fd-relative no-follow opens and unlink operations; a symlink is only unlinked,
@@ -181,15 +196,16 @@ The local index/media are plaintext under OS permissions, not encrypted.
 
 The caller selects an **absolute destination outside every managed cache
 root**, with an existing user-owned parent that is not group/other-writable.
-The independent `save_source` function has no manager/root argument: the app
+The independent save functions have no manager/root argument: the app
 must enforce that separation using the approved canonical destination parent,
 including configured root overrides. Never select a destination by combining
 an untrusted torrent filename with an unchecked parent. The final name may
 contain non-UTF-8 OS bytes.
 
 Before starting a save, run `manager.check_save_space(approved_parent,
-source.len())` on the cache worker. It opens every parent component without
-following symlinks and compares the destination and cache devices. On the
+total_bytes)` on the cache worker (`source.len()` for a `ByteSource`). It opens
+every parent component without following symlinks and compares the destination
+and cache devices. On the
 **same filesystem**, free space must cover both the saved copy and **all**
 outstanding whole-torrent reservations, using the same per-file capped
 physical-allocation credit as torrent reservation. On another filesystem,
@@ -213,13 +229,32 @@ sources share exactly this path. Torrent `ByteSource` implementations must
 wait asynchronously for verified pieces, and release waits when their read
 future is dropped. Cancellation selects against those waits.
 
+`save_reader` supports **one coherent, known-length sequential response**,
+including direct HTTP origins without Range support or stable validators.
+The transport adapter supplies an `AsyncRead` and the actual response's known
+byte length; it must not stitch separate responses or invent a length. Unknown
+Content-Length responses are explicitly unsupported by this MVP save path.
+An adapter exposing chunks can use `tokio_util::io::StreamReader`; this crate
+does not depend on an HTTP download implementation.
+
+The sequential path also reads at most 64 KiB per request. An early EOF is a
+source error. After exactly the declared length, a cancellable **one-byte EOF
+probe** must return empty before publication; excess bytes or transport errors
+reject the save. This probe also runs for an advertised empty response, unlike
+an empty `ByteSource`, which needs no reads. Cancellation interrupts body and
+EOF waits. Reaching 100% byte progress does **not** imply save completion:
+the EOF probe, fsync and final publication must still succeed.
+
+Both entry points share one bounded streaming loop and the exact same `Writer`
+temporary/space/fsync/no-clobber publication implementation.
+
 The destination is never partially visible under its final name:
 
 1. Check final-name absence and physical free space.
 2. Create a random private (0600) `.kadr-save-<128-bit token>.part` sibling with
    exclusive creation. Recheck remaining space before each bounded write.
-3. Report initial and per-write progress; an empty file reports `(0, 0)` and
-   performs no source reads. Callbacks must be fast, must not block the async
+3. Report initial and per-write progress; an empty file reports `(0, 0)`.
+   Callbacks must be fast, must not block the async
    executor, and must not log private data.
 4. Fsync the complete file, then check cancellation again.
 5. Publish with an atomic same-directory hard link, which **cannot replace any
@@ -258,7 +293,7 @@ No GPUI build is needed. Implementation validation initially uses a standalone
 temporary workspace containing only `kadr-cache` and `kadr-media` to avoid
 editing the parent's root membership/lockfile.
 
-On Linux, that standalone workspace passed **25 tests**, `cargo clippy
+On Linux, that standalone workspace passed **37 tests**, `cargo clippy
 --locked -p kadr-cache --all-targets -- -D warnings`, and `cargo fmt -p
 kadr-cache -- --check`, using two jobs and disabled debug information. The
 integrated-root commands above are for the parent integration; they were not
@@ -271,9 +306,20 @@ recovery, abrupt process exit with stale active state, invalid/future indexes,
 private permissions/diagnostics, quota and active-limit refusal, overrun
 detection, simulated out-of-space including sparse/all-outstanding demand,
 same-filesystem save headroom, allocated-byte credit, different-filesystem
-budget branching and overflow, symlink escapes, bounded/short/empty saves,
+budget branching and overflow, injected Darwin alias allowlist/ownership
+decisions and unchanged Linux path handling, symlink escapes, bounded/short/empty saves,
 actual free-space refusal, local
 file byte equality, progress, saved-file survival after cache clear, existing
 and racing final names, source-contract failure, cancellation during piece
-waits, and task-abort cleanup. Runtime checks here are Linux; macOS execution
-and real hardware/disk-exhaustion fault injection remain separate validation.
+waits, and task-abort cleanup. A macOS-only integration test additionally
+exercises real `/tmp` and `/var/tmp` aliases, physical lease paths accepted by
+an independent strict walker, save/preflight, and descendant-symlink rejection.
+Runtime checks here are Linux; that macOS test and real hardware/disk-exhaustion
+fault injection remain separate validation.
+
+Sequential-reader tests additionally cover bounded duplex streaming, exact/
+empty/truncated/excess bodies, transport errors during the body and EOF probe,
+existing/racing destination preservation, cancellation before start and final
+publication, cancellation during empty/nonempty EOF waits, body-wait aborts,
+and deterministic abort with a blocking write queued (cleanup after that
+bounded operation completes). They do not require networking or fill a disk.

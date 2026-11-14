@@ -13,7 +13,7 @@ mod fs;
 mod save;
 
 pub use cache::{CacheLease, CacheManager, CacheUsage};
-pub use save::{SaveProgress, save_source};
+pub use save::{SaveProgress, save_reader, save_source};
 
 /// Sanitized failures: no underlying OS/source errors, keys, or private paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

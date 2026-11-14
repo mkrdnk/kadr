@@ -13,7 +13,7 @@ const LIBRARY_TARGETS: &str = "
         SELECT media_id, season, episode FROM playback_progress
         UNION SELECT media_id, season, episode FROM target_sources
         UNION SELECT media_id, season, episode FROM saved_files
-        UNION SELECT media_id, -1, -1 FROM library WHERE last_opened_at IS NOT NULL
+        UNION SELECT media_id, season, episode FROM target_history
     ), library_targets AS (
         SELECT media_id, season, episode FROM concrete_targets
         UNION SELECT media_id, -1, -1 FROM library AS l
@@ -21,6 +21,12 @@ const LIBRARY_TARGETS: &str = "
                 SELECT 1 FROM concrete_targets AS t WHERE t.media_id = l.media_id
             )
     )";
+
+struct TargetHistory {
+    source_id: SourceId,
+    file_id: Option<i64>,
+    opened_at: i64,
+}
 
 impl Storage {
     /// Persist only user-approved inputs. The ID must match core validation.
@@ -256,70 +262,23 @@ impl Storage {
             let latest = self
                 .connection
                 .query_row(
-                    "SELECT season, episode FROM playback_progress WHERE media_id = ?1
-                 ORDER BY updated_at DESC, season DESC, episode DESC LIMIT 1",
+                    "SELECT season, episode FROM (
+                         SELECT season, episode, 0 AS priority, updated_at AS activity_at
+                             FROM playback_progress WHERE media_id = ?1
+                         UNION ALL SELECT season, episode, 1, opened_at
+                             FROM target_history WHERE media_id = ?1
+                         UNION ALL SELECT season, episode, 2, 0
+                             FROM target_sources WHERE media_id = ?1
+                         UNION ALL SELECT season, episode, 3, saved_at
+                             FROM saved_files WHERE media_id = ?1
+                     ) ORDER BY priority, activity_at DESC, season DESC, episode DESC LIMIT 1",
                     [entry.media_id.as_str()],
                     |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
                 )
                 .optional()?;
-            let progress = latest
-                .map(|(season, episode)| {
-                    self.load_progress(&decode_target(entry.media_id.clone(), season, episode)?)
-                })
-                .transpose()?
-                .flatten();
-            let (target, source) = if let Some(progress) = &progress {
-                // A newer browser open must not pair an old position with a new URL.
-                (progress.target.clone(), self.source_for_progress(progress)?)
-            } else if let Some(id) = &entry.last_source_id {
-                let target = PlaybackTarget {
-                    media_id: entry.media_id.clone(),
-                    episode: None,
-                };
-                // record_opened captures the item-level selection atomically.
-                let source = match self.source_for_target(&target)? {
-                    Some(source) => Some(source),
-                    None => self.load_source(id)?,
-                };
-                (target, source)
-            } else {
-                let linked = self
-                    .connection
-                    .query_row(
-                        "SELECT season, episode FROM target_sources WHERE media_id = ?1
-                     ORDER BY season DESC, episode DESC LIMIT 1",
-                        [entry.media_id.as_str()],
-                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-                    )
-                    .optional()?;
-                if let Some((season, episode)) = linked {
-                    let target = decode_target(entry.media_id.clone(), season, episode)?;
-                    let source = self.source_for_target(&target)?;
-                    (target, source)
-                } else {
-                    let saved = self
-                        .connection
-                        .query_row(
-                            "SELECT season, episode FROM saved_files WHERE media_id = ?1
-                         ORDER BY saved_at DESC, season DESC, episode DESC LIMIT 1",
-                            [entry.media_id.as_str()],
-                            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-                        )
-                        .optional()?;
-                    let (season, episode) = saved.unwrap_or((-1, -1));
-                    (
-                        decode_target(entry.media_id.clone(), season, episode)?,
-                        None,
-                    )
-                }
-            };
-            items.push(LibraryItem {
-                media: self.media_record(&entry.media_id)?,
-                entry,
-                target,
-                progress,
-                source,
-            });
+            let (season, episode) = latest.unwrap_or((-1, -1));
+            let target = decode_target(entry.media_id, season, episode)?;
+            items.push(self.load_library_target(&target)?);
         }
         transaction.commit()?;
         Ok(items)
@@ -344,8 +303,10 @@ impl Storage {
                      AND p.season = t.season AND p.episode = t.episode
                  LEFT JOIN saved_files AS s ON s.media_id = t.media_id
                      AND s.season = t.season AND s.episode = t.episode
+                 LEFT JOIN target_history AS h ON h.media_id = t.media_id
+                     AND h.season = t.season AND h.episode = t.episode
                  ORDER BY MAX(COALESCE(p.updated_at, -1), COALESCE(s.saved_at, -1),
-                     CASE WHEN t.season = -1 THEN COALESCE(l.last_opened_at, -1) ELSE -1 END)
+                     COALESCE(h.opened_at, -1))
                      DESC, t.media_id, t.season, t.episode
                  LIMIT ?1"
             ))?;
@@ -395,28 +356,56 @@ impl Storage {
         let entry = self
             .library_entry(&target.media_id)?
             .ok_or(Error::CorruptData("library target"))?;
+        let history = self.target_history(target)?;
         let progress = self.load_progress(target)?;
         let source = if let Some(progress) = &progress {
             self.source_for_progress(progress)?
+        } else if let Some(history) = &history {
+            // A prelaunch selection must not reinterpret a previous browser open.
+            self.source_with_selection(&history.source_id, history.file_id)?
         } else {
-            match self.source_for_target(target)? {
-                Some(source) => Some(source),
-                None if target.episode.is_none() => entry
-                    .last_source_id
-                    .as_ref()
-                    .map(|id| self.load_source(id))
-                    .transpose()?
-                    .flatten(),
-                None => None,
-            }
+            self.source_for_target(target)?
         };
         Ok(LibraryItem {
             media: self.media_record(&target.media_id)?,
             entry,
             target: target.clone(),
+            opened_at: history.map(|history| history.opened_at),
             progress,
             source,
         })
+    }
+
+    fn target_history(&self, target: &PlaybackTarget) -> Result<Option<TargetHistory>> {
+        let (season, episode) = target.sql_episode();
+        let value = self
+            .connection
+            .query_row(
+                "SELECT source_id, file_id, opened_at FROM target_history
+             WHERE media_id = ?1 AND season = ?2 AND episode = ?3",
+                params![target.media_id.as_str(), season, episode],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        value
+            .map(|(source_id, file_id, opened_at)| {
+                crate::models::validate_timestamp(opened_at)
+                    .map_err(|_| Error::CorruptData("target history"))?;
+                decode_file_id(file_id)?;
+                Ok(TargetHistory {
+                    source_id: SourceId::new(source_id)
+                        .map_err(|_| Error::CorruptData("source ID"))?,
+                    file_id,
+                    opened_at,
+                })
+            })
+            .transpose()
     }
 
     fn source_for_progress(&self, progress: &PlaybackProgress) -> Result<Option<StoredSource>> {

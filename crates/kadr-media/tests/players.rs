@@ -44,6 +44,16 @@ if mode == 'exit':
 if mode == 'stalled':
     time.sleep(30)
     sys.exit()
+if mode.startswith('queued_'):
+    time.sleep(0.05)
+    if mode == 'queued_partial':
+        c.sendall(b'{{"event":"end-file","reason":"eof"')
+    elif mode == 'queued_flood':
+        c.sendall(b'{{"event":"tick"}}\n' * 5000 + b'{{"event":"end-file","reason":"eof"}}\n')
+    elif mode != 'queued_exit0':
+        reason = dict(queued_eof='eof', queued_quit='quit', queued_error='error', queued_nonzero='error')[mode]
+        c.sendall(json.dumps(dict(event='end-file', reason=reason)).encode() + b'\n')
+    sys.exit(7 if mode == 'queued_nonzero' else 0)
 for line in c.makefile('rb'):
     if line == b'quit\n':
         sys.exit()
@@ -65,6 +75,9 @@ for line in c.makefile('rb'):
         continue
     if mode == 'exit_on_query':
         sys.exit(7)
+    if mode == 'eof_on_query':
+        c.sendall(b'{{"event":"end-file","reason":"eof"}}\n')
+        sys.exit()
     if mode == 'partial':
         c.sendall(b'{{"request_id":')
         time.sleep(30)
@@ -75,9 +88,15 @@ for line in c.makefile('rb'):
             c.sendall(b'{{"event":"tick"}}\n')
     # Events and wrong IDs must not be mistaken for position/duration.
     c.sendall(b'{{"event":"file-loaded"}}\n')
+    if mode in ('eof_event', 'quit_event', 'error_event', 'unrelated_eof'):
+        reason = dict(eof_event='eof', quit_event='quit', error_event='error', unrelated_eof='eof')[mode]
+        event = dict(event='playback-restart' if mode == 'unrelated_eof' else 'end-file', reason=reason, request_id=ident+100)
+        c.sendall(json.dumps(event).encode() + b'\n')
     c.sendall(json.dumps(dict(request_id=ident+100, error='success', data=999)).encode() + b'\n')
     prop = request['command'][1]
     reply = dict(request_id=ident, error='success', data=12.5 if prop == 'time-pos' else 60)
+    if mode == 'near_end':
+        reply['data'] = 60
     if mode == 'unavailable':
         reply = dict(request_id=ident, error='property unavailable')
     if mode == 'negative':
@@ -181,8 +200,16 @@ async fn mpv_argv_private_socket_correlated_telemetry_and_graceful_stop() {
     assert_eq!(snapshot.position, Telemetry::Seconds(12.5));
     assert_eq!(snapshot.duration, Telemetry::Seconds(60.0));
     assert!(snapshot.exit.is_none());
+    assert!(!snapshot.completed);
     assert!(session.stop().await.unwrap().success());
     assert!(session.stop().await.unwrap().success());
+    assert!(
+        !session
+            .snapshot(&CancellationToken::new())
+            .await
+            .unwrap()
+            .completed
+    );
     drop(session);
     assert!(!path.parent().unwrap().exists());
     assert_reaped(record["pid"].as_u64().unwrap() as u32).await;
@@ -200,6 +227,7 @@ async fn vlc_resume_is_argv_and_telemetry_is_explicitly_unsupported() {
     let snapshot = session.snapshot(&CancellationToken::new()).await.unwrap();
     assert_eq!(snapshot.position, Telemetry::Unsupported);
     assert_eq!(snapshot.duration, Telemetry::Unsupported);
+    assert!(!snapshot.completed);
     assert!(session.stop().await.unwrap().success());
 }
 
@@ -421,6 +449,7 @@ async fn natural_exit_is_detected_and_not_reported_as_successful_completion() {
         .unwrap();
         let snapshot = session.snapshot(&CancellationToken::new()).await.unwrap();
         assert_eq!(snapshot.exit.unwrap().code(), Some(7));
+        assert!(!snapshot.completed);
         assert_eq!(session.stop().await.unwrap().code(), Some(7));
     }
 }
@@ -433,7 +462,144 @@ async fn ipc_closing_just_before_process_exit_is_resolved_without_fake_progress(
     assert_eq!(snapshot.position, Telemetry::Unavailable);
     assert_eq!(snapshot.duration, Telemetry::Unavailable);
     assert_eq!(snapshot.exit.unwrap().code(), Some(7));
+    assert!(!snapshot.completed);
     assert_eq!(session.stop().await.unwrap().code(), Some(7));
+}
+
+#[tokio::test]
+async fn eof_during_a_property_request_survives_the_transport_exit_race() {
+    let fake = Fake::new("eof_on_query");
+    let mut session = fake.launch(PlayerKind::Mpv).await;
+    let snapshot = session.snapshot(&CancellationToken::new()).await.unwrap();
+    assert!(snapshot.completed);
+    assert!(snapshot.exit.unwrap().success());
+    assert_eq!(snapshot.position, Telemetry::Unavailable);
+    assert_eq!(snapshot.duration, Telemetry::Unavailable);
+    session.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn completion_uses_only_exact_mpv_eof_events_independent_of_request_id() {
+    for mode in [
+        "eof_event",
+        "quit_event",
+        "error_event",
+        "unrelated_eof",
+        "near_end",
+    ] {
+        let fake = Fake::new(mode);
+        let mut session = fake.launch(PlayerKind::Mpv).await;
+        let snapshot = session.snapshot(&CancellationToken::new()).await.unwrap();
+        assert_eq!(snapshot.completed, mode == "eof_event", "{mode}");
+        assert_eq!(snapshot.duration, Telemetry::Seconds(60.0));
+        if mode == "near_end" {
+            assert_eq!(snapshot.position, snapshot.duration);
+            assert!(!snapshot.completed, "near/end position is not an EOF event");
+        }
+        assert!(
+            snapshot.exit.is_none(),
+            "event is not process-exit evidence"
+        );
+        session.stop().await.unwrap();
+        assert_eq!(
+            session
+                .snapshot(&CancellationToken::new())
+                .await
+                .unwrap()
+                .completed,
+            mode == "eof_event",
+            "observed EOF stays latched"
+        );
+    }
+}
+
+#[tokio::test]
+async fn queued_eof_is_drained_after_child_exit_but_quit_error_or_zero_exit_are_not_completion() {
+    for mode in [
+        "queued_eof",
+        "queued_quit",
+        "queued_error",
+        "queued_nonzero",
+        "queued_exit0",
+        "queued_partial",
+    ] {
+        let fake = Fake::new(mode);
+        let mut session = fake.launch(PlayerKind::Mpv).await;
+        timeout(Duration::from_secs(2), async {
+            while session.try_wait().unwrap().is_none() {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let snapshot = session.snapshot(&CancellationToken::new()).await.unwrap();
+        assert_eq!(snapshot.completed, mode == "queued_eof", "{mode}");
+        assert_eq!(snapshot.position, Telemetry::Unavailable);
+        assert_eq!(snapshot.duration, Telemetry::Unavailable);
+        assert_eq!(
+            snapshot.exit.unwrap().code(),
+            Some(if mode == "queued_nonzero" { 7 } else { 0 })
+        );
+        session.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn exit_drain_has_an_aggregate_budget_and_never_skips_a_flood_to_find_eof() {
+    let fake = Fake::new("queued_flood");
+    let mut session = fake.launch(PlayerKind::Mpv).await;
+    timeout(Duration::from_secs(2), async {
+        while session.try_wait().unwrap().is_none() {
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let snapshot = timeout(
+        Duration::from_millis(300),
+        session.snapshot(&CancellationToken::new()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        !snapshot.completed,
+        "EOF beyond drain budget was not observed"
+    );
+    assert!(
+        !session
+            .snapshot(&CancellationToken::new())
+            .await
+            .unwrap()
+            .completed,
+        "partial drain must close IPC rather than reuse its suffix"
+    );
+    session.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_exit_drain_closes_ipc_without_inventing_completion() {
+    let fake = Fake::new("queued_eof");
+    let mut session = fake.launch(PlayerKind::Mpv).await;
+    timeout(Duration::from_secs(2), async {
+        while session.try_wait().unwrap().is_none() {
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    assert!(!session.snapshot(&cancel).await.unwrap().completed);
+    assert!(
+        !session
+            .snapshot(&CancellationToken::new())
+            .await
+            .unwrap()
+            .completed,
+        "cancelled drain cannot leave unread events reusable"
+    );
+    session.stop().await.unwrap();
 }
 
 #[tokio::test]

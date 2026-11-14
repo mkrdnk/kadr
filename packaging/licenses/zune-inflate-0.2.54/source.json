@@ -1,0 +1,24 @@
+{
+  "name": "zune-inflate",
+  "version": "0.2.54",
+  "license_expression": "MIT OR Apache-2.0 OR Zlib",
+  "vcs_sha1": "69502ce83fdfecdd0beefd677e2abb3781b29d98",
+  "path_in_vcs": "zune-inflate",
+  "repository": "https://github.com/etemesi254/zune-image",
+  "evidence": "Published Cargo metadata has no repository; its homepage https://github.com/etemesi254/zune-image/tree/main/zune-inflate identifies the upstream repository. Published .cargo_vcs_info.json pins commit and zune-inflate path; zune-inflate/Cargo.toml at that exact commit confirms name zune-inflate, version 0.2.54, homepage and license. Workspace-root LICENSE.md preserves developer copyright/dual-license notice; LICENSE-ZLIB supplies actual Zlib terms. No separate MIT/Apache full-text files at this commit.",
+  "files": [
+    {
+      "path": "_texts/e870d7fd7819a9f0453c62798cb52ae95d148a8c91dc2de1d983f997143c72de.json",
+      "upstream_path": "LICENSE.md",
+      "url": "https://raw.githubusercontent.com/etemesi254/zune-image/69502ce83fdfecdd0beefd677e2abb3781b29d98/LICENSE.md",
+      "sha256": "e870d7fd7819a9f0453c62798cb52ae95d148a8c91dc2de1d983f997143c72de",
+      "encoding": "json-utf8"
+    },
+    {
+      "path": "_texts/7fa429541e55b1509909e058f2d21a37467e4958ec713b357f6e0cf9dc4ee352.txt",
+      "upstream_path": "LICENSE-ZLIB",
+      "url": "https://raw.githubusercontent.com/etemesi254/zune-image/69502ce83fdfecdd0beefd677e2abb3781b29d98/LICENSE-ZLIB",
+      "sha256": "7fa429541e55b1509909e058f2d21a37467e4958ec713b357f6e0cf9dc4ee352"
+    }
+  ]
+}

@@ -150,9 +150,11 @@ pub struct LibraryItem {
     pub media: Option<MediaRecord>,
     /// Resume identity even when history clearing removed measured progress.
     pub target: PlaybackTarget,
+    /// Actual successful open of this exact target, never inferred from progress.
+    pub opened_at: Option<i64>,
     /// Latest measured target, including its episode identity.
     pub progress: Option<PlaybackProgress>,
-    /// Descriptor matching progress.source_id, or the linked source if no progress.
+    /// Descriptor matching progress, otherwise the actual open or unplayed link.
     pub source: Option<StoredSource>,
 }
 

@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{ByteSource, ReadFuture};
 
-const MAX_READ: usize = 64 * 1024;
+pub(super) const MAX_READ: usize = 64 * 1024;
 const MAX_HEADERS: usize = 16 * 1024;
 const MAX_URL: usize = 16 * 1024;
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -61,7 +61,8 @@ impl RemoteSource {
         let (endpoint, length, validators, content_type) = bounded(&cancel, async {
             let endpoint = Endpoint::resolve(url, false).await?;
             let mut redirects = 0;
-            let (response, endpoint) = probe(endpoint, Method::HEAD, &mut redirects).await?;
+            let (response, endpoint) =
+                request(endpoint, Method::HEAD, None, &mut redirects).await?;
             let status = response.status();
             let head_length = length_header(response.headers())?;
             if status == StatusCode::OK
@@ -82,7 +83,8 @@ impl RemoteSource {
                 return Err(invalid("remote metadata request failed"));
             }
             drop(response);
-            let (mut response, endpoint) = probe(endpoint, Method::GET, &mut redirects).await?;
+            let (mut response, endpoint) =
+                request(endpoint, Method::GET, Some("bytes=0-0"), &mut redirects).await?;
             check_identity(response.headers())?;
             let validators = Validators::from_headers(response.headers())?;
             let content_type = media_type(response.headers());
@@ -225,7 +227,7 @@ impl ByteSource for RemoteSource {
     }
 }
 
-async fn bounded<T>(
+pub(super) async fn bounded<T>(
     cancel: &CancellationToken,
     future: impl Future<Output = io::Result<T>>,
 ) -> io::Result<T> {
@@ -239,14 +241,14 @@ async fn bounded<T>(
 
 // Reuse a client with pinned DNS answers for the final URL across all reads.
 // New redirect endpoints get a fresh checked/pinned client during opening only.
-struct Endpoint {
+pub(super) struct Endpoint {
     client: Client,
     url: Url,
     public: bool,
 }
 
 impl Endpoint {
-    async fn resolve(url: Url, public_only: bool) -> io::Result<Self> {
+    pub(super) async fn resolve(url: Url, public_only: bool) -> io::Result<Self> {
         let host = url
             .host_str()
             .ok_or_else(|| invalid("invalid remote host"))?;
@@ -283,7 +285,6 @@ impl Endpoint {
             .http1_only()
             .http1_max_headers(64)
             .connect_timeout(Duration::from_secs(10))
-            .timeout(DEADLINE)
             .resolve_to_addrs(host, &addresses)
             .build()
             .map_err(network_error)?;
@@ -295,9 +296,10 @@ impl Endpoint {
     }
 }
 
-async fn probe(
+pub(super) async fn request(
     mut endpoint: Endpoint,
     method: Method,
+    range: Option<&str>,
     redirects: &mut usize,
 ) -> io::Result<(Response, Endpoint)> {
     let mut public_only = endpoint.public;
@@ -306,8 +308,8 @@ async fn probe(
             .client
             .request(method.clone(), endpoint.url.clone())
             .header(ACCEPT_ENCODING, "identity");
-        if method == Method::GET {
-            request = request.header(RANGE, "bytes=0-0");
+        if let Some(range) = range {
+            request = request.header(RANGE, range);
         }
         let response = request.send().await.map_err(network_error)?;
         check_headers(response.headers())?;
@@ -341,7 +343,7 @@ async fn probe(
     }
 }
 
-fn validated_url(input: &str) -> io::Result<Url> {
+pub(super) fn validated_url(input: &str) -> io::Result<Url> {
     if input.len() > MAX_URL {
         return Err(invalid("remote URL exceeds limit"));
     }
@@ -477,7 +479,7 @@ fn single_header(
     Ok(value)
 }
 
-fn check_identity(headers: &HeaderMap) -> io::Result<()> {
+pub(super) fn check_identity(headers: &HeaderMap) -> io::Result<()> {
     if single_header(headers, CONTENT_ENCODING)?
         .is_some_and(|s| !s.eq_ignore_ascii_case("identity"))
     {
@@ -495,7 +497,7 @@ fn decimal(input: &str) -> io::Result<u64> {
         .map_err(|_| invalid("remote byte count overflows"))
 }
 
-fn length_header(headers: &HeaderMap) -> io::Result<Option<u64>> {
+pub(super) fn length_header(headers: &HeaderMap) -> io::Result<Option<u64>> {
     single_header(headers, CONTENT_LENGTH)?
         .map(decimal)
         .transpose()
@@ -564,15 +566,15 @@ fn media_type(headers: &HeaderMap) -> Option<String> {
     (essence.len() <= 127 && token(kind) && token(subtype)).then(|| essence.to_ascii_lowercase())
 }
 
-fn invalid(message: &'static str) -> io::Error {
+pub(super) fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-fn unsupported(message: &'static str) -> io::Error {
+pub(super) fn unsupported(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::Unsupported, message)
 }
 
-fn network_error(error: reqwest::Error) -> io::Error {
+pub(super) fn network_error(error: reqwest::Error) -> io::Error {
     // Never wrap reqwest::Error: its Display/Debug can include private URLs.
     if error.is_timeout() {
         io::Error::new(io::ErrorKind::TimedOut, "remote operation timed out")

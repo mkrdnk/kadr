@@ -103,17 +103,23 @@ async fn real_mpv_http_resume_telemetry_stop_and_eof() {
     .await
     .unwrap();
     assert!(session.stop().await.unwrap().success());
-    let mut session = launch(PlayerKind::Mpv, &server, 7.0).await;
-    wait_for_exit(&mut session).await;
     assert!(
-        session
+        !session
             .snapshot(&CancellationToken::new())
             .await
             .unwrap()
-            .exit
-            .unwrap()
-            .success()
+            .completed,
+        "explicit quit is not natural completion"
     );
+    let mut session = launch(PlayerKind::Mpv, &server, 7.0).await;
+    wait_for_exit(&mut session).await;
+    let snapshot = session.snapshot(&CancellationToken::new()).await.unwrap();
+    assert!(snapshot.exit.unwrap().success());
+    assert!(
+        snapshot.completed,
+        "queued mpv end-file/eof must be observed"
+    );
+    assert_eq!(snapshot.position, Telemetry::Unavailable);
     server.shutdown().await.unwrap();
 }
 
@@ -126,6 +132,7 @@ async fn real_vlc_http_resume_unsupported_telemetry_stop_and_eof() {
     let snapshot = session.snapshot(&CancellationToken::new()).await.unwrap();
     assert_eq!(snapshot.position, Telemetry::Unsupported);
     assert_eq!(snapshot.duration, Telemetry::Unsupported);
+    assert!(!snapshot.completed);
     assert!(session.stop().await.unwrap().success());
     // Coarse end-to-end resume evidence, NOT a source of playback telemetry:
     // seven-second start in an eight-second file should finish well before
@@ -134,5 +141,13 @@ async fn real_vlc_http_resume_unsupported_telemetry_stop_and_eof() {
     let mut session = launch(PlayerKind::Vlc, &server, 7.0).await;
     wait_for_exit(&mut session).await;
     assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(
+        !session
+            .snapshot(&CancellationToken::new())
+            .await
+            .unwrap()
+            .completed,
+        "VLC completion events are unsupported"
+    );
     server.shutdown().await.unwrap();
 }

@@ -84,6 +84,9 @@ pub struct PlayerSnapshot {
     pub duration: Telemetry,
     /// Process exit, not proof of media completion (the user may close a window).
     pub exit: Option<ExitStatus>,
+    /// True only after an observed mpv `end-file` event with `reason: eof`.
+    /// VLC and unobserved/lost EOF events remain false, even on exit code zero.
+    pub completed: bool,
 }
 
 /// A single managed direct child and its private IPC endpoint.
@@ -100,6 +103,7 @@ pub struct PlayerSession {
     command_timeout: Duration,
     stop_timeout: Duration,
     request_id: u64,
+    completed: bool,
 }
 
 impl PlayerSession {
@@ -214,6 +218,7 @@ impl PlayerSession {
             command_timeout: options.command_timeout,
             stop_timeout: options.stop_timeout,
             request_id: 0,
+            completed: false,
         };
         let connect = async {
             loop {
@@ -265,13 +270,16 @@ impl PlayerSession {
                 position: Telemetry::Unsupported,
                 duration: Telemetry::Unsupported,
                 exit,
+                completed: false,
             });
         }
         if exit.is_some() {
+            self.drain_exit_events(cancel).await;
             return Ok(PlayerSnapshot {
                 position: Telemetry::Unavailable,
                 duration: Telemetry::Unavailable,
                 exit,
+                completed: self.completed,
             });
         }
         let properties = async {
@@ -302,17 +310,50 @@ impl PlayerSession {
                             position: Telemetry::Unavailable,
                             duration: Telemetry::Unavailable,
                             exit: Some(status),
+                            completed: self.completed,
                         });
                     }
                 }
                 return Err(error);
             }
         };
+        let exit = self.try_wait()?;
+        if exit.is_some() {
+            self.drain_exit_events(cancel).await;
+        }
         Ok(PlayerSnapshot {
             position,
             duration,
-            exit: self.try_wait()?,
+            exit,
+            completed: self.completed,
         })
+    }
+
+    /// Called only after process exit. Consume queued events, not new replies
+    /// to commands: a slow poll must not lose EOF merely because the child has
+    /// already exited. Always close this stream, including on future drop.
+    async fn drain_exit_events(&mut self, cancel: &CancellationToken) {
+        let Some(mut socket) = self.socket.take() else {
+            return;
+        };
+        let deadline = self.command_timeout.min(Duration::from_millis(100));
+        let drain = async {
+            // Aggregate cap, not merely a per-line cap: an inherited socket or
+            // queued event flood cannot consume unbounded input after exit.
+            let mut remaining = MAX_REPLY;
+            while remaining > 0 {
+                let Ok((event, consumed)) = read_json_line(&mut socket, remaining).await else {
+                    break;
+                };
+                remaining -= consumed;
+                self.completed |= is_mpv_eof(&event);
+            }
+        };
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => {}
+            _ = timeout(deadline, drain) => {}
+        }
     }
 
     async fn mpv_property(
@@ -326,13 +367,19 @@ impl PlayerSession {
         self.request_id = self.request_id.wrapping_add(1);
         let id = self.request_id;
         let request = json!({"command": ["get_property", property], "request_id": id});
+        let command_timeout = self.command_timeout;
         let exchange = async {
             socket.write_all(request.to_string().as_bytes()).await?;
             socket.write_all(b"\n").await?;
             loop {
-                let reply = read_json_line(&mut socket).await?;
-                // mpv events do not carry request IDs. Delayed replies may not
-                // masquerade as the requested property.
+                let (reply, _) = read_json_line(&mut socket, MAX_REPLY).await?;
+                // Events are independent of command replies, including EOF
+                // between samples. Classify them before looking at request ID.
+                if reply.get("event").and_then(Value::as_str).is_some() {
+                    self.completed |= is_mpv_eof(&reply);
+                    continue;
+                }
+                // Delayed replies may not masquerade as the requested property.
                 if reply.get("request_id").and_then(Value::as_u64) != Some(id) {
                     continue;
                 }
@@ -356,7 +403,7 @@ impl PlayerSession {
         let result = tokio::select! {
             biased;
             () = cancel.cancelled() => Err(cancelled()),
-            result = timeout(self.command_timeout, exchange) => result
+            result = timeout(command_timeout, exchange) => result
                 .unwrap_or_else(|_| Err(timed_out("player IPC command timed out"))),
         };
         match result {
@@ -436,18 +483,25 @@ fn shared_player_directory() -> io::Result<PathBuf> {
 
 // Deliberately do not buffer beyond a reply's newline. This keeps future-drop
 // semantics simple, and caps a single event/reply independently of peer input.
-async fn read_json_line(socket: &mut UnixStream) -> io::Result<Value> {
+async fn read_json_line(socket: &mut UnixStream, limit: usize) -> io::Result<(Value, usize)> {
     let mut bytes = Vec::new();
     loop {
+        if bytes.len() == limit {
+            return Err(invalid_reply("mpv reply exceeds size limit"));
+        }
         let byte = socket.read_u8().await?;
         if byte == b'\n' {
-            return serde_json::from_slice(&bytes).map_err(|_| invalid_reply("malformed mpv JSON"));
-        }
-        if bytes.len() == MAX_REPLY {
-            return Err(invalid_reply("mpv reply exceeds size limit"));
+            return serde_json::from_slice(&bytes)
+                .map(|reply| (reply, bytes.len() + 1))
+                .map_err(|_| invalid_reply("malformed mpv JSON"));
         }
         bytes.push(byte);
     }
+}
+
+fn is_mpv_eof(event: &Value) -> bool {
+    event.get("event").and_then(Value::as_str) == Some("end-file")
+        && event.get("reason").and_then(Value::as_str) == Some("eof")
 }
 
 fn redacted(error: io::Error, message: &'static str) -> io::Error {
