@@ -164,7 +164,19 @@ Locations:
 
 `manifest.json` and `REVIEW.txt` expose missing text/metadata as **needs-review**,
 never as a successful legal audit. All three packagers use `--strict` and fail
-closed on unresolved gaps. To run the same gate separately:
+closed on unresolved gaps. Collection is offline and requires the complete
+locked metadata source graph in Cargo's cache, including workspace development
+dependencies needed to resolve metadata even though their notices are excluded.
+A release-only build does not necessarily fetch that graph. Prepare it explicitly
+for the native target (CI does this before building/collecting):
+
+```sh
+cargo fetch --locked --target x86_64-unknown-linux-gnu  # Linux x86_64
+# Or on the supported Mac runner:
+cargo fetch --locked --target aarch64-apple-darwin
+```
+
+To run the same gate separately:
 
 ```sh
 python3 scripts/package-licenses.py --binary target/release/kadr-app \
@@ -172,8 +184,11 @@ python3 scripts/package-licenses.py --binary target/release/kadr-app \
 python3 scripts/package-licenses-test.py
 ```
 
-The original 43 text-file gaps are covered by 38 commit/hash-verified source-file
-supplements and five authenticated declared-standard records. Normal strict
+The original 43 Linux text-file gaps are covered by 38 commit/hash-verified
+source-file supplements and five authenticated declared-standard records.
+The Mac target adds eight exact-upstream notices with full standard-term
+supplements and five additional explicitly reviewed declared-standard cases.
+The combined allowlist is exactly ten cases, not a generic fallback. Normal strict
 commands accept those recognized grants without needing the QA override; the
 overall status remains `texts-collected-not-audit`. Package manifests and
 requirements explicitly count the declared-standard packages. This is notice

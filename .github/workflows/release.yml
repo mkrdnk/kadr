@@ -37,6 +37,9 @@ jobs:
           python-version: "3.11"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: release-linux-x86_64-glibc235
       - name: Install native build and packaging dependencies
         run: |
           sudo apt-get update
@@ -56,6 +59,8 @@ jobs:
           flatpak --user remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
           flatpak --user install -y --noninteractive flathub \
             org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08
+      - name: Fetch complete locked metadata source graph
+        run: cargo fetch --locked --target x86_64-unknown-linux-gnu
       - run: cargo test --locked -p kadr-media --test flatpak_player --test players
       - run: cargo build --locked --release -p kadr-app
       - name: Package unsigned Linux candidates
@@ -71,8 +76,8 @@ jobs:
         run: |
           XDG_RUNTIME_DIR=/run/user/$(id -u)
           export XDG_RUNTIME_DIR
-          mkdir -p "$XDG_RUNTIME_DIR"
-          chmod 700 "$XDG_RUNTIME_DIR"
+          # Hosted non-login runners need not have a PAM-created user runtime.
+          sudo install -d -m700 -o "$(id -u)" -g "$(id -g)" "$XDG_RUNTIME_DIR"
           scripts/package-test-flatpak.sh target/dist/kadr-*-unsigned.flatpak
       - name: Reject incomplete notices before any authorized upload
         if: ${{ inputs.retain_artifacts }}
@@ -102,11 +107,16 @@ jobs:
           python-version: "3.11"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: release-macos-arm64-13
       - name: Select full Xcode
         run: |
           sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
           xcrun --find metal
           test "$(uname -m)" = arm64
+      - name: Fetch complete locked metadata source graph
+        run: cargo fetch --locked --target aarch64-apple-darwin
       - run: cargo build --locked --release -p kadr-app
       - name: Package unsigned macOS candidate
         run: |

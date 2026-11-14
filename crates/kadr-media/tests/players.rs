@@ -22,6 +22,8 @@ impl Fake {
             r#"#!/usr/bin/env python3
 import json, os, socket, sys, time
 mode = {mode:?}
+if mode == 'delayed_start':
+    time.sleep(1.1)
 args = sys.argv[1:]
 path = next(a.split('=', 1)[1] for a in args if a.startswith(('--input-ipc-server=', '--rc-unix=')))
 with open({record}, 'w') as f:
@@ -114,7 +116,8 @@ for line in c.makefile('rb'):
     fn options(&self, kind: PlayerKind) -> PlayerOptions {
         PlayerOptions {
             executable: self.executable.clone(),
-            connect_timeout: Duration::from_secs(1),
+            // Inherit production's startup budget, not a one-second Python/
+            // scheduler benchmark. Timeout-specific cases override it below.
             command_timeout: Duration::from_millis(120),
             stop_timeout: Duration::from_millis(120),
             ..PlayerOptions::for_player(kind)
@@ -127,7 +130,8 @@ for line in c.makefile('rb'):
     }
 
     async fn wait_for_record(&self) -> Value {
-        timeout(Duration::from_secs(2), async {
+        let startup_budget = PlayerOptions::for_player(PlayerKind::Mpv).connect_timeout;
+        timeout(startup_budget, async {
             loop {
                 if let Ok(bytes) = fs::read(self.directory.path().join("record.json"))
                     && let Ok(record) = serde_json::from_slice(&bytes)
@@ -158,6 +162,20 @@ fn request() -> PlayRequest {
         media: "--not-an-option; $(touch should-not-exist) & \"private\"".into(),
         resume: Some(Duration::from_millis(3500)),
     }
+}
+
+#[tokio::test]
+async fn fake_startup_uses_the_production_budget_before_testing_ipc() {
+    let fake = Fake::new("delayed_start");
+    assert_eq!(
+        fake.options(PlayerKind::Mpv).connect_timeout,
+        PlayerOptions::for_player(PlayerKind::Mpv).connect_timeout
+    );
+    let mut player = fake.launch(PlayerKind::Mpv).await;
+    let record = fake.record();
+    assert!(player.stop().await.unwrap().success());
+    drop(player);
+    assert_reaped(record["pid"].as_u64().unwrap() as u32).await;
 }
 
 async fn assert_reaped(pid: u32) {

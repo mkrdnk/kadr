@@ -19,12 +19,12 @@
 - [x] Сборка и графическая smoke-проверка в отдельной нативной X11-сессии (Xorg dummy, исправленный GPUI).
 - [x] Сборка и графическая smoke-проверка macOS 15 arm64 (CI + просмотр native screenshots).
 - [x] Документарное сравнение BitTorrent API, лицензий и рисков упаковки.
-- [ ] Интеграционный spike BitTorrent: pieces/seek, Linux/macOS и выбор движка.
+- [x] BitTorrent pieces/seek/teardown на Linux/macOS; librqbit выбран и используется production engine.
 - [x] Прототип mpv IPC: запуск, позиция, длительность, возобновление, завершение (Linux).
 - [x] Прототип VLC: запуск/resume/завершение, телеметрия явно недоступна (Linux).
 - [x] Прототип HTTP Range на Linux: GET/HEAD, 206/416, seek, таймауты и отмена.
 - [x] Прогон HTTP Range-прототипа на macOS (workspace tests и настоящий mpv/torrent seek).
-- [ ] Исходные измерения производительности и ADR по выбранным реализациям.
+- [x] Исходные Linux loopback-измерения pieces/Range/shutdown и решение по движку (docs/torrent-integration.md); это не CPU/RAM/WAN SLO.
 
 ## P1 — каркас
 
@@ -63,7 +63,8 @@
 
 ## P5 — релиз
 
-- [ ] CI: сборки и тесты на Linux/macOS.
+- [x] CI: сборки, тесты, real playback/save и native render на Linux/macOS.
+- [ ] Единый зелёный workflow с опубликованными unsigned CI-кандидатами обоих targets.
 - [x] Smoke-проверки в Wayland и X11 (Linux software rendering).
 - [x] Оптимизированные Flatpak и AppImage: strict package builds и Linux smoke.
 - [x] macOS DMG: unsigned debug candidate построен, смонтирован и запущен; native pixels и exit 0 подтверждены.
@@ -571,3 +572,14 @@ directories из Rust cache**, до запуска окон. CI-пути runtime
 перенесены из `target/` в свежий `$RUNNER_TEMP`, package output очищается только
 в одноразовых CI checkout. Нативные пиксели/DMG ранее прошли и просмотрены;
 итоговый полный workflow и оптимизированные CI-кандидаты проверяются далее.
+
+Оба полных platform test jobs стали зелёными в
+[run 43559630535](https://github.com/mkrdnk/kadr/actions/runs/43559630535):
+включая fresh native Xorg/macOS pixels, strict DMG, реальные плееры и все
+повторы HTTP save. macOS optimized build также завершился успешно.
+Release jobs выявили отдельные ошибки bootstrap: offline metadata требовала
+не скачанную release-only сборкой dev-зависимость, а четыре cold Python fixtures
+упёрлись в собственный искусственный startup limit 1 с, ниже production 5 с.
+CI явно выполняет locked target fetch; fake startup теперь наследует production
+budget и проверяется дополнительным delayed-start тестом. Специальные короткие
+timeout/cancellation cases и production deadlines не изменены.
