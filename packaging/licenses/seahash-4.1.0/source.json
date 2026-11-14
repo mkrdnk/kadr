@@ -1,0 +1,10 @@
+{
+  "record_type": "declared-spdx",
+  "name": "seahash",
+  "version": "4.1.0",
+  "license_expression": "MIT",
+  "crate_sha256": "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b",
+  "archive_url": "https://static.crates.io/crates/seahash/seahash-4.1.0.crate",
+  "canonical_license_ids": ["MIT"],
+  "evidence": "Both manifests in the checksum-authenticated published archive declare MIT. Absence of a pinned repository LICENSE does not negate the authenticated standard declaration; canonical terms and actual metadata remain separately labeled."
+}

@@ -2,6 +2,7 @@
 """Collect local notices, not a license-compatibility audit or linked-code SBOM."""
 import argparse
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,8 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
+import tomllib
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -19,6 +22,13 @@ EXCLUDED = {
 NOTICE_NAME = re.compile(r"^(LICENSE|LICENCE|COPYING|NOTICE|COPYRIGHT|AUTHORS|UNLICENSE|OFL)", re.I)
 MAX_NOTICE_BYTES = 2 * 1024 * 1024
 OVERRIDES_ROOT = Path(__file__).resolve().parent.parent / "packaging/licenses"
+DECLARED_STANDARDS = {
+    ("convert_case", "0.4.0"): ("MIT", ("MIT",)),
+    ("hexf-parse", "0.2.1"): ("CC0-1.0", ("CC0-1.0",)),
+    ("simd_helpers", "0.1.0"): ("MIT", ("MIT",)),
+    ("seahash", "4.1.0"): ("MIT", ("MIT",)),
+    ("pathfinder_geometry", "0.5.1"): ("MIT/Apache-2.0", ("MIT", "Apache-2.0")),
+}
 
 
 def digest(path):
@@ -96,11 +106,160 @@ def package_key(package, identity):
     return re.sub(r"[^A-Za-z0-9._+-]", "_", f"{package['name']}-{package['version']}-{suffix}")
 
 
-def upstream_notices(package, root, destination, output):
+def source_comments(data, suffix):
+    """Return actual comment blocks, never inferred owners/years or code."""
+    patterns = [rb"/\*[\s\S]*?\*/"]
+    marker = rb"\#" if suffix in {".py", ".sh", ".toml", ".yaml", ".yml"} else rb"//"
+    patterns.append(rb"(?m)^[ \t]*" + marker + rb"[^\r\n]*(?:\r?\n[ \t]*" + marker + rb"[^\r\n]*)*")
+    for pattern in patterns:
+        for match in re.finditer(pattern, data):
+            if re.search(rb"copyright|spdx|licens[ei]|permission is hereby|public domain|cc0", match[0], re.I):
+                yield match[0], data[:match.start()].count(b"\n") + 1
+
+
+def declared_standard_notices(package, root, destination, output, project, record):
+    expected = DECLARED_STANDARDS.get((package["name"], package["version"]))
+    if (
+        expected is None or record.get("name") != package["name"]
+        or record.get("version") != package["version"]
+        or package.get("license") != expected[0]
+        or record.get("license_expression") != expected[0]
+        or package.get("license_file")
+        or tuple(record.get("canonical_license_ids", [])) != expected[1]
+        or not (package.get("source") or "").startswith("registry+")
+        or record.get("archive_url") != (
+            f"https://static.crates.io/crates/{package['name']}/{package['name']}-{package['version']}.crate"
+        )
+    ):
+        raise ValueError(f"unrecognized/conflicting declared-SPDX grant: {package['name']}")
+    locked = [p for p in tomllib.loads((project / "Cargo.lock").read_text())["package"]
+              if p["name"] == package["name"] and p["version"] == package["version"]
+              and p.get("source") == package["source"]]
+    if len(locked) != 1 or locked[0].get("checksum") != record.get("crate_sha256"):
+        raise ValueError(f"declared-SPDX lock checksum mismatch: {package['name']}")
+    # Cargo's source and archive cache share the registry identifier. No fetch.
+    archive = root.parent.parent.parent / "cache" / root.parent.name / f"{package['name']}-{package['version']}.crate"
+    if archive.stat().st_size > 64 * 1024 * 1024:
+        raise ValueError("published crate archive exceeds notice-inspection bound")
+    raw_archive = archive.read_bytes()
+    if hashlib.sha256(raw_archive).hexdigest() != record["crate_sha256"]:
+        raise ValueError(f"published crate checksum mismatch: {package['name']}")
+    members = {}
+    prefix = f"{package['name']}-{package['version']}"
+    total = 0
+    with tarfile.open(fileobj=io.BytesIO(raw_archive), mode="r:*") as bundle:
+        for member in bundle.getmembers():
+            if member.isdir():
+                continue
+            path = Path(member.name)
+            total += member.size
+            if (
+                not member.isfile() or path.is_absolute() or ".." in path.parts
+                or not path.parts or path.parts[0] != prefix
+                or member.size > MAX_NOTICE_BYTES or total > 64 * 1024 * 1024
+            ):
+                raise ValueError("unsafe/excessive published crate member")
+            relative = path.relative_to(prefix).as_posix()
+            if relative in members:
+                raise ValueError("duplicate published crate member")
+            members[relative] = bundle.extractfile(member).read()
+    declaration = tomllib.loads(members["Cargo.toml"].decode())["package"]
+    for filename in ("Cargo.toml", "Cargo.toml.orig"):
+        if filename not in members:
+            continue
+        declared = tomllib.loads(members[filename].decode())["package"]
+        if (
+            declared.get("name") != package["name"]
+            or declared.get("version") != package["version"]
+            or declared.get("license") != expected[0]
+            or declared.get("license-file") or declared.get("license_file")
+        ):
+            raise ValueError(f"published license declaration conflict: {package['name']}")
+    if declaration.get("authors", []) != package.get("authors", []):
+        raise ValueError(f"published author metadata mismatch: {package['name']}")
+    folder = destination / "declared-spdx"
+    folder.mkdir(parents=True)
+    notices = []
+    actual_notices = []
+    metadata_files = []
+
+    def save(relative, data, **evidence):
+        path = folder / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        item = {"path": path.relative_to(output).as_posix(), "sha256": digest(path), **evidence}
+        notices.append(item)
+        return item
+
+    for name, data in sorted(members.items()):
+        path = Path(name)
+        evidence = {"archive_path": f"{prefix}/{name}", "archive_member_sha256": hashlib.sha256(data).hexdigest()}
+        if path.name in {"Cargo.toml", "Cargo.toml.orig", ".cargo_vcs_info.json"} or path.name.upper().startswith("README"):
+            metadata_files.append(save(Path("published-metadata") / path, data, kind="published-metadata", **evidence))
+        if NOTICE_NAME.match(path.name) or any(NOTICE_NAME.match(part) for part in path.parts[:-1]):
+            actual_notices.append(save(Path("actual-notices") / path, data, kind="archive-notice", **evidence))
+        elif path.suffix in {".rs", ".c", ".h", ".cpp", ".cc", ".py", ".sh", ".toml", ".yaml", ".yml"}:
+            for index, (comment, line) in enumerate(source_comments(data, path.suffix)):
+                actual_notices.append(save(
+                    Path("source-notices") / path.parent / f"{path.name}.{index}.txt",
+                    comment, kind="source-header-notice", line_start=line, **evidence,
+                ))
+    spdx_record = json.loads((OVERRIDES_ROOT / "spdx/source.json").read_text())
+    if spdx_record["repository"] != "https://github.com/spdx/license-list-data" or not re.fullmatch(r"[0-9a-f]{40}", spdx_record["commit"]):
+        raise ValueError("unrecognized canonical SPDX provenance")
+    for identifier in expected[1]:
+        entries = [entry for entry in spdx_record["files"] if entry["license_id"] == identifier]
+        if len(entries) != 1:
+            raise ValueError("canonical SPDX terms missing or ambiguous")
+        entry = entries[0]
+        relative = Path(entry["path"])
+        source = OVERRIDES_ROOT / relative
+        expected_url = f"https://raw.githubusercontent.com/spdx/license-list-data/{spdx_record['commit']}/text/{identifier}.txt"
+        if (
+            relative.is_absolute() or ".." in relative.parts or source.is_symlink()
+            or not source.resolve().is_relative_to(OVERRIDES_ROOT.resolve())
+            or entry["url"] != expected_url or digest(source) != entry["sha256"]
+        ):
+            raise ValueError("canonical SPDX terms hash/provenance mismatch")
+        data = source.read_bytes()
+        placeholder = entry.get("template_copyright_line")
+        if placeholder:
+            lines = data.splitlines(keepends=True)
+            matches = [line for line in lines if line.strip() == placeholder.encode()]
+            if len(matches) != 1:
+                raise ValueError("canonical SPDX copyright template changed")
+            # This is an instructional template, never an upstream ownership claim.
+            data = b"".join(line for line in lines if line not in matches)
+        save(
+            Path("standard-terms") / f"{identifier}.txt", data,
+            kind="declared-standard-text", canonical_source_url=entry["url"],
+            canonical_source_sha256=entry["sha256"],
+            transform="omit-instructional-copyright-template-line" if placeholder else "verbatim",
+        )
+    report = {
+        **record, "status": "declared-standard-text",
+        "basis": "Authenticated published Cargo standard-license declaration by reference; not a recovered upstream LICENSE or legal approval.",
+        "authenticated_authors": declaration.get("authors", []),
+        "published_metadata": metadata_files,
+        "actual_notice_count": len(actual_notices),
+        "actual_notices": actual_notices,
+        "copyright_note": ("Actual archive notices copied verbatim." if actual_notices
+                           else "No copyright/source-header notice found in the authenticated archive; none invented."),
+        "spdx_provenance": spdx_record,
+    }
+    (folder / "provenance.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    return notices
+
+
+def upstream_notices(package, root, destination, output, project=None, override=None):
     record = OVERRIDES_ROOT / f"{package['name']}-{package['version']}" / "source.json"
     if not record.is_file():
         return []
-    override = json.loads(record.read_text(encoding="utf-8"))
+    override = override or json.loads(record.read_text(encoding="utf-8"))
+    if override.get("record_type") == "declared-spdx":
+        return declared_standard_notices(package, root, destination, output, project, override)
+    if override.get("record_type", "upstream") != "upstream":
+        raise ValueError("unrecognized notice provenance type")
     vcs = json.loads((root / ".cargo_vcs_info.json").read_text(encoding="utf-8"))
     commit = vcs["git"]["sha1"]
     if (
@@ -172,6 +331,8 @@ def collect(project, binary, output, target, strict):
     third_party = output / "third-party"
     third_party.mkdir()
     copy_notice(project / "LICENSE", output / "LICENSE", [project])
+    if (OVERRIDES_ROOT / "POLICY.md").is_file():
+        shutil.copyfile(OVERRIDES_ROOT / "POLICY.md", third_party / "NOTICE-POLICY.md")
     warnings = []
     records = []
     workspace = set(metadata["workspace_members"])
@@ -181,8 +342,11 @@ def collect(project, binary, output, target, strict):
         root = Path(package["manifest_path"]).resolve().parent
         key = keys[identity]
         destination = third_party / "rust" / key
-        files = set(notice_files(root))
-        if package.get("license_file"):
+        override_path = OVERRIDES_ROOT / f"{package['name']}-{package['version']}" / "source.json"
+        override = json.loads(override_path.read_text()) if override_path.is_file() else None
+        declared_standard = override is not None and override.get("record_type") == "declared-spdx"
+        files = set() if declared_standard else set(notice_files(root))
+        if package.get("license_file") and not declared_standard:
             files.add(root / package["license_file"])
         texts = []
         for path in sorted(files):
@@ -202,7 +366,7 @@ def collect(project, binary, output, target, strict):
             except (OSError, ValueError) as error:
                 warnings.append(f"{key}: {relative.as_posix()}: {error}")
         if not texts:
-            texts = upstream_notices(package, root, destination, output)
+            texts = upstream_notices(package, root, destination, output, project, override)
         project_license = identity in workspace and not texts
         if not texts and not project_license:
             warnings.append(f"{key}: no local license/copyright/notice text found")
@@ -222,7 +386,10 @@ def collect(project, binary, output, target, strict):
                           if (package.get("source") or "").startswith(("registry+", "sparse+")) else None),
             "workspace_package": identity in workspace,
             "project_license_fallback": "LICENSE" if project_license else None,
-            "license_text_status": "project-root-license" if project_license else ("present" if texts else "missing"),
+            "license_text_status": (
+                "declared-standard-text" if declared_standard else
+                ("project-root-license" if project_license else ("present" if texts else "missing"))
+            ),
             "manifest_sha256": digest(Path(package["manifest_path"])),
             "resolved_features": sorted(nodes[identity]["features"]),
             "dependencies": [
@@ -280,6 +447,9 @@ def collect(project, binary, output, target, strict):
         "cargo_lock_sha256": digest(project / "Cargo.lock"),
         "workspace_manifest_sha256": digest(project / "Cargo.toml"),
         "package_count": len(records),
+        "declared_standard_package_count": sum(
+            package["license_text_status"] == "declared-standard-text" for package in records
+        ),
         "packages": records,
         "vendor_notices": vendor_notices,
         "warnings": warnings,
@@ -291,6 +461,8 @@ def collect(project, binary, output, target, strict):
     missing = sum(package["license_text_status"] == "missing" for package in records)
     (third_party / "REVIEW.txt").write_text(
         f"NOTICE_STATUS: {inventory['status']}\n"
+        + f"Declared standard grants: {inventory['declared_standard_package_count']} authenticated package(s); "
+        "canonical terms are not claimed as upstream-shipped LICENSE files or human legal approval.\n"
         + (f"UNSIGNED LOCAL QA / AUDIT ONLY — NOT FOR DISTRIBUTION: {missing} package(s) missing text; "
            f"{len(warnings)} warning(s).\n" if warnings else "")
         + inventory["purpose"] + "\n\n" + "\n".join(inventory["limitations"])

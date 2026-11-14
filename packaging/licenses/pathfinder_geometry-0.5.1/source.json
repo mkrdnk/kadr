@@ -1,0 +1,10 @@
+{
+  "record_type": "declared-spdx",
+  "name": "pathfinder_geometry",
+  "version": "0.5.1",
+  "license_expression": "MIT/Apache-2.0",
+  "crate_sha256": "0b7b7e7b4ea703700ce73ebf128e1450eb69c3a8329199ffbfb9b2a0418e5ad3",
+  "archive_url": "https://static.crates.io/crates/pathfinder_geometry/pathfinder_geometry-0.5.1.crate",
+  "canonical_license_ids": ["MIT", "Apache-2.0"],
+  "evidence": "Both authenticated published manifests declare the legacy Cargo MIT/Apache-2.0 alternative grant. Actual source headers identify 2019/2020 The Pathfinder Project Developers and the MIT/Apache terms; copy every actual header verbatim. The unavailable VCS revision is not used as archive authentication."
+}

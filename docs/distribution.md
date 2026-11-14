@@ -100,7 +100,8 @@ license-compliance sign-off.
 All three packagers run `scripts/package-licenses.py` against
 `cargo metadata --offline --locked --format-version 1`, filtered to the native
 Rust target. Cargo and already-cached dependency sources are required even with
-`--binary`; collection never downloads missing sources or executes build scripts.
+`--binary`; the five declared-standard cases also require their cached `.crate`
+archives. Collection never downloads missing sources or executes build scripts.
 Use the checkout/lockfile that actually produced the supplied executable.
 
 The collector follows kadr-app's non-dev normal/build dependency closure,
@@ -119,7 +120,24 @@ published `.cargo_vcs_info.json` commit/path, pinned-commit URL and SHA-256 befo
 using one. Shared texts are content-addressed. A few raw notices intentionally
 lack a final newline: their `json-utf8` storage encodes the exact UTF-8 text, and
 the hash is checked against the decoded bytes embedded in the package.
-Overrides are not generic SPDX templates or invented copyright attributions.
+These source-file supplements never invent copyright attributions.
+
+Five separately labeled `declared-spdx` records cover only `convert_case 0.4.0`,
+`hexf-parse 0.2.1`, `simd_helpers 0.1.0`, `seahash 4.1.0`, and
+`pathfinder_geometry 0.5.1`. Their exact published archives must match the
+checked-in record **and Cargo.lock SHA-256**; published normalized/original
+manifests and metadata must agree on the recognized grant. The collector
+preserves actual published metadata/README/authors and source copyright/license
+comment notices, then supplies canonical MIT/CC0/Apache terms from SPDX
+license-list-data v3.26.0 commit
+`8a04f0303d95c4f932210b118588c662665bd383`, with pinned raw hashes.
+Instructional copyright placeholders are omitted from embedded terms and that
+transformation is recorded—no year, owner or permission is invented.
+Each case is marked **`declared-standard-text`**, not as a recovered upstream
+LICENSE or human legal approval. Unknown/custom/NOASSERTION declarations,
+conflicts, unreviewed versions and checksum failures still block collection.
+The [decision record](../packaging/licenses/POLICY.md) explains this refinement
+of the initial overly strict text-file-only rule and is embedded in each format.
 
 For vendored GPUI, every format includes its `LICENSE-APACHE`, the complete
 `docs/adr-gpui-x11.md` provenance, and an explicit modification notice. AppImage
@@ -141,13 +159,12 @@ python3 scripts/package-licenses.py --binary target/release/kadr-app \
 python3 scripts/package-licenses-test.py
 ```
 
-At the final Linux inventory check, 38 commit/hash-verified supplements closed
-38 of the original 43 missing-text cases. Five genuine published-source gaps
-remain documented with exact commits/search evidence in
-`packaging/licenses/README.md`: `convert_case 0.4.0`, `hexf-parse 0.2.1`,
-`simd_helpers 0.1.0`, `seahash 4.1.0`, and `pathfinder_geometry 0.5.1`.
-**New candidate packaging is blocked by this gate**, not silently marked legally
-complete. Earlier smoke artifacts predate this gate.
+The original 43 text-file gaps are covered by 38 commit/hash-verified source-file
+supplements and five authenticated declared-standard records. Normal strict
+commands accept those recognized grants without needing the QA override; the
+overall status remains `texts-collected-not-audit`. Package manifests and
+requirements explicitly count the declared-standard packages. This is notice
+collection, not a representation that upstream shipped otherwise absent files.
 
 For explicitly authorized **unsigned local QA only**, a developer can choose:
 

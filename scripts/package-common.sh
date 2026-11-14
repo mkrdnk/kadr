@@ -50,11 +50,15 @@ case ${KADR_ALLOW_INCOMPLETE_NOTICES:-0} in
 esac
 NOTICE_STATUS=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' \
   "$LICENSES/third-party/manifest.json")
+DECLARED_STANDARD_COUNT=$(python3 -c \
+  'import json,sys; print(json.load(open(sys.argv[1]))["declared_standard_package_count"])' \
+  "$LICENSES/third-party/manifest.json")
 notice_requirements() {
   if [[ "$NOTICE_STATUS" == needs-review ]]; then
     cat "$LICENSES/third-party/REVIEW.txt"
   else
     echo "NOTICE_STATUS: $NOTICE_STATUS"
+    echo "NOTICE_DECLARED_STANDARD_PACKAGES: $DECLARED_STANDARD_COUNT"
     echo "Notice texts collected; not a complete SBOM, compatibility audit or distribution approval."
   fi
 }

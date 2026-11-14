@@ -30,6 +30,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -42,7 +44,7 @@ jobs:
             libxcb-sync-dev libxcb-render0-dev libxcb-render-util0-dev \
             libxcb-composite0-dev libxcb-damage0-dev libxcb-present-dev \
             libvulkan1 mesa-vulkan-drivers xvfb openbox weston xdotool wmctrl \
-            fonts-dejavu-core imagemagick xserver-xorg-core xserver-xorg-video-dummy \
+            fonts-dejavu-core imagemagick x11-utils xserver-xorg-core xserver-xorg-video-dummy \
             mpv vlc-bin vlc-plugin-base ffmpeg
       - name: Select full Xcode
         if: runner.os == 'macOS'

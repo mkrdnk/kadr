@@ -1,0 +1,10 @@
+{
+  "record_type": "declared-spdx",
+  "name": "simd_helpers",
+  "version": "0.1.0",
+  "license_expression": "MIT",
+  "crate_sha256": "95890f873bec569a0362c235787f3aca6e1e887302ba4840839bcc6459c42da6",
+  "archive_url": "https://static.crates.io/crates/simd_helpers/simd_helpers-0.1.0.crate",
+  "canonical_license_ids": ["MIT"],
+  "evidence": "The checksum-authenticated published Cargo.toml and Cargo.toml.orig both declare MIT. Preserve any actual archive notices and the published metadata/authors; do not manufacture a copyright year or owner."
+}

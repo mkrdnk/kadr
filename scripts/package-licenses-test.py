@@ -7,6 +7,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import tarfile
 import unittest
 from unittest.mock import patch
 
@@ -163,6 +164,124 @@ class LicenseCollectionTests(unittest.TestCase):
         with patch.object(collector, "OVERRIDES_ROOT", root):
             with self.assertRaisesRegex(ValueError, "upstream notice hash mismatch"):
                 self.run_collection()
+
+    def standard_fixture(self, *, conflicting=False, header=True):
+        name, version = "convert_case", "0.4.0"
+        registry = self.root / "registry"
+        source = registry / "src/test-index" / f"{name}-{version}"
+        source.mkdir(parents=True)
+        manifest = (
+            '[package]\nname="convert_case"\nversion="0.4.0"\nlicense="MIT"\n'
+            'authors=["Fixture Author"]\n'
+        ).encode()
+        (source / "Cargo.toml").write_bytes(manifest)
+        members = {
+            "Cargo.toml": manifest,
+            "Cargo.toml.orig": manifest.replace(b'license="MIT"', b'license="NOASSERTION"') if conflicting else manifest,
+            "README.md": b"Synthetic published-package test fixture.\n",
+            "src/lib.rs": ((b"// Copyright Fixture Author\n// Licensed under MIT.\n" if header else b"")
+                           + b"pub fn fixture() {}\n"),
+        }
+        data = io.BytesIO()
+        with tarfile.open(fileobj=data, mode="w:gz") as archive:
+            for path, contents in members.items():
+                info = tarfile.TarInfo(f"{name}-{version}/{path}")
+                info.size = len(contents)
+                archive.addfile(info, io.BytesIO(contents))
+        raw = data.getvalue()
+        archive = registry / "cache/test-index" / f"{name}-{version}.crate"
+        archive.parent.mkdir(parents=True)
+        archive.write_bytes(raw)
+        checksum = hashlib.sha256(raw).hexdigest()
+        self.packages[1].update(name=name, version=version, manifest_path=str(source / "Cargo.toml"))
+        self.root.joinpath("Cargo.lock").write_text(
+            'version=4\n[[package]]\nname="convert_case"\nversion="0.4.0"\n'
+            f'source="{self.packages[1]["source"]}"\nchecksum="{checksum}"\n'
+        )
+        overrides = self.root / "standards"
+        (overrides / "convert_case-0.4.0").mkdir(parents=True)
+        (overrides / "convert_case-0.4.0/source.json").write_text(json.dumps({
+            "record_type": "declared-spdx", "name": name, "version": version,
+            "license_expression": "MIT", "crate_sha256": checksum,
+            "canonical_license_ids": ["MIT"],
+            "archive_url": f"https://static.crates.io/crates/{name}/{name}-{version}.crate",
+        }))
+        (overrides / "spdx").mkdir()
+        terms = b"MIT License\nCopyright (c) <year> <copyright holders>\nPermission fixture terms.\n"
+        (overrides / "spdx/MIT.txt").write_bytes(terms)
+        commit = "a" * 40
+        (overrides / "spdx/source.json").write_text(json.dumps({
+            "repository": "https://github.com/spdx/license-list-data", "commit": commit,
+            "files": [{
+                "license_id": "MIT", "path": "spdx/MIT.txt",
+                "url": f"https://raw.githubusercontent.com/spdx/license-list-data/{commit}/text/MIT.txt",
+                "sha256": hashlib.sha256(terms).hexdigest(),
+                "template_copyright_line": "Copyright (c) <year> <copyright holders>",
+            }],
+        }))
+        return overrides, archive
+
+    def test_declared_standard_grant_authenticates_archive_and_retains_notices(self):
+        overrides, _ = self.standard_fixture()
+        with patch.object(collector, "OVERRIDES_ROOT", overrides):
+            result = self.run_collection(strict=True)
+        package = next(p for p in result["packages"] if p["name"] == "convert_case")
+        self.assertEqual(package["license_text_status"], "declared-standard-text")
+        self.assertEqual(result["declared_standard_package_count"], 1)
+        self.assertEqual(result["warnings"], [])
+        terms = next(n for n in package["notices"] if n.get("kind") == "declared-standard-text")
+        text = (self.root / "output" / terms["path"]).read_text()
+        self.assertNotIn("<copyright holders>", text)
+        header = next(n for n in package["notices"] if n.get("kind") == "source-header-notice")
+        self.assertEqual(
+            (self.root / "output" / header["path"]).read_bytes(),
+            b"// Copyright Fixture Author\n// Licensed under MIT.",
+        )
+
+    def test_declared_standard_rejects_corrupt_archive(self):
+        overrides, archive = self.standard_fixture()
+        archive.write_bytes(b"not the authenticated archive")
+        with patch.object(collector, "OVERRIDES_ROOT", overrides):
+            with self.assertRaisesRegex(ValueError, "published crate checksum mismatch"):
+                self.run_collection(strict=True)
+
+    def test_declared_standard_rejects_conflicting_published_declaration(self):
+        overrides, _ = self.standard_fixture(conflicting=True)
+        with patch.object(collector, "OVERRIDES_ROOT", overrides):
+            with self.assertRaisesRegex(ValueError, "published license declaration conflict"):
+                self.run_collection(strict=True)
+
+    def test_declared_standard_rejects_noassertion(self):
+        overrides, _ = self.standard_fixture()
+        self.packages[1]["license"] = "NOASSERTION"
+        with patch.object(collector, "OVERRIDES_ROOT", overrides):
+            with self.assertRaisesRegex(ValueError, "unrecognized/conflicting declared-SPDX"):
+                self.run_collection(strict=True)
+
+    def test_declared_standard_is_not_an_automatic_unknown_package_fallback(self):
+        with self.assertRaisesRegex(ValueError, "unrecognized/conflicting declared-SPDX"):
+            collector.declared_standard_notices(
+                {"name": "unreviewed", "version": "1.0.0"},
+                self.root, self.root / "unused", self.root, self.root, {},
+            )
+
+    def test_declared_standard_rejects_mismatched_lock_checksum(self):
+        overrides, _ = self.standard_fixture()
+        lock = self.root / "Cargo.lock"
+        lock.write_text(lock.read_text().replace('checksum="', 'checksum="bad'))
+        with patch.object(collector, "OVERRIDES_ROOT", overrides):
+            with self.assertRaisesRegex(ValueError, "declared-SPDX lock checksum mismatch"):
+                self.run_collection(strict=True)
+
+    def test_declared_standard_does_not_invent_missing_copyright(self):
+        overrides, _ = self.standard_fixture(header=False)
+        with patch.object(collector, "OVERRIDES_ROOT", overrides):
+            result = self.run_collection(strict=True)
+        package = next(p for p in result["packages"] if p["name"] == "convert_case")
+        first = self.root / "output" / package["notices"][0]["path"]
+        provenance = json.loads((first.parent.parent / "provenance.json").read_text())
+        self.assertEqual(provenance["actual_notice_count"], 0)
+        self.assertIn("none invented", provenance["copyright_note"])
 
 
 if __name__ == "__main__":
