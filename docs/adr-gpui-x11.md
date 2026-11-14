@@ -1,19 +1,25 @@
-# ADR: GPUI 0.2.2 opaque native X11 visual
+# ADR: GPUI 0.2.2 local compatibility patches
 
 ## Decision
 
 Use a local copy of the published `gpui = 0.2.2` crate in `vendor/gpui`.
-The only source change is in
-`src/platform/linux/x11/window.rs`, `X11WindowState::new`: choose
-`visual_set.opaque` instead of `visual_set.transparent`, adjust the fallback
-warning, and explain the patch inline.
+The source changes are:
 
-This matches the existing initial `BladeSurfaceConfig { transparent: false }`
+- `src/platform/linux/x11/window.rs`, `X11WindowState::new`: choose
+  `visual_set.opaque` instead of `visual_set.transparent`, adjust the fallback
+  warning, and explain the patch inline.
+- `src/taffy.rs`, `Style::to_taffy`'s `to_grid_repeat` helper: explicitly type
+  the `minmax(0, 1fr)` literals as `0.0_f32` and `1.0_f32`. This preserves the
+  existing grid sizing without relying on the compiler's deprecated float
+  fallback ([Rust issue 154024](https://github.com/rust-lang/rust/issues/154024)).
+  No lint is suppressed and no dependency is changed.
+
+The X11 change matches the existing initial `BladeSurfaceConfig { transparent: false }`
 and `WindowBackgroundAppearance::Opaque`. kadr uses opaque windows. Do not use
 this patch as a general implementation of transparent X11 windows: the visual
 is fixed at creation, while upstream's background-appearance API can later
 request transparency. Supporting that mode requires a separate design and test.
-No Wayland, macOS, shader, event-loop, or application code is changed.
+No Wayland/macOS backend, shader, event-loop, or application code is changed.
 
 The integrating workspace must select the local crate at its root:
 
@@ -129,8 +135,9 @@ tar -xzf gpui-0.2.2.crate --strip-components=1 -C /tmp/gpui-published
 diff -ru /tmp/gpui-published vendor/gpui
 ```
 
-Only the visual-selection block above should differ. Keep this patch isolated
-until a tested upstream version fixes the configuration. Remove the local
+Only the visual-selection block and the two grid float-type annotations above
+should differ. Keep these changes isolated until a tested upstream version
+includes both fixes. Remove the local
 override and vendor tree only after repeating the native X11 pixel/lifecycle
 checks and the Wayland check on the replacement. Do not silently assume an
 upstream version bump or a successful window-map test fixes rendering.

@@ -470,6 +470,8 @@ def collect(project, binary, output, target, strict):
             "Copyright 2022-2025 Zed Industries, Inc.; upstream terms are retained.\n"
             "kadr contributors changed src/platform/linux/x11/window.rs to choose\n"
             "the opaque X11 visual, adjust its warning and explain the patch.\n"
+            "kadr contributors also annotated the grid float literals as f32 in\n"
+            "src/taffy.rs; grid sizing is unchanged and float fallback is avoided.\n"
             "See adr-gpui-x11.md for exact scope, upstream archive checksum,\n"
             "provenance, evidence and maintenance instructions.\n",
             encoding="utf-8",
