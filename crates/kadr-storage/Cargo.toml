@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 directories = "6.0"
+kadr-core = { path = "../kadr-core" }
 rusqlite = { version = "0.42", features = ["bundled"] }
 
 [dev-dependencies]

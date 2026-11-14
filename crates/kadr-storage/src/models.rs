@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, path::PathBuf};
 
 use crate::{Error, Result};
 
@@ -38,6 +38,145 @@ macro_rules! opaque_id {
 
 opaque_id!(MediaId, "media ID");
 opaque_id!(SourceId, "source ID");
+
+/// User-approved input retained for reopening. Contains secrets: never log fields.
+#[derive(Clone, PartialEq, Eq)]
+pub enum StoredSource {
+    Link(String),
+    /// Magnet input with an optional selected file in a multi-file torrent.
+    TorrentLink {
+        uri: String,
+        file_id: Option<usize>,
+    },
+    TorrentFile {
+        path: PathBuf,
+        file_id: Option<usize>,
+    },
+}
+
+impl StoredSource {
+    /// Validates through the same rules and identity implementation as manual input.
+    /// Does not read files or contact the network.
+    pub fn manual_source(&self) -> Result<kadr_core::source::ManualSource> {
+        use kadr_core::source::ManualSource;
+        match self {
+            Self::Link(link) => ManualSource::parse_link(link),
+            Self::TorrentLink { uri, file_id } => {
+                if file_id.is_some_and(|id| i64::try_from(id).is_err()) {
+                    return Err(Error::InvalidInput("torrent file ID"));
+                }
+                let source = ManualSource::parse_link(uri)
+                    .map_err(|_| Error::InvalidInput("stored source"))?;
+                if source.magnet_uri().is_none() {
+                    return Err(Error::InvalidInput("torrent link"));
+                }
+                Ok(source)
+            }
+            Self::TorrentFile { path, file_id } => {
+                if file_id.is_some_and(|id| i64::try_from(id).is_err()) {
+                    return Err(Error::InvalidInput("torrent file ID"));
+                }
+                ManualSource::torrent_file(path.clone())
+            }
+        }
+        .map_err(|_| Error::InvalidInput("stored source"))
+    }
+
+    pub fn source_id(&self) -> Result<SourceId> {
+        SourceId::new(self.manual_source()?.id().as_str())
+    }
+}
+
+impl fmt::Debug for StoredSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("StoredSource([redacted])")
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaKind {
+    Movie,
+    Series,
+}
+
+/// Local display snapshot. Titles may contain private filenames; Debug is redacted.
+#[derive(Clone, PartialEq, Eq)]
+pub struct MediaRecord {
+    pub id: MediaId,
+    pub title: String,
+    pub original_title: Option<String>,
+    pub year: Option<u16>,
+    pub kind: MediaKind,
+    pub description: String,
+    pub poster_url: Option<String>,
+    pub attribution: String,
+}
+
+impl MediaRecord {
+    pub fn validate(&self) -> Result<()> {
+        let text_valid = |text: &str, limit: usize| text.len() <= limit && !text.contains('\0');
+        if self.title.trim().is_empty()
+            || !text_valid(&self.title, 4096)
+            || self
+                .original_title
+                .as_ref()
+                .is_some_and(|title| !text_valid(title, 4096))
+            || !text_valid(&self.description, 131_072)
+            || !text_valid(&self.attribution, 4096)
+            || self.year.is_some_and(|year| !(1..=9999).contains(&year))
+        {
+            return Err(Error::InvalidInput("media snapshot"));
+        }
+        if let Some(url) = &self.poster_url {
+            let source = kadr_core::source::ManualSource::parse_link(url)
+                .map_err(|_| Error::InvalidInput("poster URL"))?;
+            if url.len() > 16_384 || source.http_url().is_none() {
+                return Err(Error::InvalidInput("poster URL"));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for MediaRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MediaRecord([redacted])")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LibraryItem {
+    pub entry: LibraryEntry,
+    pub media: Option<MediaRecord>,
+    /// Resume identity even when history clearing removed measured progress.
+    pub target: PlaybackTarget,
+    /// Latest measured target, including its episode identity.
+    pub progress: Option<PlaybackProgress>,
+    /// Descriptor matching progress.source_id, or the linked source if no progress.
+    pub source: Option<StoredSource>,
+}
+
+/// A completed user-owned copy, independent of disposable cache and source input.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SavedFile {
+    pub target: PlaybackTarget,
+    pub path: PathBuf,
+    pub saved_at: i64,
+}
+
+impl SavedFile {
+    pub fn validate(&self) -> Result<()> {
+        self.target.validate()?;
+        validate_timestamp(self.saved_at)?;
+        crate::paths::validate_private_path(&self.path)
+    }
+}
+
+impl fmt::Debug for SavedFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SavedFile([redacted])")
+    }
+}
 
 /// Season zero supports specials; episode numbers start at one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

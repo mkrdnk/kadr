@@ -8,12 +8,19 @@ publish.workspace = true
 futures-channel = "=0.3.34"
 futures-util = "=0.3.34"
 gpui.workspace = true
+kadr-cache = { path = "../kadr-cache" }
+kadr-catalog = { path = "../kadr-catalog" }
 kadr-core = { path = "../kadr-core" }
 kadr-media = { path = "../kadr-media" }
 kadr-storage = { path = "../kadr-storage" }
+kadr-torrent = { path = "../kadr-torrent" }
 kadr-ui = { path = "../kadr-ui" }
+open = "=5.4.5"
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "stream"] }
 tokio = { version = "=1.54.1", features = ["rt", "sync", "time"] }
 tokio-util = "=0.7.20"
 
 [dev-dependencies]
+rusqlite = { version = "=0.42.0", features = ["bundled"] }
+sha1 = "=0.10.7"
 tempfile = "=3.27.0"

@@ -1,8 +1,10 @@
-//! Local-only P0 experiment, not the production torrent engine or cache.
+//! BitTorrent adapters: [`engine`] is the consent-gated production API.
 //!
-//! Only private `.torrent` bytes and explicit IPv4 loopback peers are accepted.
-//! Each positional read owns a stream: no shared seek cursor, detached reader,
-//! or availability wait survives cancellation of that read.
+//! The original [`LocalSession`] remains a separate local-only P0 experiment:
+//! only private `.torrent` bytes and explicit IPv4 loopback peers are accepted.
+//! Both adapters use independent positional verified-piece readers.
+
+pub mod engine;
 
 use std::{
     fmt,

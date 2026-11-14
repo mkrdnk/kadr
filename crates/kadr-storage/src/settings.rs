@@ -1,3 +1,5 @@
+use std::{fmt, path::PathBuf};
+
 use crate::{Error, Result};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,11 +54,21 @@ pub struct NetworkLimits {
     pub max_connections: u16,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Settings {
     pub default_player: PlayerPreference,
     pub network: NetworkLimits,
     pub cache_limit_bytes: u64,
+    /// Catalog requests are allowed only in response to user action.
+    pub catalog_enabled: bool,
+    /// None uses AppPaths::cache_dir(). Persisting this does not move files.
+    pub cache_directory: Option<PathBuf>,
+}
+
+impl fmt::Debug for Settings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Settings([redacted])")
+    }
 }
 
 impl Default for Settings {
@@ -70,6 +82,8 @@ impl Default for Settings {
                 max_connections: 64,
             },
             cache_limit_bytes: 10 * 1024 * 1024 * 1024,
+            catalog_enabled: true,
+            cache_directory: None,
         }
     }
 }
@@ -85,6 +99,9 @@ impl Settings {
         }
         if !(1024 * 1024..=i64::MAX as u64).contains(&self.cache_limit_bytes) {
             return Err(Error::InvalidInput("cache limit"));
+        }
+        if let Some(path) = &self.cache_directory {
+            crate::paths::validate_private_path(path)?;
         }
         Ok(())
     }

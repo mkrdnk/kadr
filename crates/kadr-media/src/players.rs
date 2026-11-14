@@ -4,6 +4,8 @@
 //! do not log requests. Child stdout/stderr are discarded for the same reason.
 //! Use `stop().await` before shutting down the Tokio runtime. Drop kills the
 //! direct child (Tokio reaps it while the runtime lives), but cannot join it.
+//! In Flatpak the direct child is flatpak-spawn: --watch-bus requests host
+//! SIGINT on bridge exit, not guaranteed SIGKILL of a hostile host executable.
 
 use std::{
     ffi::OsString,
@@ -119,15 +121,35 @@ impl PlayerSession {
                 "player timeouts must be positive",
             ));
         }
-        // Fixed short base also fits macOS's smaller sockaddr_un. Explicit
-        // permissions apply at creation, not via a racy chmod after creation.
+        // Flatpak's /tmp is private; the host player must see the same endpoint.
+        // Native builds retain the short base needed by macOS sockaddr_un.
+        let flatpak = cfg!(target_os = "linux") && std::env::var_os("FLATPAK_ID").is_some();
+        let base = if flatpak {
+            shared_player_directory()?
+        } else {
+            PathBuf::from("/tmp")
+        };
         let directory = tempfile::Builder::new()
             .prefix("kadr-player-")
             .permissions(std::fs::Permissions::from_mode(0o700))
-            .tempdir_in("/tmp")
+            .tempdir_in(base)
             .map_err(|e| redacted(e, "cannot create private player directory"))?;
         let socket_path = directory.path().join("ipc");
-        let mut command = Command::new(&options.executable);
+        // Do not silently truncate a Unix socket path or fall back to /tmp.
+        if socket_path.as_os_str().len() >= 104 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "player IPC path is too long",
+            ));
+        }
+        let mut command = if flatpak {
+            let mut host = Command::new("flatpak-spawn");
+            host.args(["--host", "--watch-bus"])
+                .arg(&options.executable);
+            host
+        } else {
+            Command::new(&options.executable)
+        };
         command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -376,6 +398,40 @@ impl PlayerSession {
             .map_err(|_| timed_out("player did not exit after kill"))?
             .map_err(|e| redacted(e, "cannot reap player"))
     }
+}
+
+/// The manifest exposes only this runtime subdirectory, not all host /tmp.
+/// Never accept a symlink, another user's directory, or a writable shared parent.
+fn shared_player_directory() -> io::Result<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| io::Error::other("Flatpak requires absolute XDG_RUNTIME_DIR"))?;
+    let path = runtime.join("kadr");
+    match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(redacted(error, "cannot create shared player directory")),
+    }
+    let directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .open(&path)
+        .map_err(|error| redacted(error, "unsafe shared player directory"))?;
+    let metadata = directory.metadata()?;
+    // SAFETY: geteuid has no preconditions.
+    if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o022 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "shared player directory must be owned by this user and not group/world writable",
+        ));
+    }
+    // Flatpak's :create permission pre-creates this directory as 0755. Tighten
+    // through the no-follow descriptor before placing any private IPC in it.
+    directory.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+    Ok(path)
 }
 
 // Deliberately do not buffer beyond a reply's newline. This keeps future-drop

@@ -8,11 +8,13 @@ mod error;
 mod models;
 mod paths;
 mod settings;
+mod snapshots;
 mod storage;
 
 pub use error::{Error, Result};
 pub use models::{
-    EpisodeKey, LibraryEntry, MediaId, PlaybackProgress, PlaybackTarget, ProgressOrigin, SourceId,
+    EpisodeKey, LibraryEntry, LibraryItem, MediaId, MediaKind, MediaRecord, PlaybackProgress,
+    PlaybackTarget, ProgressOrigin, SavedFile, SourceId, StoredSource,
 };
 pub use paths::AppPaths;
 pub use settings::{NetworkLimits, PlayerPreference, RateLimit, Settings};

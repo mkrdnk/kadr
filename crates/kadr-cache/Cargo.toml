@@ -1,0 +1,20 @@
+[package]
+name = "kadr-cache"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+cap-std = "=3.4.5"
+fs2 = "=0.4.3"
+kadr-media = { path = "../kadr-media" }
+rand = "=0.8.8"
+rustix = { version = "=1.1.6", features = ["fs", "process"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "=1.0.154"
+tokio = { version = "=1.54.1", features = ["fs", "io-util", "rt", "sync", "macros"] }
+tokio-util = "=0.7.20"
+
+[dev-dependencies]
+bytes = "=1.12.1"
+tempfile = "=3.27.0"

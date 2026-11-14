@@ -1,0 +1,2 @@
+# Retain the published third-party archive byte-for-byte except its documented patch.
+vendor/gpui/** -whitespace

@@ -86,3 +86,60 @@ impl fmt::Debug for AppPaths {
         f.write_str("AppPaths([redacted])")
     }
 }
+
+pub(crate) fn validate_private_path(path: &Path) -> Result<()> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+        || path.as_os_str().as_encoded_bytes().contains(&0)
+    {
+        return Err(Error::InvalidInput("private path"));
+    }
+    Ok(())
+}
+
+// A tagged native blob avoids lossy Unicode conversion and rejects accidental
+// reinterpretation if a database is copied between incompatible platforms.
+pub(crate) fn encode_path(path: &Path) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let mut bytes = b"unix\0".to_vec();
+        bytes.extend_from_slice(path.as_os_str().as_bytes());
+        bytes
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let mut bytes = b"windows\0".to_vec();
+        bytes.extend(path.as_os_str().encode_wide().flat_map(u16::to_le_bytes));
+        bytes
+    }
+}
+
+pub(crate) fn decode_path(bytes: Vec<u8>) -> Result<PathBuf> {
+    #[cfg(unix)]
+    let path = {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+        let bytes = bytes
+            .strip_prefix(b"unix\0")
+            .ok_or(Error::CorruptData("path encoding"))?;
+        PathBuf::from(OsString::from_vec(bytes.to_vec()))
+    };
+    #[cfg(windows)]
+    let path = {
+        use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+        let bytes = bytes
+            .strip_prefix(b"windows\0")
+            .filter(|bytes| bytes.len() % 2 == 0)
+            .ok_or(Error::CorruptData("path encoding"))?;
+        let wide: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        PathBuf::from(OsString::from_wide(&wide))
+    };
+    validate_private_path(&path).map_err(|_| Error::CorruptData("private path"))?;
+    Ok(path)
+}

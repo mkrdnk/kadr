@@ -4,16 +4,18 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, pa
 
 use crate::{
     AppPaths, Error, LibraryEntry, MediaId, NetworkLimits, PlaybackProgress, PlaybackTarget,
-    PlayerPreference, ProgressOrigin, RateLimit, Result, Settings, SourceId,
+    PlayerPreference, ProgressOrigin, RateLimit, Result, Settings, SourceId, StoredSource,
     models::validate_timestamp,
+    paths::{decode_path, encode_path},
+    snapshots::link_source_row,
 };
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Synchronous connection, intended to be owned by one background worker.
 /// No raw connection is exposed, so writes always pass validation.
 pub struct Storage {
-    connection: Connection,
+    pub(crate) connection: Connection,
 }
 
 impl fmt::Debug for Storage {
@@ -66,7 +68,8 @@ impl Storage {
     pub fn load_settings(&self) -> Result<Settings> {
         let settings = self.connection.query_row(
             "SELECT player, torrents_enabled, download_kind, download_bytes,
-                    upload_kind, upload_bytes, max_connections, cache_limit_bytes
+                    upload_kind, upload_bytes, max_connections, cache_limit_bytes,
+                    catalog_enabled, cache_directory
              FROM settings WHERE singleton = 1",
             [],
             |row| {
@@ -79,11 +82,23 @@ impl Storage {
                     row.get::<_, Option<i64>>(5)?,
                     row.get::<_, i64>(6)?,
                     row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, Option<Vec<u8>>>(9)?,
                 ))
             },
         )?;
-        let (player, torrents, download_kind, download, upload_kind, upload, connections, cache) =
-            settings;
+        let (
+            player,
+            torrents,
+            download_kind,
+            download,
+            upload_kind,
+            upload,
+            connections,
+            cache,
+            catalog,
+            cache_directory,
+        ) = settings;
         let settings = Settings {
             default_player: match player.as_str() {
                 "mpv" => PlayerPreference::Mpv,
@@ -106,6 +121,12 @@ impl Storage {
             cache_limit_bytes: cache
                 .try_into()
                 .map_err(|_| Error::CorruptData("cache limit"))?,
+            catalog_enabled: match catalog {
+                0 => false,
+                1 => true,
+                _ => return Err(Error::CorruptData("catalog preference")),
+            },
+            cache_directory: cache_directory.map(decode_path).transpose()?,
         };
         settings
             .validate()
@@ -131,6 +152,8 @@ impl Storage {
 
     /// Record a real open event, not a playback observation. Older events cannot
     /// overwrite the latest source or timestamp. No progress row is created.
+    /// Same-ID torrent selections are preserved; explicitly select a new file
+    /// with save_source + link_source before opening it.
     pub fn record_opened(
         &mut self,
         media_id: &MediaId,
@@ -138,7 +161,8 @@ impl Storage {
         opened_at: i64,
     ) -> Result<()> {
         validate_timestamp(opened_at)?;
-        self.connection.execute(
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
             "INSERT INTO library(media_id, favorite, last_opened_at, last_source_id)
              VALUES (?1, 0, ?2, ?3)
              ON CONFLICT(media_id) DO UPDATE SET
@@ -148,6 +172,19 @@ impl Storage {
                 OR excluded.last_opened_at >= library.last_opened_at",
             params![media_id.as_str(), opened_at, source_id.as_str()],
         )?;
+        if changed != 0 {
+            link_source_row(
+                &transaction,
+                &PlaybackTarget {
+                    media_id: media_id.clone(),
+                    episode: None,
+                },
+                source_id,
+                false,
+                None,
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -196,7 +233,36 @@ impl Storage {
     /// Only genuine adapter telemetry belongs here. Browser is rejected.
     /// Last timestamp wins, independently for each (media, season, episode).
     /// This does not implicitly record a history event or infer completion.
+    /// Uses current target selection; asynchronous player sessions should use
+    /// `save_progress_for_source` with their immutable launch descriptor instead.
     pub fn save_progress(&mut self, progress: &PlaybackProgress) -> Result<()> {
+        self.save_progress_impl(progress, None)
+    }
+
+    /// Snapshot selection from the actual player session, not mutable UI state.
+    /// Late telemetry after a same-torrent reselection must still refer to the
+    /// file the reporting player opened. This does not save the descriptor.
+    pub fn save_progress_for_source(
+        &mut self,
+        progress: &PlaybackProgress,
+        source: &StoredSource,
+    ) -> Result<()> {
+        if source.source_id()? != progress.source_id {
+            return Err(Error::InvalidInput("progress source identity"));
+        }
+        let file_id = match source {
+            StoredSource::Link(_) => None,
+            StoredSource::TorrentLink { file_id, .. }
+            | StoredSource::TorrentFile { file_id, .. } => *file_id,
+        };
+        self.save_progress_impl(progress, Some(file_id))
+    }
+
+    fn save_progress_impl(
+        &mut self,
+        progress: &PlaybackProgress,
+        selection: Option<Option<usize>>,
+    ) -> Result<()> {
         progress.validate()?;
         let (season, episode) = progress.target.sql_episode();
         let transaction = self.connection.transaction()?;
@@ -205,18 +271,25 @@ impl Storage {
              ON CONFLICT(media_id) DO NOTHING",
             [progress.target.media_id.as_str()],
         )?;
-        transaction.execute(
+        let changed = transaction.execute(
             "INSERT INTO playback_progress
              (media_id, season, episode, source_id, position_seconds,
-              duration_seconds, updated_at, completed, origin)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+              duration_seconds, updated_at, completed, origin, file_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                 CASE WHEN ?10 THEN ?11
+                 WHEN EXISTS (SELECT 1 FROM target_sources
+                     WHERE media_id = ?1 AND season = ?2 AND episode = ?3 AND source_id = ?4)
+                 THEN (SELECT file_id FROM target_sources
+                     WHERE media_id = ?1 AND season = ?2 AND episode = ?3 AND source_id = ?4)
+                 ELSE (SELECT file_id FROM sources WHERE source_id = ?4) END)
              ON CONFLICT(media_id, season, episode) DO UPDATE SET
                  source_id = excluded.source_id,
                  position_seconds = excluded.position_seconds,
                  duration_seconds = excluded.duration_seconds,
                  updated_at = excluded.updated_at,
                  completed = excluded.completed,
-                 origin = excluded.origin
+                 origin = excluded.origin,
+                 file_id = excluded.file_id
              WHERE excluded.updated_at >= playback_progress.updated_at",
             params![
                 progress.target.media_id.as_str(),
@@ -232,8 +305,19 @@ impl Storage {
                     ProgressOrigin::Vlc => "vlc",
                     ProgressOrigin::Browser => unreachable!("validated above"),
                 },
+                selection.is_some(),
+                selection.flatten().map(|id| id as i64),
             ],
         )?;
+        if changed != 0 {
+            link_source_row(
+                &transaction,
+                &progress.target,
+                &progress.source_id,
+                false,
+                selection,
+            )?;
+        }
         transaction.commit()?;
         Ok(())
     }
@@ -282,14 +366,35 @@ impl Storage {
         Ok(Some(progress))
     }
 
-    /// Logical deletion of all playback history/progress, retaining favorites.
+    /// Logical deletion of history/progress, retaining favorites and saved copies.
+    /// Favorite source URLs, torrent paths and per-episode selections remain for
+    /// reopening. Other original source descriptors are removed.
     /// Not a forensic secure erase of SQLite pages, backups or filesystem data.
     pub fn clear_playback_data(&mut self) -> Result<()> {
         let transaction = self.connection.transaction()?;
         transaction.execute("DELETE FROM playback_progress", [])?;
-        transaction.execute("DELETE FROM library WHERE favorite = 0", [])?;
+        // Keep episode selections only for favorites. Saved copies need only
+        // their own paths, not private origin URLs or torrent paths.
+        transaction.execute(
+            "DELETE FROM target_sources WHERE media_id IN
+             (SELECT media_id FROM library WHERE favorite = 0)",
+            [],
+        )?;
+        transaction.execute(
+            "DELETE FROM library WHERE favorite = 0
+             AND media_id NOT IN (SELECT media_id FROM saved_files)",
+            [],
+        )?;
         transaction.execute(
             "UPDATE library SET last_opened_at = NULL, last_source_id = NULL",
+            [],
+        )?;
+        transaction.execute(
+            "DELETE FROM sources WHERE source_id NOT IN (SELECT source_id FROM target_sources)",
+            [],
+        )?;
+        transaction.execute(
+            "DELETE FROM media_records WHERE media_id NOT IN (SELECT media_id FROM library)",
             [],
         )?;
         transaction.commit()?;
@@ -297,7 +402,7 @@ impl Storage {
     }
 }
 
-fn decode_library_entry(row: &rusqlite::Row<'_>) -> Result<LibraryEntry> {
+pub(crate) fn decode_library_entry(row: &rusqlite::Row<'_>) -> Result<LibraryEntry> {
     let media: String = row.get(0)?;
     let favorite: i64 = row.get(1)?;
     let opened: Option<i64> = row.get(2)?;
@@ -326,8 +431,9 @@ fn write_settings(connection: &Connection, settings: &Settings) -> Result<()> {
     connection.execute(
         "INSERT INTO settings
          (singleton, player, torrents_enabled, download_kind, download_bytes,
-          upload_kind, upload_bytes, max_connections, cache_limit_bytes)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+          upload_kind, upload_bytes, max_connections, cache_limit_bytes,
+          catalog_enabled, cache_directory)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT(singleton) DO UPDATE SET
              player = excluded.player,
              torrents_enabled = excluded.torrents_enabled,
@@ -336,7 +442,9 @@ fn write_settings(connection: &Connection, settings: &Settings) -> Result<()> {
              upload_kind = excluded.upload_kind,
              upload_bytes = excluded.upload_bytes,
              max_connections = excluded.max_connections,
-             cache_limit_bytes = excluded.cache_limit_bytes",
+             cache_limit_bytes = excluded.cache_limit_bytes,
+             catalog_enabled = excluded.catalog_enabled,
+             cache_directory = excluded.cache_directory",
         params![
             match settings.default_player {
                 PlayerPreference::Mpv => "mpv",
@@ -350,6 +458,8 @@ fn write_settings(connection: &Connection, settings: &Settings) -> Result<()> {
             upload,
             settings.network.max_connections,
             settings.cache_limit_bytes as i64,
+            settings.catalog_enabled,
+            settings.cache_directory.as_deref().map(encode_path),
         ],
     )?;
     Ok(())
@@ -387,7 +497,6 @@ fn migrate(connection: &mut Connection) -> Result<()> {
                     OR (upload_kind IN ('paused', 'unlimited') AND upload_bytes IS NULL))
              ) STRICT;",
         )?;
-        write_settings(&transaction, &Settings::default())?;
         transaction.pragma_update(None, "user_version", 1)?;
     }
     if version < 2 {
@@ -416,6 +525,67 @@ fn migrate(connection: &mut Connection) -> Result<()> {
              ) STRICT;",
         )?;
         transaction.pragma_update(None, "user_version", 2)?;
+    }
+    if version < 3 {
+        transaction.execute_batch(
+            "ALTER TABLE settings ADD COLUMN catalog_enabled INTEGER NOT NULL DEFAULT 1
+                 CHECK(catalog_enabled IN (0, 1));
+             ALTER TABLE settings ADD COLUMN cache_directory BLOB;
+             ALTER TABLE playback_progress ADD COLUMN file_id INTEGER CHECK(file_id >= 0);
+             CREATE TABLE sources (
+                 source_id TEXT PRIMARY KEY NOT NULL,
+                 kind TEXT NOT NULL CHECK(kind IN ('link', 'magnet', 'torrent')),
+                 link TEXT,
+                 path BLOB,
+                 file_id INTEGER CHECK(file_id >= 0),
+                 CHECK ((kind = 'link' AND link IS NOT NULL AND path IS NULL AND file_id IS NULL)
+                     OR (kind = 'magnet' AND link IS NOT NULL AND path IS NULL)
+                     OR (kind = 'torrent' AND link IS NULL AND path IS NOT NULL))
+             ) STRICT;
+             CREATE TABLE target_sources (
+                 media_id TEXT NOT NULL REFERENCES library(media_id) ON DELETE CASCADE,
+                 season INTEGER NOT NULL,
+                 episode INTEGER NOT NULL,
+                 source_id TEXT NOT NULL,
+                 file_id INTEGER CHECK(file_id >= 0),
+                 PRIMARY KEY(media_id, season, episode),
+                 CHECK ((season = -1 AND episode = -1)
+                     OR (season BETWEEN 0 AND 65535 AND episode BETWEEN 1 AND 65535))
+             ) STRICT;
+             CREATE INDEX target_sources_source ON target_sources(source_id);
+             CREATE TABLE media_records (
+                 media_id TEXT PRIMARY KEY NOT NULL,
+                 title TEXT NOT NULL,
+                 original_title TEXT,
+                 year INTEGER CHECK(year BETWEEN 1 AND 9999),
+                 kind TEXT NOT NULL CHECK(kind IN ('movie', 'series')),
+                 description TEXT NOT NULL,
+                 poster_url TEXT,
+                 attribution TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE saved_files (
+                 media_id TEXT NOT NULL REFERENCES library(media_id) ON DELETE CASCADE,
+                 season INTEGER NOT NULL,
+                 episode INTEGER NOT NULL,
+                 path BLOB NOT NULL,
+                 saved_at INTEGER NOT NULL CHECK(saved_at >= 0),
+                 PRIMARY KEY(media_id, season, episode),
+                 CHECK ((season = -1 AND episode = -1)
+                     OR (season BETWEEN 0 AND 65535 AND episode BETWEEN 1 AND 65535))
+             ) STRICT;
+             INSERT INTO target_sources(media_id, season, episode, source_id)
+                 SELECT media_id, -1, -1, last_source_id FROM library
+                 WHERE last_source_id IS NOT NULL;
+             INSERT INTO target_sources(media_id, season, episode, source_id)
+                 SELECT media_id, season, episode, source_id FROM playback_progress
+                 WHERE TRUE
+                 ON CONFLICT(media_id, season, episode) DO UPDATE SET
+                     source_id = excluded.source_id;",
+        )?;
+        transaction.pragma_update(None, "user_version", 3)?;
+    }
+    if version < 1 {
+        write_settings(&transaction, &Settings::default())?;
     }
     transaction.commit()?;
     Ok(())

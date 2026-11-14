@@ -46,6 +46,22 @@ fn schema_version(connection: &Connection) -> i64 {
         .unwrap()
 }
 
+// Reconstruct the exact v2 schema, not just a lower version number.
+fn downgrade_to_v2(connection: &Connection) {
+    connection
+        .execute_batch(
+            "DROP TABLE target_sources;
+         DROP TABLE sources;
+         DROP TABLE saved_files;
+         DROP TABLE media_records;
+         ALTER TABLE settings DROP COLUMN catalog_enabled;
+         ALTER TABLE settings DROP COLUMN cache_directory;
+         ALTER TABLE playback_progress DROP COLUMN file_id;
+         PRAGMA user_version = 2;",
+        )
+        .unwrap();
+}
+
 #[test]
 fn defaults_and_settings_persist_across_reopen() {
     let (_dir, path) = database();
@@ -186,6 +202,7 @@ fn version_one_upgrades_without_replacing_existing_settings() {
     drop(store);
     // Reconstruct a genuine v1 schema by removing the v2 tables.
     let raw = Connection::open(&path).unwrap();
+    downgrade_to_v2(&raw);
     raw.execute_batch("DROP TABLE playback_progress; DROP TABLE library; PRAGMA user_version = 1;")
         .unwrap();
     drop(raw);
@@ -200,6 +217,104 @@ fn version_one_upgrades_without_replacing_existing_settings() {
 }
 
 #[test]
+fn version_two_upgrade_preserves_history_progress_and_settings_without_inventing_sources() {
+    let (_dir, path) = database();
+    let mut store = Storage::open(&path).unwrap();
+    let settings = Settings {
+        default_player: PlayerPreference::Vlc,
+        ..Settings::default()
+    };
+    store.save_settings(&settings).unwrap();
+    store.set_favorite(&media(), true).unwrap();
+    store.record_opened(&media(), &source(), 100).unwrap();
+    let observation = progress(Some(EpisodeKey::new(2, 3).unwrap()));
+    store.save_progress(&observation).unwrap();
+    drop(store);
+    let raw = Connection::open(&path).unwrap();
+    downgrade_to_v2(&raw);
+    drop(raw);
+
+    let store = Storage::open(&path).unwrap();
+    assert_eq!(store.load_settings().unwrap(), settings);
+    assert_eq!(
+        store.load_progress(&observation.target).unwrap(),
+        Some(observation)
+    );
+    assert_eq!(store.history(10).unwrap().len(), 1);
+    assert_eq!(store.favorites().unwrap().len(), 1);
+    // Old IDs are retained, but URLs cannot be reconstructed from hashes.
+    assert!(store.load_source(&source()).unwrap().is_none());
+    let item = store.library(10).unwrap().remove(0);
+    assert!(item.source.is_none());
+    assert!(item.media.is_none());
+    assert!(item.progress.is_some());
+    let targets = store.library_targets(10).unwrap();
+    assert_eq!(
+        targets.len(),
+        2,
+        "legacy item history and measured episode remain distinct"
+    );
+    assert!(targets.iter().all(|item| item.source.is_none()));
+    assert!(targets.iter().any(|item| item.target.episode.is_none()));
+    assert!(
+        targets
+            .iter()
+            .any(|item| item.target.episode == Some(EpisodeKey::new(2, 3).unwrap()))
+    );
+    assert_eq!(
+        schema_version(&Connection::open(&path).unwrap()),
+        SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn failed_version_two_upgrade_rolls_back_columns_tables_and_preserves_old_rows() {
+    let (_dir, path) = database();
+    let mut store = Storage::open(&path).unwrap();
+    store.record_opened(&media(), &source(), 100).unwrap();
+    store.save_progress(&progress(None)).unwrap();
+    drop(store);
+    let raw = Connection::open(&path).unwrap();
+    downgrade_to_v2(&raw);
+    raw.execute_batch(
+        "CREATE TABLE saved_files(sentinel INTEGER);
+         INSERT INTO saved_files VALUES (42);",
+    )
+    .unwrap();
+    let before: Vec<(String, String)> = raw
+        .prepare("SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    drop(raw);
+    assert!(matches!(Storage::open(&path), Err(Error::Database)));
+    let raw = Connection::open(&path).unwrap();
+    assert_eq!(schema_version(&raw), 2);
+    let after: Vec<(String, String)> = raw
+        .prepare("SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(before, after);
+    let position: f64 = raw
+        .query_row(
+            "SELECT position_seconds FROM playback_progress",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(position, 15.5);
+    let timestamp: i64 = raw
+        .query_row("SELECT last_opened_at FROM library", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(timestamp, 100);
+}
+
+#[test]
 fn failed_version_one_upgrade_preserves_settings_and_schema_version() {
     let (_dir, path) = database();
     let mut store = Storage::open(&path).unwrap();
@@ -210,6 +325,7 @@ fn failed_version_one_upgrade_preserves_settings_and_schema_version() {
     store.save_settings(&settings).unwrap();
     drop(store);
     let raw = Connection::open(&path).unwrap();
+    downgrade_to_v2(&raw);
     raw.execute_batch(
         "DROP TABLE playback_progress; DROP TABLE library;
          CREATE TABLE playback_progress (sentinel INTEGER);
