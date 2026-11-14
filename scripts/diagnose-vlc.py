@@ -8,6 +8,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import wave
@@ -17,12 +18,16 @@ def probe(label, executable, root, index, media):
     endpoint = root / f"ipc{index}"
     log = root / f"log{index}"
     args = [
-        executable, "--ignore-config", "--no-one-instance", "--no-playlist-enqueue",
+        executable, "--ignore-config",
         "--no-media-library", "--no-metadata-network-access", "--extraintf=oldrc",
         "--rc-fake-tty", "--verbose=2", "--play-and-exit", f"--rc-unix={endpoint}",
         "--start-time=2", "--intf=dummy", "--vout=dummy", "--aout=dummy",
         "--", str(media),
     ]
+    # VLC 3's instance/playlist-reuse switches require Win32, DBus or OS/2;
+    # the official macOS build has none of those option registrations.
+    if sys.platform != "darwin":
+        args[2:2] = ["--no-one-instance", "--no-playlist-enqueue"]
     started = time.monotonic()
     connection = None
     with log.open("wb") as output:

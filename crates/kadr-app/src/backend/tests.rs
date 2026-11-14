@@ -623,11 +623,11 @@ fn stop_interrupts_pending_http_probe_before_player_launch() {
     app.command(Command::SelectSource(source));
     app.selected();
     app.command(Command::Play { resume: false });
-    app.until(
-        Duration::from_secs(3),
-        "origin must receive pending HEAD",
-        || origin.heads.load(Ordering::Relaxed) > 0,
-    );
+    // Like Ready/source selection, reaching HTTP includes durable storage work.
+    // This is a readiness wait, not the cancellation-latency measurement below.
+    app.until(WAIT, "origin must receive pending HEAD", || {
+        origin.heads.load(Ordering::Relaxed) > 0
+    });
     let before = Instant::now();
     app.command(Command::Stop);
     app.wait("pending start cancelled without player", |event| {

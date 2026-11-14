@@ -2,7 +2,8 @@
 
 Реальные адаптеры находятся в `kadr-media::players` (Unix). Это самостоятельный
 IO-прототип, без зависимости от `kadr-core`, GPUI, torrent engine или storage.
-Проверена Linux-часть P0; macOS пока **не проверена**. Это не закрытие PLAY-09:
+Проверена Linux-часть P0; полная macOS/VLC-проверка **ещё не завершена**.
+Это не закрытие PLAY-09:
 сохранение истории и выбор интервала опроса остаются задачей вызывающей сессии.
 
 ## Что поддерживается
@@ -122,6 +123,16 @@ Ok(())
   не переиспользует чужой процесс, отключает media library и metadata network
   access. VLC `--rc-fake-tty` обязателен при null stdin в проверенной версии.
   Это не исчерпывающий аудит всех плагинов VLC и всех сетевых протоколов.
+- VLC instance-routing flags платформенные: upstream
+  [`3.0.24 src/libvlc-module.c:2089–2100`](https://github.com/videolan/vlc/blob/3.0.24/src/libvlc-module.c#L2089-L2100)
+  регистрирует `one-instance` и `playlist-enqueue` только при `_WIN32`,
+  `HAVE_DBUS` или `__OS2__`. Нативный macOS bundle без DBus отвергает
+  `--no-one-instance` и `--no-playlist-enqueue`; оба флага исключены только
+  на macOS, на Linux сохранены. Это не fallback на чужой VLC: запускается
+  прямой CLI child с отдельным private RC socket, не `open -a`/LaunchServices.
+  [Darwin entrypoint](https://github.com/videolan/vlc/blob/3.0.24/bin/darwinvlc.m#L281-L295)
+  создаёт собственный `libvlc_new`. Fake и real smoke дополнительно проверяют,
+  что остановка одного из двух VLC children не завершает другой.
 - Child stdin/stdout/stderr — null: диагностический вывод плеера не заполняет
   pipe и не раскрывает private URL в логах kadr. Ошибки адаптера не включают
   media/socket paths. Это уменьшает детализацию ошибок codec/network:
@@ -142,7 +153,7 @@ Ok(())
 | Debian 12, Linux x86_64, uid 1000 | Rust/Cargo 1.100.0; Python 3.11.6 для fake process/IPC tests |
 | Debian `mpv 0.35.1`, FFmpeg `5.1.9-0+deb12u1` | Реальный headless запуск WAV и MPEG4/AAC MP4, JSON time-pos/duration, resume, HTTP Range, quit и natural EOF |
 | Debian VLC `3.0.24 Vetinari`, revision `3.0.24-rc1-0-g6de05adcba` | Реальный `oldrc` Unix socket, WAV/MP4 HTTP, start-time, quit, natural EOF; Unsupported телеметрия; установлен `vdummy` output plugin |
-| macOS | Не запускалось и не собиралось; Unix API выбран совместимым по форме, но это не runtime evidence |
+| macOS | CI подтвердил normal/fake IPC и реальный mpv WAV; полный VLC runtime пока не принят. В diagnostic run 43555572032 VLC 3.0.24 отвергал оба DBus-only instance flags; проверка исправленного argv на macOS ещё ожидается |
 | Иные версии mpv / VLC, VLC 4, Windows | Не проверены; обещания совместимости отсутствуют |
 
 Точные подтверждённые версии выше — не объявление минимальных версий.
@@ -183,7 +194,7 @@ lockfile. После интеграции прошли и корневые works
 
 | Точная команда (с env выше) | Результат |
 |---|---|
-| `cargo test --offline --manifest-path "$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml" --all-targets` | 46 passed (8 unit, 20 HTTP, 18 player), 3 real smoke ignored; оба examples собраны |
+| `cargo test --offline --manifest-path "$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml" --all-targets` | 47 passed (8 unit, 20 HTTP, 19 player), 3 real smoke ignored; оба examples собраны |
 | `cargo test --offline --manifest-path "$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml" --test players_smoke -- --ignored --nocapture` | 2 passed: реальные mpv/VLC, HTTP/resume/stop/EOF; mpv completed true только по EOF event, explicit stop false |
 | `cargo test --offline --manifest-path "$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml" --test video_smoke -- --ignored --nocapture` | 1 passed: MP4 video test, оба реальных плеера, HTTP bytes/Range/resume/stop/EOF; mpv actual EOF completion, VLC false |
 | `cargo clippy --offline --manifest-path "$DELTA_SCRATCH_DIR/player-build/media/Cargo.toml" --all-targets -- -D warnings` | Passed |

@@ -5,6 +5,7 @@ use std::{
     time::Duration,
 };
 
+use futures_util::StreamExt;
 use kadr_media::HttpDownload;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -284,6 +285,47 @@ async fn chunks_respect_the_requested_limit_and_the_64k_cap() {
         assert!(output.len() <= expected.len());
     }
     assert_eq!(output, expected);
+    assert_eq!(mock.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn large_full_response_survives_the_save_stream_reader_handoff() {
+    // Match the app's HttpDownload -> try_unfold -> StreamReader boundary,
+    // including a body larger than the transport cap and a pause before saving.
+    let data: Vec<u8> = (0..600 * 1024 + 37).map(|i| (i % 251) as u8).collect();
+    let expected = data.clone();
+    let mock = Mock::new(move |_| full(&data)).await;
+    let download = mock.open().await;
+    let length = download.len();
+    let output = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let chunks = futures_util::stream::try_unfold(download, |mut download| async move {
+            let bytes = download.next_chunk(CHUNK_LIMIT).await?;
+            Ok::<_, io::Error>(if bytes.is_empty() {
+                None
+            } else {
+                Some((bytes, download))
+            })
+        })
+        .boxed();
+        let mut reader = tokio_util::io::StreamReader::new(chunks);
+        let mut output = Vec::new();
+        for limit in [17, CHUNK_LIMIT, 503].into_iter().cycle() {
+            if output.len() as u64 == length {
+                break;
+            }
+            let remaining = (length - output.len() as u64) as usize;
+            let mut buffer = vec![0; remaining.min(limit)];
+            let count = reader.read(&mut buffer).await.unwrap();
+            assert!(count != 0, "the full-response reader must not end early");
+            output.extend_from_slice(&buffer[..count]);
+            // The real atomic saver yields while blocking disk writes run.
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        assert_eq!(reader.read(&mut [0; 1]).await.unwrap(), 0);
+        output
+    });
+    assert_eq!(timeout(WAIT, output).await.unwrap().unwrap(), expected);
     assert_eq!(mock.requests.lock().unwrap().len(), 1);
 }
 

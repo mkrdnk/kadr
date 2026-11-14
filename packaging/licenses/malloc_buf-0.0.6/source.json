@@ -1,0 +1,19 @@
+{
+  "record_type": "declared-spdx",
+  "name": "malloc_buf",
+  "version": "0.0.6",
+  "license_expression": "MIT",
+  "crate_sha256": "62bb907fe88d54d8d9ce32a3cceab4218ed2f6b7d35617cafe9adf84e43919cb",
+  "archive_url": "https://static.crates.io/crates/malloc_buf/malloc_buf-0.0.6.crate",
+  "canonical_license_ids": ["MIT"],
+  "evidence": "SHA-256 verified against Cargo.lock. Published Cargo.toml declares MIT and author Steven Sheldon. No .cargo_vcs_info.json exists in this legacy archive. Every published file byte-matches the exact repository commit below, immediately after tag 0.0.6 (which differs in the manifest exclude list). This complete exact-commit tree has only .gitignore, Cargo.toml and src/lib.rs, with no package license/copyright text beyond the Cargo declaration. A LICENSE in newer repository history is not substituted; no ownership notice is invented. This exact standard grant was explicitly reviewed for the macOS scope; not legal approval.",
+  "source_evidence": {
+    "method": "all-published-archive-members-byte-match",
+    "repository": "https://github.com/SSheldon/malloc_buf",
+    "commit": "230861bf873ec72a644ae5a1b39fdf0b3a1ce654",
+    "tree": "5e59bc30fe4b3ebbc0a232fcfc6ac8f095d738bc",
+    "tree_url": "https://api.github.com/repos/SSheldon/malloc_buf/git/trees/230861bf873ec72a644ae5a1b39fdf0b3a1ce654?recursive=1",
+    "matched_archive_members": ["Cargo.toml", "src/lib.rs"],
+    "actual_package_notice_count": 0
+  }
+}

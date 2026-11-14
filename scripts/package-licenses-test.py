@@ -167,19 +167,42 @@ class LicenseCollectionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "upstream notice hash mismatch"):
                 self.run_collection()
 
-    def standard_fixture(self, *, conflicting=False, header=True):
-        name, version = "convert_case", "0.4.0"
+    def canonical_fixture(self, overrides, identifiers=("MIT",)):
+        (overrides / "spdx").mkdir()
+        commit = "a" * 40
+        entries = []
+        for identifier in identifiers:
+            terms = (
+                f"{identifier} License\nCopyright (c) <year> <copyright holders>\n"
+                "Permission fixture terms.\n"
+            ).encode()
+            (overrides / f"spdx/{identifier}.txt").write_bytes(terms)
+            entries.append({
+                "license_id": identifier, "path": f"spdx/{identifier}.txt",
+                "url": f"https://raw.githubusercontent.com/spdx/license-list-data/{commit}/text/{identifier}.txt",
+                "sha256": hashlib.sha256(terms).hexdigest(),
+                "template_copyright_line": "Copyright (c) <year> <copyright holders>",
+            })
+        (overrides / "spdx/source.json").write_text(json.dumps({
+            "repository": "https://github.com/spdx/license-list-data", "commit": commit,
+            "files": entries,
+        }))
+
+    def standard_fixture(self, *, conflicting=False, header=True, name="convert_case",
+                         version="0.4.0", expression="MIT", identifiers=("MIT",)):
         registry = self.root / "registry"
         source = registry / "src/test-index" / f"{name}-{version}"
         source.mkdir(parents=True)
         manifest = (
-            '[package]\nname="convert_case"\nversion="0.4.0"\nlicense="MIT"\n'
+            f'[package]\nname="{name}"\nversion="{version}"\nlicense="{expression}"\n'
             'authors=["Fixture Author"]\n'
         ).encode()
         (source / "Cargo.toml").write_bytes(manifest)
         members = {
             "Cargo.toml": manifest,
-            "Cargo.toml.orig": manifest.replace(b'license="MIT"', b'license="NOASSERTION"') if conflicting else manifest,
+            "Cargo.toml.orig": manifest.replace(
+                f'license="{expression}"'.encode(), b'license="NOASSERTION"'
+            ) if conflicting else manifest,
             "README.md": b"Synthetic published-package test fixture.\n",
             "src/lib.rs": ((b"// Copyright Fixture Author\n// Licensed under MIT.\n" if header else b"")
                            + b"pub fn fixture() {}\n"),
@@ -196,31 +219,20 @@ class LicenseCollectionTests(unittest.TestCase):
         archive.write_bytes(raw)
         checksum = hashlib.sha256(raw).hexdigest()
         self.packages[1].update(name=name, version=version, manifest_path=str(source / "Cargo.toml"))
+        self.packages[1]["license"] = expression
         self.root.joinpath("Cargo.lock").write_text(
-            'version=4\n[[package]]\nname="convert_case"\nversion="0.4.0"\n'
+            f'version=4\n[[package]]\nname="{name}"\nversion="{version}"\n'
             f'source="{self.packages[1]["source"]}"\nchecksum="{checksum}"\n'
         )
         overrides = self.root / "standards"
-        (overrides / "convert_case-0.4.0").mkdir(parents=True)
-        (overrides / "convert_case-0.4.0/source.json").write_text(json.dumps({
+        (overrides / f"{name}-{version}").mkdir(parents=True)
+        (overrides / f"{name}-{version}/source.json").write_text(json.dumps({
             "record_type": "declared-spdx", "name": name, "version": version,
-            "license_expression": "MIT", "crate_sha256": checksum,
-            "canonical_license_ids": ["MIT"],
+            "license_expression": expression, "crate_sha256": checksum,
+            "canonical_license_ids": list(identifiers),
             "archive_url": f"https://static.crates.io/crates/{name}/{name}-{version}.crate",
         }))
-        (overrides / "spdx").mkdir()
-        terms = b"MIT License\nCopyright (c) <year> <copyright holders>\nPermission fixture terms.\n"
-        (overrides / "spdx/MIT.txt").write_bytes(terms)
-        commit = "a" * 40
-        (overrides / "spdx/source.json").write_text(json.dumps({
-            "repository": "https://github.com/spdx/license-list-data", "commit": commit,
-            "files": [{
-                "license_id": "MIT", "path": "spdx/MIT.txt",
-                "url": f"https://raw.githubusercontent.com/spdx/license-list-data/{commit}/text/MIT.txt",
-                "sha256": hashlib.sha256(terms).hexdigest(),
-                "template_copyright_line": "Copyright (c) <year> <copyright holders>",
-            }],
-        }))
+        self.canonical_fixture(overrides, identifiers)
         return overrides, archive
 
     def test_declared_standard_grant_authenticates_archive_and_retains_notices(self):
@@ -284,6 +296,82 @@ class LicenseCollectionTests(unittest.TestCase):
         provenance = json.loads((first.parent.parent / "provenance.json").read_text())
         self.assertEqual(provenance["actual_notice_count"], 0)
         self.assertIn("none invented", provenance["copyright_note"])
+
+    def test_reviewed_legacy_alternative_authenticates_without_vcs_metadata(self):
+        overrides, _ = self.standard_fixture(
+            name="leaky-cow", version="0.1.1", expression="MIT / Apache-2.0",
+            identifiers=("MIT", "Apache-2.0"), header=False,
+        )
+        with patch.object(collector, "OVERRIDES_ROOT", overrides):
+            result = self.run_collection(strict=True)
+        package = next(p for p in result["packages"] if p["name"] == "leaky-cow")
+        self.assertEqual(package["license_expression"], "MIT / Apache-2.0")
+        terms = [n for n in package["notices"] if n.get("kind") == "declared-standard-text"]
+        self.assertEqual(len(terms), 2)
+        folder = self.root / "output" / Path(terms[0]["path"]).parent.parent
+        provenance = json.loads((folder / "provenance.json").read_text())
+        self.assertEqual(provenance["authenticated_authors"], ["Fixture Author"])
+        self.assertEqual(provenance["actual_notice_count"], 0)
+        self.assertIn("none invented", provenance["copyright_note"])
+        self.assertFalse((Path(self.packages[1]["manifest_path"]).parent / ".cargo_vcs_info.json").exists())
+
+    def test_legacy_expression_is_not_generically_normalized(self):
+        overrides, _ = self.standard_fixture(
+            name="leaky-cow", version="0.1.1", expression="MIT/Apache-2.0",
+            identifiers=("MIT", "Apache-2.0"),
+        )
+        with patch.object(collector, "OVERRIDES_ROOT", overrides):
+            with self.assertRaisesRegex(ValueError, "unrecognized/conflicting declared-SPDX"):
+                self.run_collection(strict=True)
+
+    def test_future_package_version_still_rejects(self):
+        overrides, _ = self.standard_fixture(name="block", version="0.1.7")
+        with patch.object(collector, "OVERRIDES_ROOT", overrides):
+            with self.assertRaisesRegex(ValueError, "unrecognized/conflicting declared-SPDX"):
+                self.run_collection(strict=True)
+
+    def upstream_standard_fixture(self):
+        overrides, raw = self.override()
+        record = overrides / "dependency-0.1.0/source.json"
+        data = json.loads(record.read_text())
+        data["canonical_license_ids"] = ["MIT"]
+        record.write_text(json.dumps(data))
+        self.canonical_fixture(overrides)
+        return overrides, raw
+
+    def test_upstream_supplement_preserves_actual_notice_and_distinct_provenance(self):
+        overrides, raw = self.upstream_standard_fixture()
+        with (
+            patch.object(collector, "OVERRIDES_ROOT", overrides),
+            patch.object(collector, "UPSTREAM_STANDARDS", {("dependency", "0.1.0"): ("MIT", ("MIT",))}),
+        ):
+            result = self.run_collection(strict=True)
+        package = next(p for p in result["packages"] if p["name"] == "dependency")
+        self.assertEqual(package["license_text_status"], "present")
+        self.assertEqual(result["declared_standard_package_count"], 0)
+        actual, terms = package["notices"]
+        self.assertEqual((self.root / "output" / actual["path"]).read_bytes(), raw)
+        self.assertNotEqual(actual["provenance"], terms["provenance"])
+        self.assertTrue((self.root / "output" / terms["provenance"]).is_file())
+        self.assertNotIn("<copyright holders>", (self.root / "output" / terms["path"]).read_text())
+        self.assertEqual(terms["kind"], "declared-standard-text")
+        self.assertEqual(terms["transform"], "omit-instructional-copyright-template-line")
+
+    def test_upstream_supplement_rejects_canonical_hash_corruption(self):
+        overrides, _ = self.upstream_standard_fixture()
+        (overrides / "spdx/MIT.txt").write_text("corrupted terms\n")
+        with (
+            patch.object(collector, "OVERRIDES_ROOT", overrides),
+            patch.object(collector, "UPSTREAM_STANDARDS", {("dependency", "0.1.0"): ("MIT", ("MIT",))}),
+        ):
+            with self.assertRaisesRegex(ValueError, "canonical SPDX terms hash/provenance mismatch"):
+                self.run_collection(strict=True)
+
+    def test_upstream_supplement_is_not_an_unknown_package_fallback(self):
+        overrides, _ = self.upstream_standard_fixture()
+        with patch.object(collector, "OVERRIDES_ROOT", overrides):
+            with self.assertRaisesRegex(ValueError, "unrecognized/conflicting upstream standard supplement"):
+                self.run_collection(strict=True)
 
 
 if __name__ == "__main__":

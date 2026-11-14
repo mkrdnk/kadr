@@ -1,0 +1,20 @@
+{
+  "name": "objc2-encode",
+  "version": "4.1.0",
+  "license_expression": "MIT",
+  "archive_url": "https://static.crates.io/crates/objc2-encode/objc2-encode-4.1.0.crate",
+  "crate_sha256": "ef25abbcd74fb2609453eb695bd2f860d389e457f67dc17cafc8b8cbc89d0c33",
+  "vcs_sha1": "8d214f5477365ffcbcbb7de058c86ed9a518efb7",
+  "path_in_vcs": "crates/objc2-encode",
+  "repository": "https://github.com/madsmtm/objc2",
+  "canonical_license_ids": ["MIT"],
+  "evidence": "Published archive SHA-256 verified against Cargo.lock; its .cargo_vcs_info.json pins this commit/path. Exact-commit crates/objc2-encode/Cargo.toml confirms name, version and MIT declaration. The complete pinned repository tree contains root LICENSE.md, omitted from this archive. This is the actual upstream licensing notice (terms by reference), including its Apple SDK caveat, not a recovered full MIT terms file or legal approval.",
+  "files": [
+    {
+      "path": "_texts/7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54.txt",
+      "upstream_path": "LICENSE.md",
+      "url": "https://raw.githubusercontent.com/madsmtm/objc2/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.md",
+      "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
+    }
+  ]
+}

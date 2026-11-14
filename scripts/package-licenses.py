@@ -28,6 +28,23 @@ DECLARED_STANDARDS = {
     ("simd_helpers", "0.1.0"): ("MIT", ("MIT",)),
     ("seahash", "4.1.0"): ("MIT", ("MIT",)),
     ("pathfinder_geometry", "0.5.1"): ("MIT/Apache-2.0", ("MIT", "Apache-2.0")),
+    ("block", "0.1.6"): ("MIT", ("MIT",)),
+    ("leak", "0.1.2"): ("Apache-2.0 OR MIT", ("Apache-2.0", "MIT")),
+    ("leaky-cow", "0.1.1"): ("MIT / Apache-2.0", ("MIT", "Apache-2.0")),
+    ("malloc_buf", "0.0.6"): ("MIT", ("MIT",)),
+    ("objc_exception", "0.1.2"): ("MIT", ("MIT",)),
+}
+# These actual upstream notices incorporate standard terms by reference.
+# Supplement the recovered notice; this is NOT another missing-text fallback.
+UPSTREAM_STANDARDS = {
+    ("block2", "0.6.2"): ("MIT", ("MIT",)),
+    ("objc2", "0.6.5"): ("MIT", ("MIT",)),
+    ("objc2-encode", "4.1.0"): ("MIT", ("MIT",)),
+    ("dispatch2", "0.3.1"): ("Zlib OR Apache-2.0 OR MIT", ("Zlib", "Apache-2.0", "MIT")),
+    ("objc2-app-kit", "0.3.2"): ("Zlib OR Apache-2.0 OR MIT", ("Zlib", "Apache-2.0", "MIT")),
+    ("objc2-core-foundation", "0.3.2"): ("Zlib OR Apache-2.0 OR MIT", ("Zlib", "Apache-2.0", "MIT")),
+    ("objc2-metal", "0.3.2"): ("Zlib OR Apache-2.0 OR MIT", ("Zlib", "Apache-2.0", "MIT")),
+    ("objc2-quartz-core", "0.3.2"): ("Zlib OR Apache-2.0 OR MIT", ("Zlib", "Apache-2.0", "MIT")),
 }
 
 
@@ -117,6 +134,44 @@ def source_comments(data, suffix):
                 yield match[0], data[:match.start()].count(b"\n") + 1
 
 
+def canonical_standard_terms(identifiers):
+    """Verify pinned canonical terms, without asserting package ownership."""
+    record = json.loads((OVERRIDES_ROOT / "spdx/source.json").read_text())
+    if record["repository"] != "https://github.com/spdx/license-list-data" or not re.fullmatch(r"[0-9a-f]{40}", record["commit"]):
+        raise ValueError("unrecognized canonical SPDX provenance")
+    terms = []
+    for identifier in identifiers:
+        entries = [entry for entry in record["files"] if entry["license_id"] == identifier]
+        if len(entries) != 1:
+            raise ValueError("canonical SPDX terms missing or ambiguous")
+        entry = entries[0]
+        relative = Path(entry["path"])
+        source = OVERRIDES_ROOT / relative
+        expected_url = f"https://raw.githubusercontent.com/spdx/license-list-data/{record['commit']}/text/{identifier}.txt"
+        if (
+            relative.is_absolute() or ".." in relative.parts or source.is_symlink()
+            or not source.resolve().is_relative_to(OVERRIDES_ROOT.resolve())
+            or entry["url"] != expected_url or digest(source) != entry["sha256"]
+        ):
+            raise ValueError("canonical SPDX terms hash/provenance mismatch")
+        data = source.read_bytes()
+        placeholder = entry.get("template_copyright_line")
+        if placeholder:
+            lines = data.splitlines(keepends=True)
+            matches = [line for line in lines if line.strip() == placeholder.encode()]
+            if len(matches) != 1:
+                raise ValueError("canonical SPDX copyright template changed")
+            # This is an instructional template, never an upstream ownership claim.
+            data = b"".join(line for line in lines if line not in matches)
+        terms.append((identifier, data, {
+            "kind": "declared-standard-text",
+            "canonical_source_url": entry["url"],
+            "canonical_source_sha256": entry["sha256"],
+            "transform": "omit-instructional-copyright-template-line" if placeholder else "verbatim",
+        }))
+    return record, terms
+
+
 def declared_standard_notices(package, root, destination, output, project, record):
     expected = DECLARED_STANDARDS.get((package["name"], package["version"]))
     if (
@@ -204,38 +259,9 @@ def declared_standard_notices(package, root, destination, output, project, recor
                     Path("source-notices") / path.parent / f"{path.name}.{index}.txt",
                     comment, kind="source-header-notice", line_start=line, **evidence,
                 ))
-    spdx_record = json.loads((OVERRIDES_ROOT / "spdx/source.json").read_text())
-    if spdx_record["repository"] != "https://github.com/spdx/license-list-data" or not re.fullmatch(r"[0-9a-f]{40}", spdx_record["commit"]):
-        raise ValueError("unrecognized canonical SPDX provenance")
-    for identifier in expected[1]:
-        entries = [entry for entry in spdx_record["files"] if entry["license_id"] == identifier]
-        if len(entries) != 1:
-            raise ValueError("canonical SPDX terms missing or ambiguous")
-        entry = entries[0]
-        relative = Path(entry["path"])
-        source = OVERRIDES_ROOT / relative
-        expected_url = f"https://raw.githubusercontent.com/spdx/license-list-data/{spdx_record['commit']}/text/{identifier}.txt"
-        if (
-            relative.is_absolute() or ".." in relative.parts or source.is_symlink()
-            or not source.resolve().is_relative_to(OVERRIDES_ROOT.resolve())
-            or entry["url"] != expected_url or digest(source) != entry["sha256"]
-        ):
-            raise ValueError("canonical SPDX terms hash/provenance mismatch")
-        data = source.read_bytes()
-        placeholder = entry.get("template_copyright_line")
-        if placeholder:
-            lines = data.splitlines(keepends=True)
-            matches = [line for line in lines if line.strip() == placeholder.encode()]
-            if len(matches) != 1:
-                raise ValueError("canonical SPDX copyright template changed")
-            # This is an instructional template, never an upstream ownership claim.
-            data = b"".join(line for line in lines if line not in matches)
-        save(
-            Path("standard-terms") / f"{identifier}.txt", data,
-            kind="declared-standard-text", canonical_source_url=entry["url"],
-            canonical_source_sha256=entry["sha256"],
-            transform="omit-instructional-copyright-template-line" if placeholder else "verbatim",
-        )
+    spdx_record, terms = canonical_standard_terms(expected[1])
+    for identifier, data, evidence in terms:
+        save(Path("standard-terms") / f"{identifier}.txt", data, **evidence)
     report = {
         **record, "status": "declared-standard-text",
         "basis": "Authenticated published Cargo standard-license declaration by reference; not a recovered upstream LICENSE or legal approval.",
@@ -316,6 +342,28 @@ def upstream_notices(package, root, destination, output, project=None, override=
             "vcs_sha1": commit,
             "provenance": provenance.relative_to(output).as_posix(),
         })
+    identifiers = override.get("canonical_license_ids", [])
+    expected = UPSTREAM_STANDARDS.get((package["name"], package["version"]))
+    if identifiers or expected is not None:
+        if (
+            expected is None or package.get("license") != expected[0]
+            or tuple(identifiers) != expected[1]
+        ):
+            raise ValueError(f"unrecognized/conflicting upstream standard supplement: {package['name']}")
+        spdx_record, terms = canonical_standard_terms(identifiers)
+        folder = destination / "upstream/standard-terms"
+        folder.mkdir()
+        canonical_provenance = folder / "source.json"
+        canonical_provenance.write_text(json.dumps(spdx_record, indent=2) + "\n")
+        for identifier, data, evidence in terms:
+            copied = folder / f"{identifier}.txt"
+            copied.write_bytes(data)
+            notices.append({
+                "path": copied.relative_to(output).as_posix(),
+                "sha256": digest(copied),
+                "provenance": canonical_provenance.relative_to(output).as_posix(),
+                **evidence,
+            })
     return notices
 
 

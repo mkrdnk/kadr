@@ -1,0 +1,20 @@
+{
+  "name": "dispatch2",
+  "version": "0.3.1",
+  "license_expression": "Zlib OR Apache-2.0 OR MIT",
+  "archive_url": "https://static.crates.io/crates/dispatch2/dispatch2-0.3.1.crate",
+  "crate_sha256": "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38",
+  "vcs_sha1": "8852b424193ca41602281b3d7540d7c8ed51e49a",
+  "path_in_vcs": "crates/dispatch2",
+  "repository": "https://github.com/madsmtm/objc2",
+  "canonical_license_ids": ["Zlib", "Apache-2.0", "MIT"],
+  "evidence": "Published archive SHA-256 verified against Cargo.lock; its .cargo_vcs_info.json pins this commit/path. Exact-commit crates/dispatch2/Cargo.toml confirms name/version and inherits the license from root Cargo.toml workspace.package. The complete pinned repository tree contains root LICENSE.md, omitted from this archive. This is the actual upstream licensing notice (terms by reference), including its Apple SDK caveat, not recovered full standard terms or legal approval.",
+  "files": [
+    {
+      "path": "_texts/7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54.txt",
+      "upstream_path": "LICENSE.md",
+      "url": "https://raw.githubusercontent.com/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md",
+      "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
+    }
+  ]
+}

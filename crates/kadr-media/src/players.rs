@@ -184,8 +184,6 @@ impl PlayerSession {
             PlayerKind::Vlc => {
                 command.args([
                     "--ignore-config",
-                    "--no-one-instance",
-                    "--no-playlist-enqueue",
                     "--no-media-library",
                     "--no-metadata-network-access",
                     "--extraintf=oldrc",
@@ -193,6 +191,13 @@ impl PlayerSession {
                     "--quiet",
                     "--play-and-exit",
                 ]);
+                // VLC 3.0.24 registers both options only for _WIN32,
+                // HAVE_DBUS, or __OS2__ (src/libvlc-module.c). The native
+                // macOS bundle has no DBus support and rejects these flags.
+                // Darwin's direct CLI entrypoint still creates its own
+                // libvlc instance; never replace this child with `open -a`.
+                #[cfg(not(target_os = "macos"))]
+                command.args(["--no-one-instance", "--no-playlist-enqueue"]);
                 command.arg(format!("--rc-unix={}", socket_path.display()));
                 if let Some(start) = start {
                     command.arg(format!("--start-time={start}"));

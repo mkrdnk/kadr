@@ -23,6 +23,12 @@
       "url": "https://raw.githubusercontent.com/spdx/license-list-data/8a04f0303d95c4f932210b118588c662665bd383/text/Apache-2.0.txt",
       "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
       "template_copyright_line": "Copyright [yyyy] [name of copyright owner]"
+    },
+    {
+      "license_id": "Zlib",
+      "path": "spdx/Zlib.txt",
+      "url": "https://raw.githubusercontent.com/spdx/license-list-data/8a04f0303d95c4f932210b118588c662665bd383/text/Zlib.txt",
+      "sha256": "bfb1112d49db5b1daecdfef24bd7e2f3ea0bafb33aa67aa0ab51e2bf8407c03d"
     }
   ]
 }

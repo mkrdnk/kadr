@@ -133,7 +133,18 @@ async fn real_vlc_http_resume_unsupported_telemetry_stop_and_eof() {
     assert_eq!(snapshot.position, Telemetry::Unsupported);
     assert_eq!(snapshot.duration, Telemetry::Unsupported);
     assert!(!snapshot.completed);
+    // Native macOS omits DBus-only instance-routing flags. Prove that direct
+    // CLI launches still own independent children and private RC endpoints:
+    // stopping one must not forward a quit to another existing VLC process.
+    let mut independent = launch(PlayerKind::Vlc, &server, 2.0).await;
+    assert!(session.try_wait().unwrap().is_none());
+    assert!(independent.try_wait().unwrap().is_none());
     assert!(session.stop().await.unwrap().success());
+    assert!(
+        independent.try_wait().unwrap().is_none(),
+        "stopping one VLC session must leave the other child alive"
+    );
+    assert!(independent.stop().await.unwrap().success());
     // Coarse end-to-end resume evidence, NOT a source of playback telemetry:
     // seven-second start in an eight-second file should finish well before
     // an unresumed playback could. Nothing here is persisted as progress.

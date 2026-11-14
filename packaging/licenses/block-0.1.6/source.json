@@ -1,0 +1,19 @@
+{
+  "record_type": "declared-spdx",
+  "name": "block",
+  "version": "0.1.6",
+  "license_expression": "MIT",
+  "crate_sha256": "0d8c1fef690941d3e7788d328517591fecc684c084084702d6ff1641e993699a",
+  "archive_url": "https://static.crates.io/crates/block/block-0.1.6.crate",
+  "canonical_license_ids": ["MIT"],
+  "evidence": "SHA-256 verified against Cargo.lock. Published Cargo.toml declares MIT and author Steven Sheldon. No .cargo_vcs_info.json exists in this legacy archive. Every published file byte-matches the exact repository commit below (release tag 0.1.6). Complete exact-commit tree, README and source inspection found no package license/copyright text beyond the Cargo declaration; no ownership notice is invented. This exact standard grant was explicitly reviewed for the macOS scope; not legal approval.",
+  "source_evidence": {
+    "method": "all-published-archive-members-byte-match",
+    "repository": "https://github.com/SSheldon/rust-block",
+    "commit": "47178790cfc9d4a8b092051d8b413b78bd31254a",
+    "tree": "5b465163c03f4a5977ea91698bb4ac1e4c926d5f",
+    "tree_url": "https://api.github.com/repos/SSheldon/rust-block/git/trees/47178790cfc9d4a8b092051d8b413b78bd31254a?recursive=1",
+    "matched_archive_members": ["Cargo.toml", "README.md", "src/lib.rs", "src/test_utils.rs"],
+    "actual_package_notice_count": 0
+  }
+}

@@ -221,12 +221,57 @@ async fn vlc_resume_is_argv_and_telemetry_is_explicitly_unsupported() {
     let args = record["args"].as_array().unwrap();
     assert!(args.iter().any(|arg| arg == "--start-time=3.500000"));
     assert!(args.iter().any(|arg| arg == "--play-and-exit"));
+    for flag in ["--no-one-instance", "--no-playlist-enqueue"] {
+        assert_eq!(
+            args.iter().any(|arg| arg == flag),
+            !cfg!(target_os = "macos"),
+            "VLC instance-routing options require DBus/Win32/OS2, not native macOS"
+        );
+    }
+    assert!(args.iter().any(|arg| arg == "--extraintf=oldrc"));
+    assert!(args.iter().any(|arg| arg == "--rc-fake-tty"));
+    assert_eq!(args[args.len() - 2], "--");
     assert_eq!(args.last().unwrap(), request().media.to_str().unwrap());
     let snapshot = session.snapshot(&CancellationToken::new()).await.unwrap();
     assert_eq!(snapshot.position, Telemetry::Unsupported);
     assert_eq!(snapshot.duration, Telemetry::Unsupported);
     assert!(!snapshot.completed);
     assert!(session.stop().await.unwrap().success());
+}
+
+#[tokio::test]
+async fn vlc_sessions_own_distinct_children_and_private_control_endpoints() {
+    let fake = Fake::new("normal");
+    let mut first = fake.launch(PlayerKind::Vlc).await;
+    let first_record = fake.record();
+    let mut second = fake.launch(PlayerKind::Vlc).await;
+    let second_record = fake.record();
+    assert_ne!(first_record["pid"], second_record["pid"]);
+    assert_ne!(first_record["socket"], second_record["socket"]);
+    assert!(first.stop().await.unwrap().success());
+    assert!(
+        second.try_wait().unwrap().is_none(),
+        "stop must target only its child"
+    );
+    assert_eq!(
+        second
+            .snapshot(&CancellationToken::new())
+            .await
+            .unwrap()
+            .position,
+        Telemetry::Unsupported
+    );
+    assert!(second.stop().await.unwrap().success());
+    drop((first, second));
+    for record in [first_record, second_record] {
+        assert_reaped(record["pid"].as_u64().unwrap() as u32).await;
+        assert!(
+            !PathBuf::from(record["socket"].as_str().unwrap())
+                .parent()
+                .unwrap()
+                .exists()
+        );
+    }
 }
 
 #[tokio::test]
@@ -314,7 +359,10 @@ async fn dropped_launch_future_kills_child_and_removes_directory() {
         &cancel,
     ));
     let record = tokio::select! {
-        _ = &mut launch => panic!("fake should not connect"),
+        result = &mut launch => match result {
+            Ok(_) => panic!("fake should not connect"),
+            Err(error) => panic!("fake launch failed before its startup record: {error}"),
+        },
         record = fake.wait_for_record() => record,
     };
     drop(launch);

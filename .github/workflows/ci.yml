@@ -83,6 +83,13 @@ jobs:
       - name: Real HTTP torrent playback and permanent-save acceptance
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: cargo test --locked -p kadr-app backend::tests::real_ -- --ignored --test-threads=1
+      - name: Repeat full-response save acceptance without retrying failures
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          for attempt in 1 2 3; do
+            echo "Full-response save acceptance run $attempt (every run must pass)"
+            cargo test --locked -p kadr-app real_http_fallback -- --ignored --test-threads=1
+          done
       # Runtime checks are independent; collect all failures, never turn them
       # into a pass. The candidates job still requires the entire matrix green.
       - name: Real mpv and VLC playback
@@ -108,8 +115,8 @@ jobs:
       - name: Build and open macOS DMG
         if: ${{ !cancelled() && steps.build.outcome == 'success' && runner.os == 'macOS' }}
         env:
-          # Local unsigned mount/render QA only; no artifact upload/publication.
-          KADR_ALLOW_INCOMPLETE_NOTICES: '1'
+          # Even the debug mount/render smoke must collect complete notices.
+          KADR_ALLOW_INCOMPLETE_NOTICES: '0'
         run: |
           scripts/package-dmg.sh --binary target/debug/kadr-app
           set -- target/dist/*.dmg
