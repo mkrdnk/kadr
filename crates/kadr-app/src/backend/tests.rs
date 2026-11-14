@@ -615,7 +615,7 @@ fn browser_rejects_unstable_http_without_opening_system_browser_or_inventing_pro
 fn stop_interrupts_pending_http_probe_before_player_launch() {
     let directory = tempfile::tempdir().unwrap();
     let paths = paths(directory.path());
-    let origin = HttpOrigin::new(vec![0; 1024], HttpBehavior::Stall);
+    let origin = HttpOrigin::new(vec![0; 1024], HttpBehavior::StallHead);
     let source = ManualSource::parse_link(&origin.url()).unwrap();
     let target = target(&source, None);
     let mut app = App::start(&paths);
@@ -972,7 +972,7 @@ enum HttpBehavior {
     Stable,
     IgnoresRanges,
     NoValidator,
-    Stall,
+    StallHead,
 }
 
 /// Minimal owned origin, not kadr-media::Server: independently implements strong
@@ -988,6 +988,7 @@ struct HttpOrigin {
 
 impl HttpOrigin {
     fn new(bytes: Vec<u8>, behavior: HttpBehavior) -> Self {
+        let bytes: Arc<[u8]> = bytes.into();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
@@ -1002,28 +1003,55 @@ impl HttpOrigin {
             conditional.clone(),
         );
         let worker = thread::spawn(move || {
+            let mut connections: Vec<thread::JoinHandle<()>> = Vec::new();
             while !done.load(Ordering::Relaxed) {
+                for index in (0..connections.len()).rev() {
+                    if connections[index].is_finished() {
+                        connections.swap_remove(index).join().unwrap();
+                    }
+                }
                 match listener.accept() {
                     Ok((mut socket, _)) => {
-                        let _ = socket.set_read_timeout(Some(Duration::from_secs(1)));
-                        let _ = socket.set_write_timeout(Some(Duration::from_secs(1)));
-                        if let Err(error) = serve_origin(
-                            &mut socket,
-                            &bytes,
-                            behavior,
-                            &done,
-                            &head_count,
-                            &range_count,
-                            &conditional_count,
-                        ) {
-                            eprintln!("owned HTTP origin ({behavior:?}): {:?}", error.kind());
+                        if connections.len() == 16 {
+                            continue;
                         }
+                        let (bytes, done, heads, ranges, conditional) = (
+                            bytes.clone(),
+                            done.clone(),
+                            head_count.clone(),
+                            range_count.clone(),
+                            conditional_count.clone(),
+                        );
+                        // Playback and permanent saving use independent GETs.
+                        // A slow player must not monopolize the fixture origin.
+                        connections.push(thread::spawn(move || {
+                            socket
+                                .set_read_timeout(Some(Duration::from_secs(1)))
+                                .unwrap();
+                            socket
+                                .set_write_timeout(Some(Duration::from_secs(1)))
+                                .unwrap();
+                            if let Err(error) = serve_origin(
+                                &mut socket,
+                                &bytes,
+                                behavior,
+                                &done,
+                                &heads,
+                                &ranges,
+                                &conditional,
+                            ) {
+                                eprintln!("owned HTTP origin ({behavior:?}): {:?}", error.kind());
+                            }
+                        }));
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(2));
                     }
                     Err(_) => break,
                 }
+            }
+            for connection in connections {
+                connection.join().unwrap();
             }
         });
         Self {
@@ -1050,6 +1078,36 @@ impl Drop for HttpOrigin {
     }
 }
 
+#[test]
+fn owned_origin_serves_a_second_request_while_head_is_pending() {
+    let bytes = vec![42; 1024];
+    let origin = HttpOrigin::new(bytes.clone(), HttpBehavior::StallHead);
+    let mut head = TcpStream::connect(origin.address).unwrap();
+    head.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    head.write_all(b"HEAD /own.mp4 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    eventually(WAIT, "owned HEAD request is pending", || {
+        origin.heads.load(Ordering::Relaxed) == 1
+    });
+    let mut get = TcpStream::connect(origin.address).unwrap();
+    get.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    get.write_all(b"GET /own.mp4 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    let mut response = Vec::new();
+    get.read_to_end(&mut response).unwrap();
+    let split = response
+        .windows(4)
+        .position(|bytes| bytes == b"\r\n\r\n")
+        .unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+    assert_eq!(&response[split + 4..], bytes);
+
+    let before = Instant::now();
+    drop(origin);
+    assert!(before.elapsed() < Duration::from_secs(3));
+    assert_eq!(head.read(&mut [0; 1]).unwrap(), 0);
+}
+
 fn serve_origin(
     socket: &mut TcpStream,
     bytes: &[u8],
@@ -1062,6 +1120,9 @@ fn serve_origin(
     let mut request = Vec::new();
     let mut chunk = [0; 1024];
     while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         let size = socket.read(&mut chunk)?;
         if size == 0 || request.len() + size > 16 * 1024 {
             return Ok(());
@@ -1073,7 +1134,7 @@ fn serve_origin(
     if head {
         heads.fetch_add(1, Ordering::Relaxed);
     }
-    if matches!(behavior, HttpBehavior::Stall) {
+    if head && matches!(behavior, HttpBehavior::StallHead) {
         // Bounded independently of the caller; Drop can interrupt this wait.
         let deadline = Instant::now() + WAIT;
         while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
@@ -1136,9 +1197,84 @@ fn serve_origin(
     }
     socket.write_all(b"\r\n")?;
     if !head {
-        socket.write_all(&bytes[start..=end])?;
+        socket.set_nonblocking(true)?;
+        write_origin_body(socket, &bytes[start..=end], stop)?;
     }
     Ok(())
+}
+
+fn write_origin_body(
+    writer: &mut impl Write,
+    bytes: &[u8],
+    stop: &AtomicBool,
+) -> std::io::Result<()> {
+    let deadline = Instant::now() + WAIT;
+    let mut written = 0;
+    while written < bytes.len() {
+        if stop.load(Ordering::Relaxed) {
+            return Err(std::io::ErrorKind::Interrupted.into());
+        }
+        if Instant::now() >= deadline {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        let end = bytes.len().min(written + 64 * 1024);
+        match writer.write(&bytes[written..end]) {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(count) => written += count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                // Socket backpressure is not EOF. Retry partial writes within
+                // the existing whole-response budget, observing Stop each time.
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn owned_origin_body_retries_backpressure_without_losing_bytes_and_observes_stop() {
+    struct Partial {
+        bytes: Vec<u8>,
+        calls: usize,
+    }
+    impl Write for Partial {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.calls += 1;
+            assert!(bytes.len() <= 64 * 1024);
+            if self.calls % 3 == 1 {
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            let count = bytes.len().min(137);
+            self.bytes.extend_from_slice(&bytes[..count]);
+            Ok(count)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let expected = vec![37; 1024];
+    let mut writer = Partial {
+        bytes: Vec::new(),
+        calls: 0,
+    };
+    let stop = AtomicBool::new(false);
+    write_origin_body(&mut writer, &expected, &stop).unwrap();
+    assert_eq!(writer.bytes, expected);
+    stop.store(true, Ordering::Relaxed);
+    assert_eq!(
+        write_origin_body(&mut writer, &expected, &stop)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::Interrupted
+    );
+    assert_eq!(writer.bytes, expected, "Stop must not write any new bytes");
 }
 
 /// Kill/reap ffmpeg on timeout or an unwinding test.
