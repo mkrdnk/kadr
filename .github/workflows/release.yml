@@ -29,6 +29,7 @@ env:
 jobs:
   linux:
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -90,6 +91,7 @@ jobs:
 
   macos:
     runs-on: macos-15
+    timeout-minutes: 45
     env:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
     steps:

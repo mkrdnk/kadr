@@ -8,6 +8,20 @@ pub const PREFIX: usize = 777;
 pub const SELECTED: usize = 1024 * 1024 + 117;
 pub const MISSING: usize = 7 * PIECE - PREFIX;
 
+/// Resolve only the explicitly authorized temporary parent before allocating
+/// our owned child. macOS commonly exposes its temp parent through /var, a
+/// symlink to /private/var; production output paths must remain symlink-free.
+pub fn tempdir() -> tempfile::TempDir {
+    tempdir_in(&std::env::temp_dir())
+}
+
+pub fn tempdir_in(parent: &Path) -> tempfile::TempDir {
+    let physical_parent = parent
+        .canonicalize()
+        .expect("resolve authorized fixture temporary parent");
+    tempfile::tempdir_in(physical_parent).expect("allocate physical fixture directory")
+}
+
 /// No downloaded fixtures: canonical bencode and SHA-1 over deterministic bytes.
 /// The selected file starts and ends inside pieces shared with other files.
 pub struct Fixture {

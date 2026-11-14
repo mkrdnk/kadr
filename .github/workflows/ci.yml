@@ -27,6 +27,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -69,6 +70,8 @@ jobs:
           ln -s /Applications/VLC.app/Contents/MacOS/VLC "$RUNNER_TEMP/kadr-player-bin/vlc"
           echo "$RUNNER_TEMP/kadr-player-bin" >> "$GITHUB_PATH"
       - run: cargo fmt --all -- --check
+      - name: Notice collector regressions
+        run: python3 scripts/package-licenses-test.py
       - run: cargo check --locked --workspace --all-targets
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace

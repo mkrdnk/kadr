@@ -1505,6 +1505,9 @@ struct LocalSeed {
 
 impl LocalSeed {
     fn start(output: &Path, metadata: Vec<u8>) -> Self {
+        let output = output
+            .canonicalize()
+            .expect("resolve owned local seed fixture directory");
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
@@ -1512,7 +1515,7 @@ impl LocalSeed {
             .unwrap();
         let (session, selected) = runtime.block_on(async {
             tokio::time::timeout(WAIT, async {
-                let session = kadr_torrent::LocalSession::new(output.to_owned())
+                let session = kadr_torrent::LocalSession::new(output.clone())
                     .await
                     .expect("start discovery-disabled loopback-only seed");
                 let selected = session

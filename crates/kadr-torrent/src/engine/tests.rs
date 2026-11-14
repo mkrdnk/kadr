@@ -6,6 +6,8 @@ mod fixture {
     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/mod.rs"));
 }
 
+use fixture::tempdir;
+
 fn local_options() -> EngineOptions {
     EngineOptions {
         network_enabled: true,
@@ -87,7 +89,7 @@ fn preparation_is_offline_stable_and_private_in_debug() {
 async fn consent_and_cancel_fail_before_files_or_sockets() {
     let fixture = fixture::Fixture::new(true);
     let prepared = PreparedTorrent::from_bytes(fixture.torrent).unwrap();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let root = temp.path().join("not-created");
     let error = prepared
         .start(
@@ -202,7 +204,7 @@ fn distinct_russian_paths_keep_original_names_and_sizes() {
 async fn selected_download_seek_save_readiness_and_rehash_resume() {
     timeout(Duration::from_secs(25), async {
         let fixture = fixture::Fixture::new(true);
-        let seed_dir = tempfile::tempdir().unwrap();
+        let seed_dir = tempdir();
         write_seed(&fixture, seed_dir.path());
         let seed = LocalSession::new(seed_dir.path().into()).await.unwrap();
         let _seed_file = seed
@@ -210,7 +212,7 @@ async fn selected_download_seek_save_readiness_and_rehash_resume() {
             .await
             .unwrap();
         let prepared = PreparedTorrent::from_bytes(fixture.torrent).unwrap();
-        let download_dir = tempfile::tempdir().unwrap();
+        let download_dir = tempdir();
         let mut options = local_options();
         options.initial_peers = vec![seed.listen_addr()];
         options.upload_limit = RateLimit::Paused;
@@ -295,7 +297,7 @@ async fn magnet_exchange_is_metadata_only_with_explicit_loopback_seed() {
         // upload for private torrents. No DHT, trackers or public peers.
         let fixture = fixture::Fixture::new(false);
         let prepared = PreparedTorrent::from_bytes(fixture.torrent.clone()).unwrap();
-        let seed_dir = tempfile::tempdir().unwrap();
+        let seed_dir = tempdir();
         write_seed(&fixture, seed_dir.path());
         std::fs::rename(
             seed_dir.path().join("kadr-fixture"),
@@ -326,7 +328,7 @@ async fn magnet_exchange_is_metadata_only_with_explicit_loopback_seed() {
         assert_eq!(resolved.files, prepared.files);
         assert_eq!(resolved.total_bytes, prepared.total_bytes);
         // Only now allocate a cache root and start payload activity.
-        let output = tempfile::tempdir().unwrap();
+        let output = tempdir();
         assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
         let playback = resolved
             .start(1, output.path().into(), options, CancellationToken::new())
@@ -390,6 +392,46 @@ async fn cancelled_magnet_and_dropped_session_release_listener() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn authorized_temp_parent_alias_is_resolved_without_relaxing_output_checks() {
+    let directory = tempdir();
+    let physical_parent = directory.path().join("physical");
+    std::fs::create_dir(&physical_parent).unwrap();
+    let parent_alias = directory.path().join("alias");
+    std::os::unix::fs::symlink(&physical_parent, &parent_alias).unwrap();
+    // Reproduce /var -> /private/var on Linux too: only the fixture's explicitly
+    // authorized allocation parent is resolved, before creating its child.
+    let output = fixture::tempdir_in(&parent_alias);
+    assert!(output.path().starts_with(&physical_parent));
+    let metadata = fixture::Fixture::new(true);
+    let prepared = PreparedTorrent::from_bytes(metadata.torrent).unwrap();
+    let options = EngineOptions {
+        download_limit: RateLimit::Paused,
+        ..local_options()
+    };
+    let playback = prepared
+        .start(
+            1,
+            output.path().into(),
+            options.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    playback.stop().await;
+    // The engine itself must still reject the alias, even though it refers to
+    // the very same authorized tree. Never canonicalize untrusted output paths.
+    let aliased_output = parent_alias.join("unallocated-output");
+    let error = prepared
+        .start(1, aliased_output, options, CancellationToken::new())
+        .await
+        .err()
+        .expect("symlink ancestor must remain forbidden");
+    assert!(error.to_string().contains("symlink"));
+    assert!(!physical_parent.join("unallocated-output").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn unsafe_metadata_and_symlink_output_are_rejected_before_writes() {
     let fixture = fixture::Fixture::new(true);
     let bytes = fixture.torrent.to_vec();
@@ -403,8 +445,8 @@ async fn unsafe_metadata_and_symlink_output_are_rejected_before_writes() {
     unsafe_bytes[index..index + needle.len()].copy_from_slice(b"../evil_.bin");
     assert!(PreparedTorrent::from_bytes(unsafe_bytes.into()).is_err());
     let prepared = PreparedTorrent::from_bytes(fixture.torrent).unwrap();
-    let output = tempfile::tempdir().unwrap();
-    let elsewhere = tempfile::tempdir().unwrap();
+    let output = tempdir();
+    let elsewhere = tempdir();
     std::os::unix::fs::symlink(elsewhere.path(), output.path().join("payload")).unwrap();
     let error = prepared
         .start(
@@ -425,7 +467,7 @@ async fn disabled_uploads_refuse_payload_and_live_limits_are_applied() {
     timeout(Duration::from_secs(15), async {
         let fixture = fixture::Fixture::new(true);
         let prepared = PreparedTorrent::from_bytes(fixture.torrent.clone()).unwrap();
-        let seed_dir = tempfile::tempdir().unwrap();
+        let seed_dir = tempdir();
         write_seed(&fixture, seed_dir.path());
         std::fs::rename(
             seed_dir.path().join("kadr-fixture"),
@@ -445,7 +487,7 @@ async fn disabled_uploads_refuse_payload_and_live_limits_are_applied() {
             .await
             .unwrap();
         assert!(seed.selected_file_ready());
-        let output = tempfile::tempdir().unwrap();
+        let output = tempdir();
         let leecher = prepared
             .start(
                 1,
@@ -496,7 +538,7 @@ async fn disabled_uploads_refuse_payload_and_live_limits_are_applied() {
 async fn startup_scheduler_spends_initial_burst_on_contiguous_prefix() {
     timeout(Duration::from_secs(10), async {
         let fixture = fixture::Fixture::new(true);
-        let seed_dir = tempfile::tempdir().unwrap();
+        let seed_dir = tempdir();
         write_seed(&fixture, seed_dir.path());
         let seed = LocalSession::new(seed_dir.path().into()).await.unwrap();
         let _seed_file = seed
@@ -504,7 +546,7 @@ async fn startup_scheduler_spends_initial_burst_on_contiguous_prefix() {
             .await
             .unwrap();
         let prepared = PreparedTorrent::from_bytes(fixture.torrent).unwrap();
-        let output = tempfile::tempdir().unwrap();
+        let output = tempdir();
         let playback = prepared
             .start(
                 1,

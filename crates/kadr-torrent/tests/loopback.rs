@@ -10,7 +10,7 @@ use std::{
 
 use kadr_media::{ByteSource, ReadFuture, Server, ServerOptions};
 use kadr_torrent::{LocalSession, TorrentByteSource, TorrentFile};
-use support::{Fixture, MISSING, SELECTED};
+use support::{Fixture, MISSING, SELECTED, tempdir};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -120,8 +120,8 @@ async fn released(address: SocketAddr) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_partial_peer_ranges_seek_concurrency_and_cancellation() {
     let fixture = Fixture::new(true);
-    let seed_dir = tempfile::tempdir().unwrap();
-    let download_dir = tempfile::tempdir().unwrap();
+    let seed_dir = tempdir();
+    let download_dir = tempdir();
     fixture.write_partial_seed(seed_dir.path());
     let seed = bounded(LocalSession::new(seed_dir.path().into()))
         .await
@@ -313,7 +313,7 @@ async fn real_partial_peer_ranges_seek_concurrency_and_cancellation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reject_nonprivate_metadata_external_peers_and_invalid_file_ids() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir();
     let session = bounded(LocalSession::new(dir.path().into())).await.unwrap();
     let fixture = Fixture::new(true);
     for peer in ["192.0.2.1:42", "[::1]:42", "127.0.0.1:0"] {
@@ -349,7 +349,7 @@ async fn reject_nonprivate_metadata_external_peers_and_invalid_file_ids() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_started_add_invalidates_session_instead_of_orphaning_download() {
     let fixture = Fixture::new(true);
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir();
     fixture.write_partial_seed(dir.path());
     let session = bounded(LocalSession::new(dir.path().into())).await.unwrap();
     // Existing files without overwrite cause a real initialization/storage
@@ -375,7 +375,7 @@ async fn failed_started_add_invalidates_session_instead_of_orphaning_download() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn diagnostics_redact_metadata_names_and_upstream_filesystem_paths() {
     let fixture = Fixture::new(true);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempdir();
     let output = directory.path().join("SENSITIVE-output");
     // Reproduce an upstream filesystem error whose original chain contains
     // both the absolute output directory and torrent-provided filename.
@@ -419,8 +419,8 @@ async fn reject_existing_output_directory_and_metadata_file_symlinks() {
     use std::os::unix::fs::symlink;
 
     let fixture = Fixture::new(true);
-    let dir = tempfile::tempdir().unwrap();
-    let outside = tempfile::tempdir().unwrap();
+    let dir = tempdir();
+    let outside = tempdir();
     let linked_root = dir.path().join("linked-output");
     symlink(outside.path(), &linked_root).unwrap();
     assert!(bounded(LocalSession::new(linked_root)).await.is_err());
