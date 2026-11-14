@@ -406,7 +406,7 @@ No signing/notarization was performed during Linux implementation.
 - Debian 12 x86_64: optimized integrated MVP `cargo build --release --locked -p
   kadr-app`, followed by strict AppImage and Flatpak builds, passed. The final
   input ELF SHA-256 recorded by both packages was
-  `7bddee7e941400d3b11bd51ce2d73efcf6849e5f6eab2dd84e808e4429debb88`.
+  `efe60e657988c3ef95a150771695dff80a278e7dd0fe2ac3eb8a02b65f30a8f7`.
   The AppImage closure's highest required GLIBC version was **2.35**;
   `.requirements.txt` and verified SHA-256 sidecars were generated.
 - Optimized AppImage extract-and-run: private **native Xorg** map, resize,

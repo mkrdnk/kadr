@@ -497,7 +497,7 @@ app-сценария, реальные mpv/VLC WAV/MP4 и live-каталог. �
 native macOS renderer smoke и package notices. Итоговый оптимизированный
 Linux ELF и strict AppImage/Flatpak построены; AppImage прошёл native Xorg
 pixel/resize/WM-close/Ctrl+Q и native Wayland buffer/quit проверки.
-SHA-256 ELF: `7bddee7e941400d3b11bd51ce2d73efcf6849e5f6eab2dd84e808e4429debb88`.
+SHA-256 финального Linux ELF: `efe60e657988c3ef95a150771695dff80a278e7dd0fe2ac3eb8a02b65f30a8f7`.
 Строгий collector собрал 670 packages / 1222 notice/metadata entries,
 0 warnings; пять точных случаев используют authenticated declared-SPDX policy
 с сохранением найденных реальных notices, без выдуманных copyright-строк.
@@ -536,3 +536,38 @@ smoke и завершил helper с кодом 0. Найден и устранё
 после завершения тестов удерживал PTY. Helper теперь создаёт отдельный private
 bus/process group, не трогает существующий desktop bus, ограниченно завершает
 свои activation services; пять D-Bus/PTY/signal регрессий прошли.
+
+## Итерация 12 — закрытие platform runtime и release gates
+
+В [run 43558661000](https://github.com/mkrdnk/kadr/actions/runs/43558661000)
+**обе платформы** прошли build/check/Clippy, ordinary tests, все три реальные
+HTTP/torrent/save/resume сценария, три дополнительных обязательных повтора
+HTTP fallback и настоящие mpv/VLC WAV/MP4. Повторы не скрывают ошибки:
+падение любого прогона делает job красным.
+
+VLC исправлен по доказанной причине: официальный macOS build не регистрирует
+`--no-one-instance` и `--no-playlist-enqueue` (upstream включает их только
+для Win32/DBus/OS2). Прямой owned CLI child и private oldrc endpoint сохранены;
+два одновременных VLC-сеанса и остановка только своего child подтверждены.
+
+HTTP failure оказался ошибкой fixture: сервер обрывал конечный ответ при
+`WouldBlock`. Linux воспроизведение и macOS diagnostic дали одинаковую цепочку
+origin WouldBlock → transport error → честный отказ atomic save. Fixture теперь
+имеет максимум 16 независимых workers, stop-aware partial writes и прежний
+whole-response budget. Новая concurrency-регрессия сначала упала на прежнем
+serial origin, затем обе новые регрессии прошли за 0.02 с. Production
+HTTP/cache-контракты и трёхсекундная проверка отмены не ослаблены.
+
+Строгие inventory повторены родителем: Linux **670/1222/0 warnings**,
+macOS **618/1157/0 warnings**. Восемь точных macOS upstream notices сохранены
+вместе с Apple SDK caveat и полными MIT/Apache/Zlib terms; ещё пять точных
+деклараций прошли тот же bounded authenticated policy, теперь десять случаев
+суммарно, без автоматического fallback для новых пакетов/версий.
+20 regressions и независимая проверка всех 13 архивов/notice/SPDX hashes прошли.
+Это engineering notice collection, не юридическое одобрение распространения.
+
+Run остался красным **только из-за повторного использования smoke artifact
+directories из Rust cache**, до запуска окон. CI-пути runtime evidence
+перенесены из `target/` в свежий `$RUNNER_TEMP`, package output очищается только
+в одноразовых CI checkout. Нативные пиксели/DMG ранее прошли и просмотрены;
+итоговый полный workflow и оптимизированные CI-кандидаты проверяются далее.

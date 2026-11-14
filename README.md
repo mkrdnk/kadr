@@ -21,7 +21,8 @@ VLC управляется, но явно отмечает недоступну�
 Linux проверен сквозными тестами и реальными GUI-сценариями в X11/Wayland,
 включая каталог → источник → видимый кадр mpv и нативные file/save dialogs.
 На macOS 15 arm64 прошли сборка, ordinary tests, native render и unsigned DMG
-smoke; HTTP fallback save и VLC runtime пока блокируют общий platform gate.
+smoke, реальные mpv/VLC и сквозные HTTP/torrent/save/resume-проверки.
+Версионированные unsigned CI-кандидаты собираются после обоих platform gates.
 Точный статус и релизные ограничения указаны в [DONE.md](DONE.md).
 Подписанный публичный выпуск не объявляется: требуются Apple credentials и
 юридическая проверка third-party notices и ограниченной declared-SPDX policy,

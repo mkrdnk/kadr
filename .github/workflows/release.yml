@@ -60,6 +60,7 @@ jobs:
       - run: cargo build --locked --release -p kadr-app
       - name: Package unsigned Linux candidates
         run: |
+          rm -rf target/dist
           KADR_ALLOW_INCOMPLETE_NOTICES=0 scripts/package-appimage.sh --binary target/release/kadr-app
           KADR_ALLOW_INCOMPLETE_NOTICES=0 scripts/package-flatpak.sh --binary target/release/kadr-app
       - name: AppImage X11 lifecycle
@@ -107,7 +108,10 @@ jobs:
           xcrun --find metal
           test "$(uname -m)" = arm64
       - run: cargo build --locked --release -p kadr-app
-      - run: KADR_ALLOW_INCOMPLETE_NOTICES=0 scripts/package-dmg.sh --binary target/release/kadr-app
+      - name: Package unsigned macOS candidate
+        run: |
+          rm -rf target/dist
+          KADR_ALLOW_INCOMPLETE_NOTICES=0 scripts/package-dmg.sh --binary target/release/kadr-app
       - name: Verify mount and app structure
         run: |
           mkdir -p "$RUNNER_TEMP/kadr-dmg"
@@ -116,7 +120,7 @@ jobs:
           test -x "$RUNNER_TEMP/kadr-dmg/kadr.app/Contents/MacOS/kadr"
           codesign --verify --strict --verbose=2 "$RUNNER_TEMP/kadr-dmg/kadr.app"
           plutil -lint "$RUNNER_TEMP/kadr-dmg/kadr.app/Contents/Info.plist"
-          python3 scripts/smoke-macos.py --binary "$RUNNER_TEMP/kadr-dmg/kadr.app/Contents/MacOS/kadr" --artifacts target/smoke-release-macos --screenshot
+          python3 scripts/smoke-macos.py --binary "$RUNNER_TEMP/kadr-dmg/kadr.app/Contents/MacOS/kadr" --artifacts "$RUNNER_TEMP/smoke-release-macos" --screenshot
           hdiutil detach "$RUNNER_TEMP/kadr-dmg"
           trap - EXIT
       - name: Reject incomplete notices before any authorized upload
@@ -131,8 +135,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kadr-${{ github.sha }}-macos-arm64-unsigned
-          path: |
-            target/dist/
-            target/smoke-release-macos/*.png
+          path: target/dist/
+          retention-days: 7
+          if-no-files-found: error
+      - name: Retain optimized macOS window evidence
+        if: ${{ inputs.retain_artifacts }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kadr-${{ github.sha }}-macos-arm64-render
+          path: ${{ runner.temp }}/smoke-release-macos/*.png
           retention-days: 7
           if-no-files-found: error
