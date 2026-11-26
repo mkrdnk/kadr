@@ -70,6 +70,12 @@ jobs:
           # A hand-made lowercase symlink is not the installed launcher.
           command -v vlc
       - run: cargo fmt --all -- --check
+      - name: Engine and presentation dependency boundary
+        run: |
+          python3 scripts/check-architecture-test.py
+          python3 scripts/check-architecture.py
+      - name: Headless engine checks
+        run: cargo test --locked -p kadr-engine
       - name: Notice collector regressions
         run: python3 scripts/package-licenses-test.py
       - name: Private packaging-session teardown regressions
@@ -82,13 +88,13 @@ jobs:
       - run: cargo test --locked --workspace
       - name: Real HTTP torrent playback and permanent-save acceptance
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: cargo test --locked -p kadr-app backend::tests::real_ -- --ignored --test-threads=1
+        run: cargo test --locked -p kadr-engine tests::real_ -- --ignored --test-threads=1
       - name: Repeat full-response save acceptance without retrying failures
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
           for attempt in 1 2 3; do
             echo "Full-response save acceptance run $attempt (every run must pass)"
-            cargo test --locked -p kadr-app real_http_fallback -- --ignored --test-threads=1
+            cargo test --locked -p kadr-engine real_http_fallback -- --ignored --test-threads=1
           done
       # Runtime checks are independent; collect all failures, never turn them
       # into a pass. The candidates job still requires the entire matrix green.

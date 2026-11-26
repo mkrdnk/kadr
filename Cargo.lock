@@ -3541,25 +3541,12 @@ dependencies = [
 name = "kadr-app"
 version = "0.1.0"
 dependencies = [
- "futures-channel",
  "futures-util",
  "gpui",
- "kadr-cache",
- "kadr-catalog",
- "kadr-core",
- "kadr-media",
- "kadr-storage",
- "kadr-torrent",
+ "kadr-engine",
  "kadr-ui",
- "open",
  "reqwest",
- "rusqlite",
- "serde_json",
- "sha1",
- "sha2 0.10.9",
- "tempfile",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]
@@ -3599,6 +3586,29 @@ dependencies = [
  "serde",
  "sha2 0.10.9",
  "url",
+]
+
+[[package]]
+name = "kadr-engine"
+version = "0.1.0"
+dependencies = [
+ "futures-channel",
+ "futures-util",
+ "kadr-cache",
+ "kadr-catalog",
+ "kadr-core",
+ "kadr-media",
+ "kadr-storage",
+ "kadr-torrent",
+ "open",
+ "reqwest",
+ "rusqlite",
+ "serde_json",
+ "sha1",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -7088,6 +7098,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "libc",
  "pin-project-lite",
  "tokio",

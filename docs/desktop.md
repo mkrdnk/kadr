@@ -5,6 +5,62 @@
 видео самостоятельно. Единственные нативные операции контроллера — чтение
 буфера по нажатию и диалоги выбора файла, каталога и места сохранения.
 
+## Архитектурная граница
+
+Приложение разделено на два слоя, работающих в одном процессе:
+
+```text
+kadr-app (desktop adapter) + kadr-ui (GPUI presentation)
+              Command ↓       ↑ Event
+                 kadr-engine
+                      │
+         core / storage / media / torrent / catalog / cache
+```
+
+- `kadr-engine` — самостоятельная библиотека без GPUI. Она владеет worker,
+  каталогом, источниками, торрентами, streaming, плеерами, SQLite и кэшем.
+  Нижележащие `kadr-core`, `kadr-storage`, `kadr-media`, `kadr-torrent`,
+  `kadr-catalog` и `kadr-cache` остаются её реализацией.
+- `kadr-app` — клиент API движка. `desktop.rs` переводит `UiEvent` в `Command`
+  и `Event` в экранные обновления. `desktop_models.rs` отвечает только за
+  преобразование публичных данных движка в presentation DTO.
+- `kadr-ui` содержит экранные модели, ввод, формы, навигацию и рендеринг.
+  Его `UiEvent` не является API движка: выбор файла или вставка ссылки —
+  действия desktop-интерфейса, а не медиаядра.
+
+`Engine::start()` возвращает handle и поток `Event`. Для независимого клиента
+или изолированных тестов `Engine::start_with_directories(EngineDirectories)`
+принимает собственные каталоги данных, настроек и кэша. Клиент отправляет
+`Command` через `dispatch`; успешная постановка команды в очередь не означает
+успех операции. Результат подтверждается событием. `cancel()` начинает
+завершение, `join()` отменяет работу и дожидается освобождения ресурсов.
+Блокирующий `join()` нельзя вызывать в UI event loop.
+
+Публичные `Settings`, `CacheUsage`, `LibraryItem` и `SourceCandidate` принадлежат
+движку, а не SQLite/кэшу или GPUI. Строка библиотеки передаёт непрозрачный `id`:
+UI возвращает его в `OpenLibrary`, не собирая из внутренних ключей БД.
+В события источников и библиотеки не входят приватные URL, сохранённые
+дескрипторы источников или пути торрентов. Общие provider-neutral модели
+метаданных и валидируемого ручного ввода переиспользуются из `kadr-core`
+через `kadr_engine::catalog` и `kadr_engine::source`.
+
+Загрузчик постеров остаётся инфраструктурой интерфейса: он реализует GPUI
+HTTP client. Его локальная политика по умолчанию выключена; desktop применяет
+подтверждённый `catalog_enabled` из событий движка до обновления экрана.
+Выход или закрытие event stream отключает постеры и отменяет текущие запросы.
+Движок не обращается к HTTP client интерфейса и не знает про `--smoke-ui`.
+
+Чтобы заменить UI, достаточно нового клиента команд/событий и своего
+presentation adapter. Чтобы изменить storage, каталог или playback,
+нужно сохранить семантику публичного API либо явно обновить его клиентов.
+Новый транспорт, сериализация, локализация статусов и несколько одновременных
+клиентов не входят в этот контракт: отдельный процесс/IPC здесь не вводится.
+
+Направление зависимостей проверяет `scripts/check-architecture.py`:
+desktop не может обходить engine и обращаться к нижним workspace-crates;
+UI не импортирует engine; engine и его workspace-зависимости не импортируют
+GPUI или presentation-crates.
+
 ## Запуск
 
 1. Установите отдельно mpv или VLC и запустите
@@ -101,7 +157,8 @@ mpv/VLC зависит от реальной доступной телеметр
 ## Потоки, события и завершение
 
 - `kadr-ui` владеет только отображаемыми DTO и испускает `UiEvent`.
-- `desktop.rs` преобразует события в `Command`, а ответы — в setters экрана.
+- `desktop.rs` преобразует события в `kadr_engine::Command`, а ответы
+  `kadr_engine::Event` — в setters экрана.
   Источник, торрент-сессия и плеер не дублируются в контроллере.
 - `SearchState` и `SourcesState` различают loading, ready (включая пустой
   результат) и error. Успех снимает прежнюю ошибку или индикатор загрузки.
@@ -118,8 +175,12 @@ mpv/VLC зависит от реальной доступной телеметр
 ## Проверки
 
 ```sh
+python3 scripts/check-architecture-test.py
+python3 scripts/check-architecture.py
+cargo test --locked -p kadr-engine
 cargo test --locked -p kadr-app desktop::
 cargo test --locked --workspace
+cargo test --locked -p kadr-engine tests::real_ -- --ignored --test-threads=1
 cargo test --locked -p kadr-media --test players_smoke -- --ignored --nocapture
 cargo test --locked -p kadr-media --test video_smoke -- --ignored --nocapture
 ```

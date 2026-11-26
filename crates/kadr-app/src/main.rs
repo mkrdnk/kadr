@@ -1,4 +1,3 @@
-mod backend;
 mod desktop;
 mod posters;
 
@@ -31,8 +30,9 @@ fn main() -> ExitCode {
     let desktop = Rc::new(RefCell::new(None::<Rc<RefCell<desktop::Desktop>>>));
     let running_desktop = desktop.clone();
 
+    let poster_policy = posters::PosterPolicy::default();
     let application = Application::new();
-    let application = match posters::Posters::new() {
+    let application = match posters::Posters::new(poster_policy.clone()) {
         Ok(client) => application.with_http_client(std::sync::Arc::new(client)),
         Err(_) => application,
     };
@@ -68,7 +68,7 @@ fn main() -> ExitCode {
         if let Err(error) = cx.open_window(options, |window, cx| {
             window.set_window_title("kadr");
             let view = cx.new(|_| KadrView::new());
-            match desktop::attach(&view, cx) {
+            match desktop::attach(&view, poster_policy.clone(), smoke_ui, cx) {
                 Ok(desktop) => *running_desktop.borrow_mut() = Some(desktop),
                 Err(_) => view.update(cx, |view, cx| {
                     view.set_status(

@@ -1,18 +1,44 @@
-//! UI-independent command boundary. One worker owns SQLite, sessions and cache.
+//! UI-independent media engine. One worker owns SQLite, sessions and cache.
+//!
+//! Start an [`Engine`], consume its [`Event`] stream, and send [`Command`] values
+//! after [`Event::Ready`]. Enqueuing a command is not an acknowledgement: settings,
+//! playback and library changes are confirmed by events. The client owns native
+//! dialogs, presentation state and any GUI-framework integration.
+//!
+//! [`Engine::cancel`] is non-blocking. Call [`Engine::join`] outside the UI event
+//! loop to wait for player teardown, pending saves and storage cleanup.
+mod dto;
 mod playback;
 #[cfg(test)]
 mod tests;
 mod worker;
 
+pub use dto::{
+    CacheUsage, EngineDirectories, LibraryEpisode, LibraryItem, LibraryProgress, NetworkLimits,
+    PlayerPreference, RateLimit, Settings, SourceCandidate,
+};
+pub use kadr_core::source;
+
+/// Provider-neutral metadata, without actionable source descriptors.
+///
+/// Source events use the engine's own [`crate::SourceCandidate`], not the internal
+/// catalog type that carries playback URLs.
+///
+/// ```compile_fail
+/// use kadr_engine::catalog::SourceCandidate;
+/// ```
+pub mod catalog {
+    pub use kadr_core::catalog::{Episode, Media, MediaKind};
+}
+
 use std::{path::PathBuf, thread};
 
 use futures_channel::mpsc::{UnboundedReceiver, unbounded};
-use kadr_cache::CacheUsage;
 use kadr_core::{
-    catalog::{Media, SourceCandidate},
+    catalog::Media,
     source::{ManualSource, SourceKind},
 };
-use kadr_storage::{AppPaths, LibraryItem, PlayerPreference, Settings};
+use kadr_storage::AppPaths;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -114,7 +140,8 @@ struct Request {
     cancel: CancellationToken,
 }
 
-pub struct Backend {
+/// Single-client command handle with an independent worker and event stream.
+pub struct Engine {
     commands: mpsc::Sender<Request>,
     shutdown: CancellationToken,
     catalog_stop: CancellationToken,
@@ -124,9 +151,31 @@ pub struct Backend {
     thread: Option<thread::JoinHandle<()>>,
 }
 
-impl Backend {
+impl Engine {
+    /// Starts using the platform's application directories.
+    ///
+    /// Startup I/O failures arrive as events followed by stream closure, without
+    /// a `Ready` event. The returned error only covers failure to spawn the worker.
     pub fn start() -> std::io::Result<(Self, UnboundedReceiver<Event>)> {
         Self::start_with(None, false)
+    }
+
+    /// Starts the engine using validated, user-selected application roots.
+    pub fn start_with_directories(
+        directories: EngineDirectories,
+    ) -> std::io::Result<(Self, UnboundedReceiver<Event>)> {
+        let paths = AppPaths::from_roots(
+            directories.data_directory,
+            directories.config_directory,
+            directories.cache_directory,
+        )
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Недопустимые пользовательские каталоги.",
+            )
+        })?;
+        Self::start_with(Some(paths), false)
     }
 
     fn start_with(
@@ -182,6 +231,10 @@ impl Backend {
         ))
     }
 
+    /// Tries to enqueue a command without blocking the caller.
+    ///
+    /// Returns false if the queue is full or the worker has stopped. Cancellation
+    /// of superseded work happens immediately, even if the queue rejects a command.
     pub fn dispatch(&mut self, command: Command) -> bool {
         // Cancellation bypasses the queue: a pending metadata/IPC operation
         // cannot prevent Stop, a newer search, or application shutdown.
@@ -245,11 +298,12 @@ impl Backend {
         self.commands.try_send(Request { command, cancel }).is_ok()
     }
 
+    /// Requests shutdown without blocking; use `join` to wait for completion.
     pub fn cancel(&self) {
         self.shutdown.cancel();
     }
 
-    /// GPUI gives quit observers 100ms. Join after its platform loop has exited.
+    /// Cancels outstanding work and waits for owned resources to stop.
     pub fn join(&mut self) -> bool {
         self.cancel();
         self.thread
@@ -258,7 +312,7 @@ impl Backend {
     }
 }
 
-impl Drop for Backend {
+impl Drop for Engine {
     fn drop(&mut self) {
         self.cancel();
     }

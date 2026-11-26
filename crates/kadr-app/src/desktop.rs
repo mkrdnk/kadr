@@ -1,15 +1,14 @@
 //! GPUI bridge. Only clipboard access and native dialogs happen on this thread.
-//! All storage, cache, network and process work belongs to `Backend`.
+//! Media storage, cache, network and process work belongs to `Engine`.
 
 use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
 use futures_util::StreamExt;
 use gpui::{App, Context, Entity, PathPromptOptions};
-use kadr_core::source::ManualSource;
-use kadr_storage::Settings;
+use kadr_engine::{AsyncState, Command, Engine, Event, Level, Settings, source::ManualSource};
 use kadr_ui::{KadrView, Section, SectionState, SourcePreview, UiEvent, UiStatus};
 
-use crate::backend::{AsyncState, Backend, Command, Event, Level};
+use crate::posters::PosterPolicy;
 
 #[path = "desktop_models.rs"]
 mod models;
@@ -29,7 +28,7 @@ impl SourceRequests {
 }
 
 pub struct Desktop {
-    backend: Backend,
+    backend: Engine,
     ready: bool,
     closed: bool,
     active: bool,
@@ -123,8 +122,13 @@ impl Desktop {
     }
 }
 
-pub fn attach(view: &Entity<KadrView>, cx: &mut App) -> std::io::Result<Rc<RefCell<Desktop>>> {
-    let (backend, mut events) = Backend::start()?;
+pub fn attach(
+    view: &Entity<KadrView>,
+    poster_policy: PosterPolicy,
+    smoke_ui: bool,
+    cx: &mut App,
+) -> std::io::Result<Rc<RefCell<Desktop>>> {
+    let (backend, mut events) = Engine::start()?;
     let desktop = Rc::new(RefCell::new(Desktop {
         backend,
         ready: false,
@@ -344,7 +348,9 @@ pub fn attach(view: &Entity<KadrView>, cx: &mut App) -> std::io::Result<Rc<RefCe
     .detach();
 
     let state = desktop.clone();
+    let quit_poster_policy = poster_policy.clone();
     cx.on_app_quit(move |_| {
+        quit_poster_policy.set_enabled(false);
         state.borrow().backend.cancel();
         async {}
     })
@@ -354,12 +360,18 @@ pub fn attach(view: &Entity<KadrView>, cx: &mut App) -> std::io::Result<Rc<RefCe
     let view = view.downgrade();
     cx.spawn(async move |cx| {
         while let Some(event) = events.next().await {
+            // Apply confirmed catalogue policy before rendering new poster URLs.
+            poster_policy.apply_event(&event);
+            if smoke_ui && matches!(&event, Event::Ready { .. }) {
+                eprintln!("kadr-ui-smoke: backend-ready");
+            }
             let Ok(()) = view.update(cx, |view, cx| {
                 apply_event(&mut state.borrow_mut(), view, event, cx);
             }) else {
                 break;
             };
         }
+        poster_policy.set_enabled(false);
         // EOF is terminal: never leave usable launch controls after a worker
         // panic, failed initialization or orderly shutdown.
         let mut state = state.borrow_mut();

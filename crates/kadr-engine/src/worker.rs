@@ -214,15 +214,11 @@ pub(super) async fn run(
             return;
         }
     };
-    crate::posters::set_enabled(settings.catalog_enabled);
-    if std::env::args_os().any(|argument| argument == "--smoke-ui") {
-        eprintln!("kadr-ui-smoke: backend-ready");
-    }
     let (save_progress, mut progress) = mpsc::unbounded_channel();
     let (catalog_results, mut answers) = mpsc::unbounded_channel();
     let _ = events.unbounded_send(Event::Ready {
-        settings: settings.clone(),
-        cache: cache.usage().ok(),
+        settings: super::Settings::from_storage(settings.clone()),
+        cache: cache.usage().ok().map(super::CacheUsage::from_cache),
     });
     // Keep database ownership on this worker for the entire application lifetime.
     let mut worker = Worker {
@@ -295,7 +291,6 @@ pub(super) async fn run(
     worker.close_active("").await;
     worker.catalog_jobs.abort_all();
     while worker.catalog_jobs.join_next().await.is_some() {}
-    crate::posters::set_enabled(false);
 }
 
 impl Worker {
@@ -445,6 +440,7 @@ impl Worker {
                     .await
             }
             Command::OpenIn(player) => {
+                let player = player.into_storage();
                 if self.active.is_some() {
                     self.switch_player(player).await;
                 } else {
@@ -459,11 +455,11 @@ impl Worker {
                     self.open_library(&id, cancel).await;
                 }
             }
-            Command::UpdateSettings(settings) => self.update_settings(settings),
+            Command::UpdateSettings(settings) => self.update_settings(settings.into_storage()),
             Command::ClearCache => {
                 match self.cache.clear_inactive() {
                     Ok(usage) => {
-                        self.send(Event::CacheUsage(usage));
+                        self.send(Event::CacheUsage(super::CacheUsage::from_cache(usage)));
                         self.status(Level::Info, "Неактивный кэш очищен. Активная сессия и сохранённые файлы не удалены.");
                     }
                     Err(error) => self.status(Level::Error, &error.to_string()),
@@ -600,7 +596,12 @@ impl Worker {
             CatalogAnswer::Sources(result) => match result {
                 Ok(sources) => {
                     self.sources = sources.clone();
-                    self.send(Event::SourcesState(AsyncState::Ready(sources)));
+                    self.send(Event::SourcesState(AsyncState::Ready(
+                        sources
+                            .into_iter()
+                            .map(super::SourceCandidate::from_core)
+                            .collect(),
+                    )));
                 }
                 Err(message) => self.send(Event::SourcesState(AsyncState::Error(message))),
             },
@@ -1364,7 +1365,7 @@ impl Worker {
         self.send(Event::Transfer(None));
         self.publish_library();
         if let Ok(usage) = self.cache.usage() {
-            self.send(Event::CacheUsage(usage));
+            self.send(Event::CacheUsage(super::CacheUsage::from_cache(usage)));
         }
         if !message.is_empty() {
             self.status(
@@ -1459,7 +1460,12 @@ impl Worker {
 
     fn publish_library(&self) {
         match self.storage.library_targets(1000) {
-            Ok(items) => self.send(Event::Library(items)),
+            Ok(items) => self.send(Event::Library(
+                items
+                    .into_iter()
+                    .map(super::LibraryItem::from_storage)
+                    .collect(),
+            )),
             Err(_) => self.status(
                 Level::Error,
                 "Не удалось прочитать библиотеку. Данные не сброшены.",
@@ -1615,7 +1621,7 @@ impl Worker {
         {
             let message = "Остановите сессию перед изменением сети, пути или лимита кэша. Выбор плеера можно менять во время просмотра.";
             self.send(Event::PreferencesRejected {
-                settings: self.settings.clone(),
+                settings: super::Settings::from_storage(self.settings.clone()),
                 message: message.into(),
             });
             self.status(Level::Warning, message);
@@ -1667,9 +1673,10 @@ impl Worker {
             self.cache = cache;
         }
         self.settings = settings;
-        crate::posters::set_enabled(self.settings.catalog_enabled);
         self.catalog = catalog;
-        self.send(Event::PreferencesSaved(self.settings.clone()));
+        self.send(Event::PreferencesSaved(super::Settings::from_storage(
+            self.settings.clone(),
+        )));
         if !self.settings.catalog_enabled {
             self.sources.clear();
             self.send(Event::SearchState(AsyncState::Error(
@@ -1679,14 +1686,14 @@ impl Worker {
             self.send(Event::SourcesState(AsyncState::Ready(Vec::new())));
         }
         if let Ok(usage) = self.cache.usage() {
-            self.send(Event::CacheUsage(usage));
+            self.send(Event::CacheUsage(super::CacheUsage::from_cache(usage)));
         }
         self.publish_selection();
     }
 
     fn reject_settings(&self, message: &str) {
         self.send(Event::PreferencesRejected {
-            settings: self.settings.clone(),
+            settings: super::Settings::from_storage(self.settings.clone()),
             message: message.into(),
         });
         self.status(Level::Error, message);

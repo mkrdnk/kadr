@@ -1,16 +1,15 @@
 //! Pure display conversions. Never copy source URLs or descriptors into UI DTOs.
 
-use kadr_core::{
-    catalog::{Media, MediaKind, SourceCandidate},
-    source::{ManualSource, SourceKind},
+use kadr_engine::{
+    CacheUsage, FileChoice, LibraryItem, PlayerPreference, RateLimit, Settings, SourceCandidate,
+    TransferStatus,
+    catalog::{Media, MediaKind},
+    source::SourceKind,
 };
-use kadr_storage::{PlayerPreference, RateLimit, Settings};
 use kadr_ui::{
     EpisodeRow, LibraryRow, MediaCard, PlayerChoice, PreferencesDraft, RateLimit as UiRateLimit,
     SourceKind as UiSourceKind, SourceRow, TorrentFileRow, TransferView,
 };
-
-use crate::backend::{FileChoice, TransferStatus};
 
 pub(super) fn preference(player: PlayerChoice) -> PlayerPreference {
     match player {
@@ -36,7 +35,7 @@ fn display_rate(limit: RateLimit) -> UiRateLimit {
     }
 }
 
-fn storage_rate(limit: UiRateLimit) -> RateLimit {
+fn engine_rate(limit: UiRateLimit) -> RateLimit {
     match limit {
         UiRateLimit::Paused => RateLimit::Paused,
         UiRateLimit::Unlimited => RateLimit::Unlimited,
@@ -64,13 +63,13 @@ pub(super) fn settings_from_draft(
     mut settings: Settings,
     draft: &PreferencesDraft,
 ) -> Result<Settings, &'static str> {
-    // Do not truncate a UI integer to the storage type. All semantic limits
+    // Do not truncate a UI integer to the engine type. All semantic limits
     // remain the backend's responsibility, including zero versus unlimited.
     let peers = u16::try_from(draft.peer_limit)
         .map_err(|_| "Число соединений не помещается в допустимый диапазон.")?;
     settings.cache_limit_bytes = draft.cache_limit_bytes;
-    settings.network.download = storage_rate(draft.download_limit);
-    settings.network.upload = storage_rate(draft.upload_limit);
+    settings.network.download = engine_rate(draft.download_limit);
+    settings.network.upload = engine_rate(draft.upload_limit);
     settings.network.max_connections = peers;
     settings.network.torrents_enabled = draft.torrents_enabled;
     settings.catalog_enabled = draft.catalog_enabled;
@@ -134,15 +133,10 @@ pub(super) fn media_card(media: Media) -> MediaCard {
 }
 
 pub(super) fn source_row(index: usize, source: SourceCandidate) -> SourceRow {
-    let kind = ManualSource::parse_link(&source.url)
-        .ok()
-        .map(|source| source.kind());
     SourceRow {
         index,
         title: source.title,
-        kind: kind
-            .map(|kind| source_kind(Some(kind)))
-            .unwrap_or(UiSourceKind::Http),
+        kind: source_kind(Some(source.kind)),
         quality: source.quality,
         language: source.language,
         origin: source.origin,
@@ -178,37 +172,24 @@ fn seconds(value: f64) -> Option<u64> {
     (value.is_finite() && value >= 0.0 && value < u64::MAX as f64).then_some(value as u64)
 }
 
-pub(super) fn library_row(item: kadr_storage::LibraryItem) -> LibraryRow {
-    let title = item
-        .media
-        .as_ref()
-        .map(|media| media.title.clone())
-        .unwrap_or_else(|| "Ручной источник".into());
+pub(super) fn library_row(item: LibraryItem) -> LibraryRow {
     let progress = item.progress.as_ref();
     let details = match progress {
         Some(progress) if progress.completed => "Просмотр завершён".into(),
-        _ if item.target.episode.is_some() => {
-            let episode = item.target.episode.as_ref().expect("checked episode");
-            format!("Сезон {}, серия {}", episode.season, episode.episode)
+        _ if item.episode.is_some() => {
+            let episode = item.episode.as_ref().expect("checked episode");
+            format!("Сезон {}, серия {}", episode.season, episode.number)
         }
         Some(_) => "Есть сохранённая позиция".into(),
         None if item.opened_at.is_some() => "Ранее открыто".into(),
-        None if item.entry.favorite => "В избранном".into(),
+        None if item.favorite => "В избранном".into(),
         None => "Источник подготовлен".into(),
     };
     LibraryRow {
-        id: match item.target.episode {
-            Some(episode) => format!(
-                "{}@{}:{}",
-                item.target.media_id.as_str(),
-                episode.season,
-                episode.episode
-            ),
-            None => item.target.media_id.as_str().to_owned(),
-        },
-        title,
+        id: item.id,
+        title: item.title,
         details,
-        favorite: item.entry.favorite,
+        favorite: item.favorite,
         opened_at: item.opened_at,
         completed: progress.is_some_and(|value| value.completed),
         position: progress.and_then(|progress| seconds(progress.position_seconds)),
@@ -216,7 +197,7 @@ pub(super) fn library_row(item: kadr_storage::LibraryItem) -> LibraryRow {
     }
 }
 
-pub(super) fn cache_usage(usage: &kadr_cache::CacheUsage) -> String {
+pub(super) fn cache_usage(usage: &CacheUsage) -> String {
     format!(
         "Временный кэш: {} байт; зарезервировано: {} байт; лимит: {} байт. Активных записей: {}.",
         usage.actual_bytes, usage.reserved_bytes, usage.limit_bytes, usage.active_entries,
@@ -289,9 +270,9 @@ mod tests {
     }
 
     #[test]
-    fn source_rows_keep_provenance_but_never_the_private_url() {
+    fn source_rows_preserve_engine_kind_index_and_provenance() {
         let source = SourceCandidate {
-            url: "https://example.invalid/video.mp4?token=private-secret".into(),
+            kind: SourceKind::Magnet,
             title: "Разрешённое видео".into(),
             quality: Some("720p".into()),
             language: None,
@@ -300,16 +281,11 @@ mod tests {
         };
         let row = source_row(7, source);
         assert_eq!(row.index, 7);
-        assert_eq!(row.kind, UiSourceKind::Http);
+        assert_eq!(row.kind, UiSourceKind::Magnet);
         assert_eq!(row.quality.as_deref(), Some("720p"));
         assert_eq!(row.language, None);
         assert_eq!(row.license.as_deref(), Some("CC0"));
-        let displayed = format!(
-            "{} {:?} {:?} {} {:?}",
-            row.title, row.quality, row.language, row.origin, row.license,
-        );
-        assert!(!displayed.contains("private-secret"));
-        assert!(!displayed.contains("example.invalid"));
+        assert_eq!(row.origin, "Публичный каталог");
     }
 
     #[test]
@@ -322,7 +298,7 @@ mod tests {
             description: "Описание".into(),
             poster_url: None,
             kind: MediaKind::Series,
-            episodes: vec![kadr_core::catalog::Episode {
+            episodes: vec![kadr_engine::catalog::Episode {
                 season: 2,
                 number: 3,
                 title: "Эпизод".into(),
@@ -360,6 +336,49 @@ mod tests {
         assert_eq!(row.size, 1234);
         assert_eq!((row.season, row.episode), (Some(2), Some(3)));
         assert!(row.ambiguous);
+    }
+
+    #[test]
+    fn library_rows_keep_opaque_ids_and_do_not_invent_progress() {
+        let row = library_row(LibraryItem {
+            id: "test:series@2:3".into(),
+            title: "Series".into(),
+            favorite: true,
+            opened_at: Some(123),
+            episode: Some(kadr_engine::LibraryEpisode {
+                season: 2,
+                number: 3,
+            }),
+            progress: None,
+        });
+        assert_eq!(row.id, "test:series@2:3");
+        assert_eq!(row.details, "Сезон 2, серия 3");
+        assert!(row.favorite);
+        assert_eq!(row.opened_at, Some(123));
+        assert_eq!(row.position, None);
+        assert_eq!(row.duration, None);
+        assert!(!row.completed);
+    }
+
+    #[test]
+    fn library_rows_display_only_measured_progress() {
+        let row = library_row(LibraryItem {
+            id: "opaque-item".into(),
+            title: "Movie".into(),
+            favorite: false,
+            opened_at: None,
+            episode: None,
+            progress: Some(kadr_engine::LibraryProgress {
+                position_seconds: 61.9,
+                duration_seconds: Some(f64::NAN),
+                completed: true,
+            }),
+        });
+        assert_eq!(row.id, "opaque-item");
+        assert_eq!(row.details, "Просмотр завершён");
+        assert_eq!(row.position, Some(61));
+        assert_eq!(row.duration, None);
+        assert!(row.completed);
     }
 
     #[test]

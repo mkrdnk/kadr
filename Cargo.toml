@@ -4,6 +4,7 @@ members = [
     "crates/kadr-cache",
     "crates/kadr-catalog",
     "crates/kadr-core",
+    "crates/kadr-engine",
     "crates/kadr-media",
     "crates/kadr-storage",
     "crates/kadr-torrent",

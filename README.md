@@ -47,8 +47,10 @@ smoke, реальные mpv/VLC и сквозные HTTP/torrent/save/resume-п�
 
 Workspace содержит:
 
-- `crates/kadr-app` — окно, контроллер и отдельный worker SQLite/плееров.
+- `crates/kadr-app` — desktop-точка входа, GPUI-контроллер, нативные диалоги и постеры.
 - `crates/kadr-ui` — GPUI-экраны без дискового/сетевого IO.
+- `crates/kadr-engine` — независимый от UI движок: публичные команды/события,
+  прикладные сценарии и отдельный worker SQLite/плееров.
 - `crates/kadr-core` — проверка источников, stable ID, эпизоды и состояния.
 - `crates/kadr-catalog` — Internet Archive и TVmaze; метаданные и источники разделены.
 - `crates/kadr-cache` — durable reservations, LRU, активные leases и atomic saves.
@@ -56,6 +58,11 @@ Workspace содержит:
 - `crates/kadr-storage` — стандартные каталоги, SQLite, настройки/история/прогресс.
 - `crates/kadr-torrent` — librqbit engine с magnet metadata, лимитами и verified
   streaming; прежний local-only spike оставлен для воспроизводимых регрессий.
+
+Интерфейс обращается к движку только через API `kadr-engine`, а не напрямую
+к хранилищу, каталогу или плеерам. Движок не зависит от GPUI и собирается и
+тестируется отдельно: `cargo test --locked -p kadr-engine`.
+Граница и правила её изменения описаны в [docs/desktop.md](docs/desktop.md).
 
 Контракты и команды:
 [desktop-сценарий](docs/desktop.md),
@@ -202,13 +209,16 @@ XWayland-проверка не заменяет проверку в отдель
 
 ```sh
 cargo fmt --all -- --check
+python3 scripts/check-architecture-test.py
+python3 scripts/check-architecture.py
+cargo test --locked -p kadr-engine
 cargo check --locked --workspace --all-targets
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
 cargo test --locked --workspace -- --ignored --test-threads=1
 ```
 
-Первые четыре команды также доступны как `make fmt`, `make check`,
+Проверки Rust workspace также доступны как `make fmt`, `make check`,
 `make clippy` и `make test`. Цель `fmt` только проверяет форматирование,
 не изменяя файлы; opt-in `--ignored`-тесты запускаются отдельно.
 
@@ -217,7 +227,7 @@ cargo test --locked --workspace -- --ignored --test-threads=1
 ```sh
 cargo test --locked -p kadr-media --test players_smoke -- --ignored --nocapture
 cargo test --locked -p kadr-media --test video_smoke -- --ignored --nocapture
-cargo test --locked -p kadr-app backend::tests::real_ -- --ignored --nocapture --test-threads=1
+cargo test --locked -p kadr-engine tests::real_ -- --ignored --nocapture --test-threads=1
 ```
 
 Они используют собственные PCM-данные и сгенерированное FFmpeg MPEG4/AAC-видео,

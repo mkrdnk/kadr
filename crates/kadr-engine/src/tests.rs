@@ -1,6 +1,6 @@
 //! Command/event acceptance tests. Ordinary tests never launch a player or browser.
-//! Run the two real-media tests explicitly with `cargo test -p kadr-app
-//! backend::tests::real_ -- --ignored --test-threads=1`.
+//! Run real-media tests explicitly with `cargo test -p kadr-engine
+//! tests::real_ -- --ignored --test-threads=1`.
 //!
 //! All media is generated locally; all peers and HTTP origins are loopback-only.
 //! No public catalogs, trackers, DHT, downloaded fixtures, or user directories.
@@ -20,7 +20,7 @@ use std::{
 };
 
 use kadr_storage::{
-    EpisodeKey, MediaId, PlaybackProgress, PlaybackTarget, ProgressOrigin, RateLimit, SavedFile,
+    EpisodeKey, MediaId, PlaybackProgress, PlaybackTarget, ProgressOrigin, SavedFile,
     SourceId, Storage, StoredSource,
 };
 use sha1::{Digest, Sha1};
@@ -35,14 +35,14 @@ fn paths(root: &Path) -> AppPaths {
 
 /// Own the worker even when an assertion unwinds, before its tempdir is deleted.
 struct App {
-    backend: Backend,
+    backend: Engine,
     events: UnboundedReceiver<Event>,
 }
 
 impl App {
     fn start(paths: &AppPaths) -> Self {
         let (backend, events) =
-            Backend::start_with(Some(paths.clone()), true).expect("start isolated backend worker");
+            Engine::start_with(Some(paths.clone()), true).expect("start isolated engine worker");
         Self { backend, events }
     }
 
@@ -220,8 +220,7 @@ fn assert_public_feedback_is_private(event: &Event) {
         }
         Event::SearchState(AsyncState::Error(message))
         | Event::SourcesState(AsyncState::Error(message)) => check(message),
-        // Library descriptors intentionally contain the approved private URL.
-        // Their Debug representations must not reveal it.
+        // Library snapshots contain no source descriptors and redact private titles.
         Event::Library(items) => check(&format!("{items:?}")),
         _ => {}
     }
@@ -293,7 +292,7 @@ fn settings_round_trip_rejects_invalid_updates_and_unusable_cache_without_reset(
     let storage = Storage::open(&paths.database_path()).unwrap();
     assert_eq!(
         storage.load_settings().unwrap(),
-        changed,
+        changed.clone().into_storage(),
         "failed edits must not persist"
     );
     drop(storage);
@@ -520,7 +519,7 @@ fn torrent_file_choices_are_offline_episode_aware_and_require_consent_to_play() 
             .unwrap()
             .load_settings()
             .unwrap(),
-        settings
+        settings.into_storage()
     );
     let payload = paths.cache_dir().join("torrents-v1/data");
     assert!(
@@ -563,7 +562,7 @@ fn cache_quota_rejects_whole_torrent_before_network_or_player_launch() {
     });
     app.finish();
     let storage = Storage::open(&paths.database_path()).unwrap();
-    assert_eq!(storage.load_settings().unwrap(), settings);
+    assert_eq!(storage.load_settings().unwrap(), settings.into_storage());
     assert!(
         storage.history(10).unwrap().is_empty(),
         "quota failure must not pretend playback started"
@@ -607,7 +606,7 @@ fn browser_rejects_unstable_http_without_opening_system_browser_or_inventing_pro
     );
     assert_eq!(
         storage.load_settings().unwrap().default_player,
-        PlayerPreference::Browser
+        PlayerPreference::Browser.into_storage()
     );
 }
 
@@ -683,7 +682,14 @@ fn library_open_restores_descriptor_and_episode_without_mutating_37_second_progr
     app.ready();
     app.wait("startup library resumes latest episode", |event| {
         matches!(event, Event::Library(items) if items.iter().any(|item|
-            item.target == target && item.progress.as_ref() == Some(&first) && item.entry.favorite))
+            item.id == library_id(&target)
+                && item.episode == Some(LibraryEpisode { season: 2, number: 7 })
+                && item.progress == Some(LibraryProgress {
+                    position_seconds: first.position_seconds,
+                    duration_seconds: first.duration_seconds,
+                    completed: first.completed,
+                })
+                && item.favorite))
     });
     app.command(Command::OpenLibrary(library_id(&target)));
     app.selected();
@@ -745,8 +751,8 @@ fn clearing_history_preserves_favorites_saved_files_and_reopen_identity() {
     });
     app.command(Command::ClearHistory);
     app.wait("library cleared except favorite/saved identity", |event| {
-        matches!(event, Event::Library(items) if items.iter().all(|item| item.progress.is_none() && item.entry.favorite)
-            && items.iter().any(|item| item.target == target))
+        matches!(event, Event::Library(items) if items.iter().all(|item| item.progress.is_none() && item.favorite)
+            && items.iter().any(|item| item.id == library_id(&target)))
     });
     app.command(Command::ClearCache);
     app.wait("cache cleared", |event| {
@@ -863,7 +869,7 @@ fn selecting_another_library_torrent_file_recomputes_its_episode_target() {
         discovery_enabled: false,
         ..EngineOptions::default()
     };
-    let (backend, events) = Backend::start_with_network(Some(paths), true, Some(options)).unwrap();
+    let (backend, events) = Engine::start_with_network(Some(paths), true, Some(options)).unwrap();
     let mut app = App { backend, events };
     app.ready();
     app.command(Command::OpenLibrary(library_id(&first)));
@@ -1752,7 +1758,7 @@ fn real_torrent_plays_before_completion_protects_active_cache_and_saves_verified
         upload_limit: EngineRate::Paused,
         peer_limit: 1,
     };
-    let (backend, events) = Backend::start_with_network(Some(paths.clone()), true, Some(options))
+    let (backend, events) = Engine::start_with_network(Some(paths.clone()), true, Some(options))
         .expect("start backend with explicit loopback peer");
     let mut app = App { backend, events };
     let mut settings = app.ready();
@@ -1847,7 +1853,7 @@ fn real_torrent_plays_before_completion_protects_active_cache_and_saves_verified
     });
     assert_eq!(
         storage.load_settings().unwrap(),
-        settings,
+        settings.clone().into_storage(),
         "active cache/network policy remains stable"
     );
 
