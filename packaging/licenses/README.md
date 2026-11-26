@@ -9,8 +9,10 @@ without a final newline; hash the decoded UTF-8 bytes, not the JSON container.
 
 `scripts/package-licenses.py` verifies those bindings offline before embedding
 the notices and provenance. It never fetches upstream during packaging. The
-root package license, vendored GPUI Apache text/modification ADR, and local
-cached-crate notices are collected separately.
+root package license and local cached-crate notices are collected separately.
+GPUI currently uses the ordinary crates.io notice collection. Its retained,
+inactive vendored fallback contributes the Apache text/modification ADR only
+if the local Cargo override is re-enabled.
 
 ## Authenticated standard declarations
 

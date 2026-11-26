@@ -152,8 +152,12 @@ conflicts, unreviewed versions and checksum failures still block collection.
 The [decision record](../packaging/licenses/POLICY.md) explains this refinement
 of the initial overly strict text-file-only rule and is embedded in each format.
 
-For vendored GPUI, every format includes its `LICENSE-APACHE`, the complete
-`docs/adr-gpui-x11.md` provenance, and an explicit modification notice. AppImage
+GPUI currently comes from crates.io without local modifications, so its notices
+are collected through the ordinary cached-crate path. The retained `vendor/gpui`
+fallback is not part of the dependency graph or distributed notices. If its
+local override is re-enabled, every format additionally includes its
+`LICENSE-APACHE`, the complete `docs/adr-gpui-x11.md` provenance, and an explicit
+modification notice. AppImage
 also includes each bundled Debian/Ubuntu library's package copyright file,
 package/version inventory and referenced `/usr/share/common-licenses` texts.
 Locations:

@@ -19,7 +19,3 @@ publish = false
 
 [workspace.dependencies]
 gpui = "=0.2.2"
-
-[patch.crates-io]
-# GPUI's opaque Vulkan surface must use an opaque X11 visual. See the ADR.
-gpui = { path = "vendor/gpui" }

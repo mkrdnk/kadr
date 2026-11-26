@@ -1,6 +1,39 @@
 # ADR: GPUI 0.2.2 local compatibility patches
 
-## Decision
+## Current status: registry dependency, local patches inactive
+
+The workspace now uses the published `gpui = "=0.2.2"` directly from crates.io,
+without `[patch.crates-io]`. Its `Cargo.lock` entry records the registry source
+and published archive checksum. No other dependency versions were changed.
+The local patches described below are **not** part of the current build.
+
+The initial registry migration was built with Rust/Cargo 1.99.1 on Fedora 43.
+The real application passed `--smoke-ui` startup, frame callback and exit code 0
+in the available native Wayland and XWayland sessions, using isolated XDG
+data/config/cache/state directories. An ImageMagick capture of only the
+XWayland client showed 1,573 colors, mean 0.138139 and standard deviation
+0.0980076; visual inspection confirmed readable application controls and text.
+This was not the private native Xorg test below and did not check resize or
+window-manager close. The Wayland frame callback is not a pixel assertion.
+
+The published crate still lacks both fixes below. Successful compilation on
+Rust 1.99.1 does not establish compatibility with later compilers; working
+XWayland pixels on Fedora do not disprove the Debian native X11 failure.
+There is no equivalent public GPUI application option for choosing the initial
+X11 visual.
+
+`vendor/gpui` is retained as an **inactive fallback**, excluded from the workspace.
+Do not remove it or its conditional packaging notices until the native X11
+pixel/lifecycle and Wayland replacement checks below have been repeated.
+The current environment lacks Xorg/Xvfb, Openbox, Weston, xdotool and wmctrl,
+so those scripted checks could not run. Native macOS validation also remains
+required before declaring platform parity.
+
+The remaining sections record the previous local-patch decision, its evidence
+and how to reproduce or temporarily restore it; they do not describe the
+currently selected dependency.
+
+## Previous decision
 
 Use a local copy of the published `gpui = 0.2.2` crate in `vendor/gpui`.
 The source changes are:
