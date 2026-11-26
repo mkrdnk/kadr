@@ -1,0 +1,17 @@
+{
+  "record_type": "declared-spdx",
+  "name": "objc_exception",
+  "version": "0.1.2",
+  "license_expression": "MIT",
+  "crate_sha256": "ad970fb455818ad6cba4c122ad012fae53ae8b4795f86378bce65e4f6bab2ca4",
+  "archive_url": "https://static.crates.io/crates/objc_exception/objc_exception-0.1.2.crate",
+  "canonical_license_ids": ["MIT"],
+  "evidence": "SHA-256 verified against Cargo.lock. Published Cargo.toml and Cargo.toml.orig both declare MIT and author Steven Sheldon. Published .cargo_vcs_info.json pins the exact commit below (no path_in_vcs field). Its complete tree contains only .gitignore, Cargo.toml, build.rs, extern/exception.m and src/lib.rs; inspection found no package license/copyright text beyond the Cargo declaration. No ownership notice is invented. This exact standard grant was explicitly reviewed for the macOS scope; not legal approval.",
+  "source_evidence": {
+    "method": "published-cargo-vcs-info",
+    "repository": "https://github.com/SSheldon/rust-objc-exception",
+    "commit": "c86ad3a52984461fc5c63980d12e8ceed847854c",
+    "tree_url": "https://api.github.com/repos/SSheldon/rust-objc-exception/git/trees/c86ad3a52984461fc5c63980d12e8ceed847854c?recursive=1",
+    "actual_package_notice_count": 0
+  }
+}

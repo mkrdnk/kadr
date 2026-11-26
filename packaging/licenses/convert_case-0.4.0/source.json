@@ -1,0 +1,10 @@
+{
+  "record_type": "declared-spdx",
+  "name": "convert_case",
+  "version": "0.4.0",
+  "license_expression": "MIT",
+  "crate_sha256": "6245d59a3e82a7fc217c5828a6692dbc6dfb63a0c8c90495621f7b9d79704a0e",
+  "archive_url": "https://static.crates.io/crates/convert_case/convert_case-0.4.0.crate",
+  "canonical_license_ids": ["MIT"],
+  "evidence": "The checksum-authenticated published Cargo.toml and Cargo.toml.orig both declare MIT. No upstream-shipped LICENSE or source copyright notice was found; retain that absence and the actual metadata/authors, rather than inventing a notice."
+}

@@ -1,0 +1,158 @@
+name: Build release candidates (no publication)
+
+on:
+  workflow_dispatch:
+    inputs:
+      retain_artifacts:
+        description: Authorize uploading unsigned build artifacts to this workflow run
+        type: boolean
+        default: false
+        required: true
+  workflow_call:
+    inputs:
+      retain_artifacts:
+        description: Retain unsigned candidates only after the caller's platform checks
+        type: boolean
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  # Unlike explicit local QA, this workflow always requires complete notices.
+  KADR_ALLOW_INCOMPLETE_NOTICES: "0"
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: release-linux-x86_64-glibc235
+      - name: Install native build and packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config clang cmake libssl-dev \
+            libfontconfig1-dev libwayland-dev libxcb1-dev libx11-xcb-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb-xkb-dev \
+            libxcb-randr0-dev libxcb-xfixes0-dev libxcb-shape0-dev \
+            libxcb-sync-dev libxcb-render0-dev libxcb-render-util0-dev \
+            libxcb-composite0-dev libxcb-damage0-dev libxcb-present-dev \
+            libvulkan1 mesa-vulkan-drivers fonts-dejavu-core \
+            libwayland-cursor0 libwayland-egl1 \
+            flatpak flatpak-builder elfutils appstream-util desktop-file-utils \
+            patchelf squashfs-tools curl xvfb openbox xdotool wmctrl mpv vlc
+      - name: Install verified Flatpak runtime and SDK
+        run: |
+          flatpak --user remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak --user install -y --noninteractive flathub \
+            org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08
+      - name: Fetch complete locked metadata source graph
+        run: cargo fetch --locked --target x86_64-unknown-linux-gnu
+      - run: cargo test --locked -p kadr-media --test flatpak_player --test players
+      - run: cargo build --locked --release -p kadr-app
+      - name: Package unsigned Linux candidates
+        run: |
+          rm -rf target/dist
+          KADR_ALLOW_INCOMPLETE_NOTICES=0 scripts/package-appimage.sh --binary target/release/kadr-app
+          KADR_ALLOW_INCOMPLETE_NOTICES=0 scripts/package-flatpak.sh --binary target/release/kadr-app
+      - name: AppImage X11 lifecycle
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: python3 scripts/smoke-x11.py target/dist/kadr-*-unsigned.AppImage
+      - name: Installed Flatpak host mpv and VLC over loopback HTTP
+        run: |
+          XDG_RUNTIME_DIR=/run/user/$(id -u)
+          export XDG_RUNTIME_DIR
+          # Hosted non-login runners need not have a PAM-created user runtime.
+          sudo install -d -m700 -o "$(id -u)" -g "$(id -g)" "$XDG_RUNTIME_DIR"
+          scripts/package-test-flatpak.sh target/dist/kadr-*-unsigned.flatpak
+      - name: Reject incomplete notices before any authorized upload
+        if: ${{ inputs.retain_artifacts }}
+        run: |
+          for requirements in target/dist/*.requirements.txt; do
+            grep -Fx 'NOTICE_STATUS: texts-collected-not-audit' "$requirements"
+            if grep -Fq 'NOTICE_STATUS: needs-review' "$requirements"; then exit 1; fi
+          done
+      - name: Retain candidates only on explicit dispatch authorization
+        if: ${{ inputs.retain_artifacts }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kadr-${{ github.sha }}-linux-x86_64-unsigned
+          path: target/dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: release-macos-arm64-13
+      - name: Select full Xcode
+        run: |
+          sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
+          xcrun --find metal
+          test "$(uname -m)" = arm64
+      - name: Fetch complete locked metadata source graph
+        run: cargo fetch --locked --target aarch64-apple-darwin
+      - run: cargo build --locked --release -p kadr-app
+      - name: Package unsigned macOS candidate
+        run: |
+          rm -rf target/dist
+          KADR_ALLOW_INCOMPLETE_NOTICES=0 scripts/package-dmg.sh --binary target/release/kadr-app
+      - name: Verify mount and app structure
+        run: |
+          mkdir -p "$RUNNER_TEMP/kadr-dmg"
+          hdiutil attach target/dist/kadr-*-unsigned.dmg -mountpoint "$RUNNER_TEMP/kadr-dmg" -nobrowse -readonly
+          trap 'hdiutil detach "$RUNNER_TEMP/kadr-dmg"' EXIT
+          test -x "$RUNNER_TEMP/kadr-dmg/kadr.app/Contents/MacOS/kadr"
+          codesign --verify --strict --verbose=2 "$RUNNER_TEMP/kadr-dmg/kadr.app"
+          plutil -lint "$RUNNER_TEMP/kadr-dmg/kadr.app/Contents/Info.plist"
+          python3 scripts/smoke-macos.py --binary "$RUNNER_TEMP/kadr-dmg/kadr.app/Contents/MacOS/kadr" --artifacts "$RUNNER_TEMP/smoke-release-macos" --screenshot
+          hdiutil detach "$RUNNER_TEMP/kadr-dmg"
+          trap - EXIT
+      - name: Reject incomplete notices before any authorized upload
+        if: ${{ inputs.retain_artifacts }}
+        run: |
+          for requirements in target/dist/*.requirements.txt; do
+            grep -Fx 'NOTICE_STATUS: texts-collected-not-audit' "$requirements"
+            if grep -Fq 'NOTICE_STATUS: needs-review' "$requirements"; then exit 1; fi
+          done
+      - name: Retain candidates only on explicit dispatch authorization
+        if: ${{ inputs.retain_artifacts }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kadr-${{ github.sha }}-macos-arm64-unsigned
+          path: target/dist/
+          retention-days: 7
+          if-no-files-found: error
+      - name: Retain optimized macOS window evidence
+        if: ${{ inputs.retain_artifacts }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kadr-${{ github.sha }}-macos-arm64-render
+          path: ${{ runner.temp }}/smoke-release-macos/*.png
+          retention-days: 7
+          if-no-files-found: error

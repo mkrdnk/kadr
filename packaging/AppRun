@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+APPDIR=${APPDIR:-$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)}
+# RPATH, not LD_LIBRARY_PATH: host mpv/VLC must use the host's libraries.
+exec "$APPDIR/usr/bin/kadr" "$@"

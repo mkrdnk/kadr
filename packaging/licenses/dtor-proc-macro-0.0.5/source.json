@@ -1,0 +1,24 @@
+{
+  "name": "dtor-proc-macro",
+  "version": "0.0.5",
+  "license_expression": "Apache-2.0 OR MIT",
+  "vcs_sha1": "b05136ac964049a1ee29de763d0b119c42258567",
+  "path_in_vcs": "dtor-proc-macro",
+  "repository": "https://github.com/mmastrac/rust-ctor",
+  "evidence": "Published crate Cargo metadata and .cargo_vcs_info.json identify repository, exact commit and path; dtor-proc-macro/Cargo.toml at that commit confirms package name/version/license. Workspace-root legal files apply to the published member.",
+  "files": [
+    {
+      "path": "_texts/a8ad31b1c3f40dca5a84119351b8fa8ddc868edd77fad8a8ebf6d8f2d16fa4ae.txt",
+      "upstream_path": "LICENSE-APACHE",
+      "url": "https://raw.githubusercontent.com/mmastrac/rust-ctor/b05136ac964049a1ee29de763d0b119c42258567/LICENSE-APACHE",
+      "sha256": "a8ad31b1c3f40dca5a84119351b8fa8ddc868edd77fad8a8ebf6d8f2d16fa4ae"
+    },
+    {
+      "path": "_texts/bccaa8b6c09f94e81f06696e179dbe058464bbdfbc823b6d49cada1d71e84ac3.json",
+      "upstream_path": "LICENSE-MIT",
+      "url": "https://raw.githubusercontent.com/mmastrac/rust-ctor/b05136ac964049a1ee29de763d0b119c42258567/LICENSE-MIT",
+      "sha256": "bccaa8b6c09f94e81f06696e179dbe058464bbdfbc823b6d49cada1d71e84ac3",
+      "encoding": "json-utf8"
+    }
+  ]
+}

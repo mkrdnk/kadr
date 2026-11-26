@@ -754,30 +754,66 @@ async fn head_does_not_wait_for_unavailable_data() {
 
 #[tokio::test]
 async fn file_truncation_aborts_response_instead_of_padding_or_success() {
-    let fixture = Fixture::new(DATA).await;
-    let source = LocalFile::open(&fixture.path).await.unwrap();
-    tokio::fs::OpenOptions::new()
-        .write(true)
-        .open(&fixture.path)
-        .await
-        .unwrap()
-        .set_len(3)
-        .await
-        .unwrap();
-    let server = Server::start(Arc::new(source), ServerOptions::default())
-        .await
-        .unwrap();
-    let mut client = Client::connect(&server).await;
-    let response = client.request("GET", &target(&server), &[]).await;
-    assert_eq!(response.headers()[CONTENT_LENGTH], DATA.len().to_string());
-    assert!(
-        timeout(DEADLINE, response.into_body().collect())
+    for surviving in [0, 3] {
+        let fixture = Fixture::new(DATA).await;
+        let source = LocalFile::open(&fixture.path).await.unwrap();
+        tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(&fixture.path)
             .await
             .unwrap()
-            .is_err()
-    );
-    drop(client);
-    server.shutdown().await.unwrap();
+            .set_len(surviving as u64)
+            .await
+            .unwrap();
+        let server = Server::start(Arc::new(source), ServerOptions::default())
+            .await
+            .unwrap();
+        let mut client = Client::connect(&server).await;
+        let request = Request::builder()
+            .method("GET")
+            .uri(target(&server))
+            .header("Host", "127.0.0.1")
+            .body(Empty::new())
+            .unwrap();
+        // Hyper may poll the pre-EOF source error before flushing headers.
+        // Bypass the strict success helper only here: incomplete headers or
+        // headers followed by an errored body are both legal, never completion.
+        match timeout(DEADLINE, client.sender.send_request(request))
+            .await
+            .unwrap()
+        {
+            Err(error) => assert!(
+                error.is_incomplete_message(),
+                "unexpected truncated-response error: {error}"
+            ),
+            Ok(response) => {
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(response.headers()[CONTENT_LENGTH], DATA.len().to_string());
+                let mut body = response.into_body();
+                timeout(DEADLINE, async {
+                    let mut received = Vec::new();
+                    loop {
+                        match body.frame().await {
+                            Some(Ok(frame)) => {
+                                received.extend_from_slice(&frame.into_data().unwrap());
+                                assert!(
+                                    received.len() <= surviving,
+                                    "a truncated file must not be padded"
+                                );
+                                assert_eq!(received, DATA[..received.len()]);
+                            }
+                            Some(Err(_)) => break,
+                            None => panic!("a truncated file must not complete successfully"),
+                        }
+                    }
+                })
+                .await
+                .unwrap();
+            }
+        }
+        drop(client);
+        server.shutdown().await.unwrap();
+    }
 }
 
 #[cfg(unix)]

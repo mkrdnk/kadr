@@ -1,0 +1,18 @@
+{
+  "name": "assert_cfg",
+  "version": "0.1.0",
+  "license_expression": "Zlib",
+  "vcs_sha1": "4799cdc4e5e1a94ef6bdb24d8c5e7a71c72e2601",
+  "path_in_vcs": "",
+  "repository": "https://github.com/rodrimati1992/assert_cfg/",
+  "evidence": "Published crate Cargo metadata and .cargo_vcs_info.json identify repository, exact commit and path; Cargo.toml at that commit confirms package name/version/license. Crate-root LICENSE-ZLIB.md.",
+  "files": [
+    {
+      "path": "_texts/a2f6f941d80949cd8df8418463b221d9c0ea6f86d8b921c48b8e8872ce44de12.json",
+      "upstream_path": "LICENSE-ZLIB.md",
+      "url": "https://raw.githubusercontent.com/rodrimati1992/assert_cfg/4799cdc4e5e1a94ef6bdb24d8c5e7a71c72e2601/LICENSE-ZLIB.md",
+      "sha256": "a2f6f941d80949cd8df8418463b221d9c0ea6f86d8b921c48b8e8872ce44de12",
+      "encoding": "json-utf8"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "name": "governor",
+  "version": "0.10.4",
+  "license_expression": "MIT",
+  "vcs_sha1": "9f3a79dd47dd32acd589c562b8d4fefe99b93372",
+  "path_in_vcs": "governor",
+  "repository": "https://github.com/boinkor-net/governor.git",
+  "evidence": "Published crate Cargo metadata and .cargo_vcs_info.json identify repository, exact commit and path; governor/Cargo.toml at that commit confirms package name/version/license. Workspace-root legal files apply to the published member.",
+  "files": [
+    {
+      "path": "_texts/2248fdedb215c73b6431d4c0419c6476c0aa19621fa94041aa7c5a3ce952e5cc.txt",
+      "upstream_path": "LICENSE",
+      "url": "https://raw.githubusercontent.com/boinkor-net/governor/9f3a79dd47dd32acd589c562b8d4fefe99b93372/LICENSE",
+      "sha256": "2248fdedb215c73b6431d4c0419c6476c0aa19621fa94041aa7c5a3ce952e5cc"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "name": "blade-macros",
+  "version": "0.3.0",
+  "license_expression": "MIT",
+  "vcs_sha1": "875b9c87e15e83ed48414c094f9a2b3fb189925d",
+  "path_in_vcs": "blade-macros",
+  "repository": "https://github.com/kvark/blade",
+  "evidence": "Published crate .cargo_vcs_info.json pins this commit and package path; https://raw.githubusercontent.com/kvark/blade/875b9c87e15e83ed48414c094f9a2b3fb189925d/blade-macros/Cargo.toml confirms package name, version and license. The pinned repository tree contains the workspace-root LICENSE; the crate archive omits it.",
+  "files": [
+    {
+      "path": "_texts/8e9e23a134d00ae1760811ca60482b2e98b2db9154ffda66e58791796aa24ca1.txt",
+      "upstream_path": "LICENSE",
+      "url": "https://raw.githubusercontent.com/kvark/blade/875b9c87e15e83ed48414c094f9a2b3fb189925d/LICENSE",
+      "sha256": "8e9e23a134d00ae1760811ca60482b2e98b2db9154ffda66e58791796aa24ca1"
+    }
+  ]
+}

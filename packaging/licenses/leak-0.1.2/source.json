@@ -1,0 +1,19 @@
+{
+  "record_type": "declared-spdx",
+  "name": "leak",
+  "version": "0.1.2",
+  "license_expression": "Apache-2.0 OR MIT",
+  "crate_sha256": "bd100e01f1154f2908dfa7d02219aeab25d0b9c7fa955164192e3245255a0c73",
+  "archive_url": "https://static.crates.io/crates/leak/leak-0.1.2.crate",
+  "canonical_license_ids": ["Apache-2.0", "MIT"],
+  "evidence": "SHA-256 verified against Cargo.lock. Published Cargo.toml declares Apache-2.0 OR MIT and author Cody P Schafer <dev@codyps.com>. No .cargo_vcs_info.json exists in this legacy archive. Every published file byte-matches the exact repository commit below. Complete exact-commit tree, README and source inspection found no package license/copyright text beyond the Cargo declaration. The unpublished ci/travis-doc-upload.sh CC0 header covers that CI script, not this package's different grant, and is not substituted. No ownership notice is invented. This exact standard grant was explicitly reviewed for the macOS scope; not legal approval.",
+  "source_evidence": {
+    "method": "all-published-archive-members-byte-match",
+    "repository": "https://github.com/jmesmon/leak",
+    "commit": "024bd1ccfa33aea1eff0026b0d8b676874b5e3d2",
+    "tree": "a519bcea1fb6a39676066320cdfb0bc7e8ddbbe5",
+    "tree_url": "https://api.github.com/repos/jmesmon/leak/git/trees/024bd1ccfa33aea1eff0026b0d8b676874b5e3d2?recursive=1",
+    "matched_archive_members": ["Cargo.toml", "src/lib.rs"],
+    "actual_package_notice_count": 0
+  }
+}

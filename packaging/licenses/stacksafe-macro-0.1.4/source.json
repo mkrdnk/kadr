@@ -1,0 +1,17 @@
+{
+  "name": "stacksafe-macro",
+  "version": "0.1.4",
+  "license_expression": "Apache-2.0",
+  "vcs_sha1": "a5c029b7d3a5fe6771ecd79266b6e21313cfa174",
+  "path_in_vcs": "stacksafe-macro",
+  "repository": "https://github.com/fast/stacksafe",
+  "evidence": "Published .cargo_vcs_info.json and Cargo repository identify this exact workspace commit and stacksafe-macro path. LICENSE was read from that commit's workspace root.",
+  "files": [
+    {
+      "path": "_texts/c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4.txt",
+      "upstream_path": "LICENSE",
+      "url": "https://raw.githubusercontent.com/fast/stacksafe/a5c029b7d3a5fe6771ecd79266b6e21313cfa174/LICENSE",
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    }
+  ]
+}

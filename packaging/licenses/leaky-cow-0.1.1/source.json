@@ -1,0 +1,19 @@
+{
+  "record_type": "declared-spdx",
+  "name": "leaky-cow",
+  "version": "0.1.1",
+  "license_expression": "MIT / Apache-2.0",
+  "crate_sha256": "40a8225d44241fd324a8af2806ba635fc7c8a7e9a7de4d5cf3ef54e71f5926fc",
+  "archive_url": "https://static.crates.io/crates/leaky-cow/leaky-cow-0.1.1.crate",
+  "canonical_license_ids": ["MIT", "Apache-2.0"],
+  "evidence": "SHA-256 verified against Cargo.lock. Published Cargo.toml declares the exact legacy alternative expression MIT / Apache-2.0 and author Michael Howell <michael@notriddle.com>. No .cargo_vcs_info.json exists in this legacy archive. Every published file byte-matches the exact repository commit below. Complete exact-commit tree, README and source inspection found no package license/copyright text beyond the Cargo declaration; no ownership notice is invented. Only this exact package/version/literal expression was explicitly reviewed for the macOS scope; no generic expression normalization or legal approval.",
+  "source_evidence": {
+    "method": "all-published-archive-members-byte-match",
+    "repository": "https://github.com/notriddle/rust-leaky-cow",
+    "commit": "88f4a8cd01ffc634d9f7642b97eb764a8dcd3760",
+    "tree": "516722800a0c707baee0f2251854651185d7c6ea",
+    "tree_url": "https://api.github.com/repos/notriddle/rust-leaky-cow/git/trees/88f4a8cd01ffc634d9f7642b97eb764a8dcd3760?recursive=1",
+    "matched_archive_members": [".gitignore", ".travis.yml", "Cargo.toml", "README.md", "src/lib.rs"],
+    "actual_package_notice_count": 0
+  }
+}

@@ -68,6 +68,17 @@ pub struct Server {
 
 impl Server {
     pub async fn start(source: Arc<dyn ByteSource>, options: ServerOptions) -> io::Result<Self> {
+        Self::start_with_content_type(source, options, "application/octet-stream").await
+    }
+
+    /// MIME comes from the session owner, never an incoming request. Active
+    /// HTML/SVG content must not execute under the local streaming origin.
+    pub async fn start_with_content_type(
+        source: Arc<dyn ByteSource>,
+        options: ServerOptions,
+        content_type: &str,
+    ) -> io::Result<Self> {
+        let content_type = media_type(content_type);
         let mut random = [0; 32];
         rand::rngs::OsRng
             .try_fill_bytes(&mut random)
@@ -82,7 +93,14 @@ impl Server {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         let address = listener.local_addr()?;
         let stop = CancellationToken::new();
-        let task = tokio::spawn(serve(listener, source, path.clone(), options, stop.clone()));
+        let task = tokio::spawn(serve(
+            listener,
+            source,
+            path.clone(),
+            options,
+            stop.clone(),
+            content_type,
+        ));
         Ok(Self {
             address,
             path,
@@ -122,6 +140,7 @@ async fn serve(
     path: String,
     options: ServerOptions,
     stop: CancellationToken,
+    content_type: &'static str,
 ) -> io::Result<()> {
     let mut connections = JoinSet::new();
     let result = loop {
@@ -133,6 +152,10 @@ async fn serve(
                     Ok(accepted) => accepted,
                     Err(error) => break Err(error),
                 };
+                if connections.len() >= 32 {
+                    drop(socket);
+                    continue;
+                }
                 let source = source.clone();
                 let path = path.clone();
                 let stop = stop.clone();
@@ -141,11 +164,14 @@ async fn serve(
                     let (socket_read, mut socket_write) = socket.into_split();
                     let (mut transport_read, transport_write) = tokio::io::split(transport_io);
                     let service = service_fn(|request| {
-                        let response = respond(request, &path, source.clone(), options, stop.clone());
+                        let response = respond(request, &path, source.clone(), options, stop.clone(), content_type);
                         async move { Ok::<_, Infallible>(response) }
                     });
                     let connection = async {
                         http1::Builder::new()
+                            .timer(hyper_util::rt::TokioTimer::new())
+                            .header_read_timeout(Duration::from_secs(10))
+                            .max_headers(32)
                             .serve_connection(TokioIo::new(http_io), service)
                             .await
                     };
@@ -243,6 +269,7 @@ fn respond(
     source: Arc<dyn ByteSource>,
     options: ServerOptions,
     stop: CancellationToken,
+    content_type: &'static str,
 ) -> Response<Body> {
     // Authorize the parsed path; the HTTP parser can already have removed a fragment.
     // No application-level decoding, queries, absolute URLs or filenames.
@@ -327,7 +354,8 @@ fn respond(
         .status(status)
         .header(CONTENT_LENGTH, count)
         .header(ACCEPT_RANGES, "bytes")
-        .header(CONTENT_TYPE, "application/octet-stream")
+        .header(CONTENT_TYPE, content_type)
+        .header("X-Content-Type-Options", "nosniff")
         .header(CACHE_CONTROL, "no-store")
         .body(body)
         .expect("numeric response headers are valid");
@@ -340,9 +368,43 @@ fn respond(
     response
 }
 
+fn media_type(value: &str) -> &'static str {
+    match value
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "video/mp4" => "video/mp4",
+        "video/webm" => "video/webm",
+        "video/ogg" | "application/ogg" => "video/ogg",
+        "video/x-matroska" => "video/x-matroska",
+        "video/quicktime" => "video/quicktime",
+        "audio/mpeg" => "audio/mpeg",
+        "audio/wav" | "audio/x-wav" => "audio/wav",
+        "audio/ogg" => "audio/ogg",
+        "audio/mp4" => "audio/mp4",
+        "audio/webm" => "audio/webm",
+        _ => "application/octet-stream",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_passive_media_types_are_exposed_to_browsers() {
+        assert_eq!(media_type("video/mp4; codecs=avc1"), "video/mp4");
+        assert_eq!(media_type("text/html"), "application/octet-stream");
+        assert_eq!(media_type("image/svg+xml"), "application/octet-stream");
+        assert_eq!(
+            media_type("video/mp4\r\nX-Bad: yes"),
+            "application/octet-stream"
+        );
+    }
 
     #[tokio::test]
     async fn input_capacity_is_not_confused_with_cooperative_budget() {

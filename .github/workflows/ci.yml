@@ -1,0 +1,149 @@
+name: Build and test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      retain_artifacts:
+        description: Build and retain unsigned candidates after both platform test jobs pass
+        type: boolean
+        default: false
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config clang cmake libssl-dev dbus \
+            libfontconfig1-dev libwayland-dev libxcb1-dev libx11-xcb-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb-xkb-dev \
+            libxcb-randr0-dev libxcb-xfixes0-dev libxcb-shape0-dev \
+            libxcb-sync-dev libxcb-render0-dev libxcb-render-util0-dev \
+            libxcb-composite0-dev libxcb-damage0-dev libxcb-present-dev \
+            libvulkan1 mesa-vulkan-drivers xvfb openbox weston xdotool wmctrl \
+            fonts-dejavu-core imagemagick x11-utils xserver-xorg-core xserver-xorg-video-dummy \
+            mpv vlc-bin vlc-plugin-base ffmpeg
+      - name: Select full Xcode
+        if: runner.os == 'macOS'
+        run: |
+          test -d /Applications/Xcode.app/Contents/Developer
+          sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
+          xcrun --find metal
+      - name: Install macOS test players
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+        run: |
+          brew install mpv ffmpeg
+          brew install --cask vlc
+          # Use the cask's command wrapper so VLC receives its bundle entry path.
+          # A hand-made lowercase symlink is not the installed launcher.
+          command -v vlc
+      - run: cargo fmt --all -- --check
+      - name: Notice collector regressions
+        run: python3 scripts/package-licenses-test.py
+      - name: Private packaging-session teardown regressions
+        if: runner.os == 'Linux'
+        run: python3 scripts/package-private-bus-test.py
+      - run: cargo check --locked --workspace --all-targets
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - id: build
+        run: cargo build --locked --workspace --all-targets
+      - run: cargo test --locked --workspace
+      - name: Real HTTP torrent playback and permanent-save acceptance
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: cargo test --locked -p kadr-app backend::tests::real_ -- --ignored --test-threads=1
+      - name: Repeat full-response save acceptance without retrying failures
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          for attempt in 1 2 3; do
+            echo "Full-response save acceptance run $attempt (every run must pass)"
+            cargo test --locked -p kadr-app real_http_fallback -- --ignored --test-threads=1
+          done
+      # Runtime checks are independent; collect all failures, never turn them
+      # into a pass. The candidates job still requires the entire matrix green.
+      - name: Real mpv and VLC playback
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          cargo test --locked -p kadr-media --test players_smoke -- --ignored
+          cargo test --locked -p kadr-media --test video_smoke -- --ignored
+      - name: Diagnose installed macOS VLC entry points with owned local media
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && runner.os == 'macOS' }}
+        run: python3 scripts/diagnose-vlc.py
+      - name: Native X11 lifecycle smoke
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && runner.os == 'Linux' }}
+        run: python3 scripts/smoke-x11.py target/debug/kadr-app
+      - name: Native Wayland lifecycle in nested Weston
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && runner.os == 'Linux' }}
+        run: python3 scripts/smoke-wayland.py --binary target/debug/kadr-app --timeout 30
+      - name: Rendered native X11 acceptance
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && runner.os == 'Linux' }}
+        run: python3 scripts/smoke-xorg.py --binary target/debug/kadr-app --artifacts "$RUNNER_TEMP/smoke-xorg"
+      - name: Native macOS rendering and lifecycle
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && runner.os == 'macOS' }}
+        run: python3 scripts/smoke-macos.py --binary target/debug/kadr-app --artifacts "$RUNNER_TEMP/smoke-macos" --screenshot
+      - name: Build and open macOS DMG
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && runner.os == 'macOS' }}
+        env:
+          # Even the debug mount/render smoke must collect complete notices.
+          KADR_ALLOW_INCOMPLETE_NOTICES: '0'
+        run: |
+          # Package output, unlike compiled crates, must not come from Rust's cache.
+          rm -rf target/dist
+          scripts/package-dmg.sh --binary target/debug/kadr-app
+          set -- target/dist/*.dmg
+          test "$#" -eq 1
+          mkdir -p "$RUNNER_TEMP/kadr-dmg"
+          hdiutil attach -nobrowse -readonly "$1" -mountpoint "$RUNNER_TEMP/kadr-dmg"
+          trap 'hdiutil detach "$RUNNER_TEMP/kadr-dmg"' EXIT
+          python3 scripts/smoke-macos.py --binary "$RUNNER_TEMP/kadr-dmg/kadr.app/Contents/MacOS/kadr" --artifacts "$RUNNER_TEMP/smoke-dmg" --screenshot
+
+      - name: Retain only owned smoke-window screenshots on authorized dispatch
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.retain_artifacts }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kadr-${{ github.sha }}-${{ runner.os }}-smoke-windows
+          # Runtime evidence must be fresh, never restored with target/ build cache.
+          path: |
+            ${{ runner.temp }}/smoke-xorg/*.png
+            ${{ runner.temp }}/smoke-macos/*.png
+            ${{ runner.temp }}/smoke-dmg/*.png
+          retention-days: 7
+          if-no-files-found: warn
+
+  candidates:
+    needs: test
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.retain_artifacts }}
+    uses: ./.github/workflows/release.yml
+    with:
+      retain_artifacts: true

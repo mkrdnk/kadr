@@ -1,0 +1,42 @@
+{
+  "app-id": "dev.kadr.Kadr",
+  "runtime": "org.freedesktop.Platform",
+  "runtime-version": "25.08",
+  "sdk": "org.freedesktop.Sdk",
+  "command": "kadr",
+  "appstream-compose": false,
+  "finish-args": [
+    "--share=ipc",
+    "--share=network",
+    "--socket=wayland",
+    "--socket=fallback-x11",
+    "--device=dri",
+    "--filesystem=xdg-run/kadr:create",
+    "--filesystem=home",
+    "--talk-name=org.freedesktop.Flatpak"
+  ],
+  "modules": [
+    {
+      "name": "kadr",
+      "buildsystem": "simple",
+      "build-commands": [
+        "install -Dm755 kadr-app /app/bin/kadr",
+        "install -Dm644 dev.kadr.Kadr.desktop /app/share/applications/dev.kadr.Kadr.desktop",
+        "install -Dm644 dev.kadr.Kadr.metainfo.xml /app/share/metainfo/dev.kadr.Kadr.metainfo.xml",
+        "install -Dm644 dev.kadr.Kadr.svg /app/share/icons/hicolor/scalable/apps/dev.kadr.Kadr.svg",
+        "mkdir -p /app/share/licenses/kadr",
+        "cp -a licenses/. /app/share/licenses/kadr/",
+        "mkdir -p /app/share/icons/hicolor/128x128/apps",
+        "rsvg-convert -w 128 -h 128 dev.kadr.Kadr.svg -o /app/share/icons/hicolor/128x128/apps/dev.kadr.Kadr.png",
+        "appstreamcli compose --no-net --prefix=/app --origin=dev.kadr.Kadr --result-root=/app --components=dev.kadr.Kadr /"
+      ],
+      "sources": [
+        {"type": "file", "path": "kadr-app"},
+        {"type": "file", "path": "dev.kadr.Kadr.desktop"},
+        {"type": "file", "path": "dev.kadr.Kadr.metainfo.xml"},
+        {"type": "file", "path": "dev.kadr.Kadr.svg"},
+        {"type": "dir", "path": "licenses", "dest": "licenses"}
+      ]
+    }
+  ]
+}

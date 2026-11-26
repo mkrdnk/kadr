@@ -1,0 +1,17 @@
+{
+  "name": "blade-util",
+  "version": "0.3.0",
+  "license_expression": "MIT",
+  "vcs_sha1": "23e378613440513e1045f4e0f7c5979e67645d3b",
+  "path_in_vcs": "blade-util",
+  "repository": "https://github.com/kvark/blade",
+  "evidence": "Published crate .cargo_vcs_info.json pins this commit and package path; https://raw.githubusercontent.com/kvark/blade/23e378613440513e1045f4e0f7c5979e67645d3b/blade-util/Cargo.toml confirms package name, version and license. The pinned repository tree contains the workspace-root LICENSE; the crate archive omits it.",
+  "files": [
+    {
+      "path": "_texts/8e9e23a134d00ae1760811ca60482b2e98b2db9154ffda66e58791796aa24ca1.txt",
+      "upstream_path": "LICENSE",
+      "url": "https://raw.githubusercontent.com/kvark/blade/23e378613440513e1045f4e0f7c5979e67645d3b/LICENSE",
+      "sha256": "8e9e23a134d00ae1760811ca60482b2e98b2db9154ffda66e58791796aa24ca1"
+    }
+  ]
+}

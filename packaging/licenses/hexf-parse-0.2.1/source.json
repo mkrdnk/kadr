@@ -1,0 +1,10 @@
+{
+  "record_type": "declared-spdx",
+  "name": "hexf-parse",
+  "version": "0.2.1",
+  "license_expression": "CC0-1.0",
+  "crate_sha256": "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df",
+  "archive_url": "https://static.crates.io/crates/hexf-parse/hexf-parse-0.2.1.crate",
+  "canonical_license_ids": ["CC0-1.0"],
+  "evidence": "The checksum-authenticated published Cargo.toml and Cargo.toml.orig both declare CC0-1.0. Canonical CC0 terms reproduce that standard grant by reference, not a nonexistent upstream LICENSE or invented ownership statement."
+}

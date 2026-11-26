@@ -1,0 +1,17 @@
+{
+  "name": "blade-graphics",
+  "version": "0.7.1",
+  "license_expression": "MIT",
+  "vcs_sha1": "88b6c64cd7a32dd933acc4e5266808a07143ce84",
+  "path_in_vcs": "blade-graphics",
+  "repository": "https://github.com/kvark/blade",
+  "evidence": "Published crate .cargo_vcs_info.json pins this commit and package path; https://raw.githubusercontent.com/kvark/blade/88b6c64cd7a32dd933acc4e5266808a07143ce84/blade-graphics/Cargo.toml confirms package name, version and license. The pinned repository tree contains the workspace-root LICENSE; the crate archive omits it.",
+  "files": [
+    {
+      "path": "_texts/8e9e23a134d00ae1760811ca60482b2e98b2db9154ffda66e58791796aa24ca1.txt",
+      "upstream_path": "LICENSE",
+      "url": "https://raw.githubusercontent.com/kvark/blade/88b6c64cd7a32dd933acc4e5266808a07143ce84/LICENSE",
+      "sha256": "8e9e23a134d00ae1760811ca60482b2e98b2db9154ffda66e58791796aa24ca1"
+    }
+  ]
+}

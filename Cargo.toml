@@ -1,6 +1,16 @@
 [workspace]
-members = ["crates/kadr-app", "crates/kadr-media"]
+members = [
+    "crates/kadr-app",
+    "crates/kadr-cache",
+    "crates/kadr-catalog",
+    "crates/kadr-core",
+    "crates/kadr-media",
+    "crates/kadr-storage",
+    "crates/kadr-torrent",
+    "crates/kadr-ui",
+]
 resolver = "3"
+exclude = ["vendor/gpui"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,3 +19,7 @@ publish = false
 
 [workspace.dependencies]
 gpui = "=0.2.2"
+
+[patch.crates-io]
+# GPUI's opaque Vulkan surface must use an opaque X11 visual. See the ADR.
+gpui = { path = "vendor/gpui" }
