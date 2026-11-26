@@ -1,0 +1,21 @@
+{
+  "record_type": "declared-spdx",
+  "name": "selectors",
+  "version": "0.25.0",
+  "license_expression": "MPL-2.0",
+  "crate_sha256": "4eb30575f3638fc8f6815f448d50cb1a2e255b0897985c8c59f4d37b72a07b06",
+  "archive_url": "https://static.crates.io/crates/selectors/selectors-0.25.0.crate",
+  "canonical_license_ids": ["MPL-2.0"],
+  "evidence": "Archive SHA-256 verified against Cargo.lock; normalized/original Cargo manifests agree on name/version/authors/MPL-2.0. Published .cargo_vcs_info.json records commit 91ae9eb83291f249c4455909834732a6a806c799 and path servo/components/selectors. That commit is unavailable in declared servo/servo and mozilla/gecko-dev (GitHub API 422/raw 404); Mercurial mozilla-central does not recognize it. No different source revision or unrelated whole-repository license is substituted. No standalone legal file exists in the archive. Actual MPL source notices are preserved from every Rust source file; full canonical MPL-2.0 terms are a standard-text supplement, not a recovered upstream LICENSE or legal clearance. Release source availability, notice and compatibility obligations remain for human review.",
+  "source_evidence": {
+    "method": "published-archive-sha256-and-manifest-declarations",
+    "repository": "https://github.com/servo/servo",
+    "commit": "91ae9eb83291f249c4455909834732a6a806c799",
+    "path_in_vcs": "servo/components/selectors",
+    "unavailable_commit_urls": [
+      "https://api.github.com/repos/servo/servo/commits/91ae9eb83291f249c4455909834732a6a806c799",
+      "https://api.github.com/repos/mozilla/gecko-dev/commits/91ae9eb83291f249c4455909834732a6a806c799"
+    ],
+    "actual_source_notice_paths": ["attr.rs", "bloom.rs", "build.rs", "builder.rs", "context.rs", "lib.rs", "matching.rs", "nth_index_cache.rs", "parser.rs", "sink.rs", "tree.rs", "visitor.rs"]
+  }
+}

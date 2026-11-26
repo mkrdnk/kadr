@@ -1,0 +1,19 @@
+{
+  "record_type": "declared-spdx",
+  "name": "fxhash",
+  "version": "0.2.1",
+  "license_expression": "Apache-2.0/MIT",
+  "crate_sha256": "c31b6d751ae2c7f11320402d34e41349dd1016f8d5d45e48c4312bc8625af50c",
+  "archive_url": "https://static.crates.io/crates/fxhash/fxhash-0.2.1.crate",
+  "canonical_license_ids": ["Apache-2.0", "MIT"],
+  "evidence": "Archive SHA-256 verified against Cargo.lock. No .cargo_vcs_info.json exists in this archive. Every original published member byte-matches the exact source commit below (Cargo.toml.orig matches upstream Cargo.toml; the generated normalized Cargo.toml agrees on name/version/authors/license). Complete exact-commit tree has only .gitignore, Cargo.toml, README.md, bench.rs and lib.rs, with no standalone legal files. The actual 2015 Rust Project Developers Apache/MIT header in lib.rs is preserved verbatim from the authenticated archive, not replaced or attributed to the Cargo author. Only this exact version and literal standard declaration are recognized; no legal approval.",
+  "source_evidence": {
+    "method": "all-original-published-members-byte-match",
+    "repository": "https://github.com/cbreeden/fxhash",
+    "commit": "537570af68de22d2f4bbdd5bee5d6e07268e6f42",
+    "tree_url": "https://api.github.com/repos/cbreeden/fxhash/git/trees/537570af68de22d2f4bbdd5bee5d6e07268e6f42?recursive=1",
+    "matched_archive_members": [".gitignore", "Cargo.toml.orig", "README.md", "bench.rs", "lib.rs"],
+    "manifest_mapping": "Cargo.toml.orig -> Cargo.toml; generated Cargo.toml authenticated directly by archive checksum",
+    "actual_source_notice_paths": ["lib.rs"]
+  }
+}

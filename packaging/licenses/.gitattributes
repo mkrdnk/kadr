@@ -1,0 +1,2 @@
+# Preserve this hash-pinned canonical text's intentional upstream trailing space.
+spdx/MPL-2.0.txt -whitespace

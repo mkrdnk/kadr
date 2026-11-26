@@ -1,0 +1,17 @@
+{
+  "name": "phf_shared",
+  "version": "0.10.0",
+  "license_expression": "MIT",
+  "vcs_sha1": "3ea14b2166553ad6e7b9afe7244144f5d661b6c6",
+  "path_in_vcs": "",
+  "repository": "https://github.com/sfackler/rust-phf",
+  "evidence": "Published archive SHA-256 verified against Cargo.lock. Published .cargo_vcs_info.json identifies this exact commit and omits path_in_vcs (preserved as empty, not inferred). phf_shared/Cargo.toml at that commit confirms name/version/MIT declaration. The complete exact-commit tree contains the workspace-root LICENSE recovered verbatim here.",
+  "files": [
+    {
+      "path": "_texts/d8870d5e2ab20fc50915b711c5aa7588131c9abcc1bcb980da1efd7486522a46.txt",
+      "upstream_path": "LICENSE",
+      "url": "https://raw.githubusercontent.com/sfackler/rust-phf/3ea14b2166553ad6e7b9afe7244144f5d661b6c6/LICENSE",
+      "sha256": "d8870d5e2ab20fc50915b711c5aa7588131c9abcc1bcb980da1efd7486522a46"
+    }
+  ]
+}

@@ -24,7 +24,7 @@ retains actual archive manifests/README/authors and all actual source comment
 notices, then supplies pinned SPDX canonical terms. Pathfinder's actual
 copyright/license source headers are preserved despite its unavailable VCS SHA.
 The status is `declared-standard-text`, never “upstream shipped this LICENSE.”
-See [POLICY.md](POLICY.md) for the fixed ten-case allowlist, authentication,
+See [POLICY.md](POLICY.md) for the fixed fourteen-case allowlist, authentication,
 placeholder omission, rejection rules and limits.
 
 | Published crate | Declared expression | Exact VCS commit | Evidence |
@@ -91,3 +91,81 @@ were not modified. Both collection commands used `--binary /usr/bin/true` as an
 explicit inventory-only placeholder, not a Mac executable/build attestation.
 No native Mac compilation, DMG smoke, signing or production legal audit was run
 for this licensing change.
+
+## RuTracker / scraper 0.20 notice supplements
+
+The local RuTracker dependency closure adds eight missing-notice cases. The
+`phf` family uses recovered, unmodified workspace-root `LICENSE` bytes from
+the repository named in the published manifests:
+
+| Published crate | Published VCS commit | Exact upstream notice |
+| --- | --- | --- |
+| `phf 0.10.1` | `bed01538ae576876f11189d541875d228acef9e8` | [MIT LICENSE](https://raw.githubusercontent.com/sfackler/rust-phf/bed01538ae576876f11189d541875d228acef9e8/LICENSE) |
+| `phf_codegen 0.10.0`, `phf_generator 0.10.0`, `phf_shared 0.10.0` | `3ea14b2166553ad6e7b9afe7244144f5d661b6c6` | [MIT LICENSE](https://raw.githubusercontent.com/sfackler/rust-phf/3ea14b2166553ad6e7b9afe7244144f5d661b6c6/LICENSE) |
+
+Each published archive was SHA-256 checked against Cargo.lock. Each package's
+manifest at its exact source commit confirms its name/version/MIT declaration.
+Both complete exact-commit trees contain the same actual license bytes, stored
+under `_texts/d8870d5e2ab20fc50915b711c5aa7588131c9abcc1bcb980da1efd7486522a46.txt`.
+The three 0.10.0 archives omit `path_in_vcs`; their records deliberately retain
+the empty published value rather than replacing it with an inferred path.
+
+Two legacy archives have no published VCS metadata and no standalone legal
+files, so they use the existing exact-archive `declared-spdx` mechanism:
+
+| Published crate | Exact declaration | Authenticated source |
+| --- | --- | --- |
+| `fxhash 0.2.1` | `Apache-2.0/MIT` | [Complete tree](https://api.github.com/repos/cbreeden/fxhash/git/trees/537570af68de22d2f4bbdd5bee5d6e07268e6f42?recursive=1); all original archive members match, with `Cargo.toml.orig` mapped to upstream `Cargo.toml`. The generated normalized manifest agrees on the grant and is authenticated by the archive hash. |
+| `mac 0.1.1` | `MIT/Apache-2.0` | [Complete release tree](https://api.github.com/repos/reem/rust-mac/git/trees/66afc663b68a65633ea165c742b5a9c6734581c2?recursive=1); every published member byte-matches this exact release commit. |
+
+The actual 2015 Rust Project Developers source notice in `fxhash/lib.rs` is
+retained verbatim. `mac`'s actual README grant and authors are retained as
+published metadata; no copyright notice was found or invented. Both receive
+full pinned canonical MIT/Apache terms, explicitly labeled as standard terms
+rather than recovered repository LICENSE files. Future versions and changed
+literal expressions are not accepted automatically.
+
+`selectors 0.25.0` and `servo_arc 0.3.0` also use exact-archive declarations.
+Their published VCS commits are respectively
+`91ae9eb83291f249c4455909834732a6a806c799` and
+`518560b4e06ad9aa1a407d9f27293a2d20dcd804`, with paths
+`servo/components/selectors` and `servo/components/servo_arc`. Exact-commit
+queries fail in both the declared `servo/servo` and `mozilla/gecko-dev` sources
+(GitHub API 422/raw 404); Mercurial mozilla-central does not recognize those
+revisions either. [Servo issue 30455](https://github.com/servo/servo/issues/30455)
+corroborates the unavailable `servo_arc` revision and possible Gecko publication,
+not a new license. No current Gecko/Stylo text or unrelated whole-repository
+license was substituted.
+
+The checksummed archives directly authenticate both Cargo manifests, authors,
+README files, all MPL-2.0 source notices in `selectors`, and the actual
+2012-2014 Rust Project Developers Apache/MIT header in `servo_arc`.
+Canonical MPL-2.0 terms come from the existing SPDX v3.26.0 commit
+`8a04f0303d95c4f932210b118588c662665bd383`, raw SHA-256
+`66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172`.
+Those complete bytes, including the source's trailing space in definition 1.7,
+are preserved rather than reformatted. The MPL text is copied verbatim; its
+exhibits are instructions, not an assertion that Exhibit B applies to `selectors`.
+Both cases remain `declared-standard-text`, **not** a recovered upstream LICENSE
+or human legal clearance. Release source availability and notice obligations
+(including MPL §3.2), compatibility and other distribution obligations remain
+for human review.
+
+Validation for this eight-case restoration:
+
+- `python3 scripts/package-licenses-test.py`: **29 tests passed**, including
+  exact phf VCS/hash bindings, mismatched provenance rejection, the four newly
+  reviewed standard grants, changed-expression/future-version rejection, and
+  the real canonical MPL hash.
+- Native `python3 scripts/package-licenses.py --binary <scratch-placeholder>
+  --output <new-dir> --strict`: **707 packages / 1304 notice entries /
+  0 warnings**, target `x86_64-unknown-linux-gnu`, status
+  `texts-collected-not-audit`; nine declared-standard packages in this target.
+  Every embedded notice hash was rechecked. Actual source notice counts are
+  fxhash: 1, mac: 0, selectors: 12, servo_arc: 1.
+- The isolated checkout has no built application. The temporary input explicitly
+  says **NON-DISTRIBUTABLE / NOT an executable**. This checks the exact native
+  offline metadata/notice pipeline, not a real executable or package build;
+  the parent must rerun strict collection against its actual `kadr-app`.
+
+No dependency changes, packages, uploads, signing or commits were made.

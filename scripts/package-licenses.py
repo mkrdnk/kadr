@@ -33,6 +33,10 @@ DECLARED_STANDARDS = {
     ("leaky-cow", "0.1.1"): ("MIT / Apache-2.0", ("MIT", "Apache-2.0")),
     ("malloc_buf", "0.0.6"): ("MIT", ("MIT",)),
     ("objc_exception", "0.1.2"): ("MIT", ("MIT",)),
+    ("fxhash", "0.2.1"): ("Apache-2.0/MIT", ("Apache-2.0", "MIT")),
+    ("mac", "0.1.1"): ("MIT/Apache-2.0", ("MIT", "Apache-2.0")),
+    ("selectors", "0.25.0"): ("MPL-2.0", ("MPL-2.0",)),
+    ("servo_arc", "0.3.0"): ("MIT/Apache-2.0", ("MIT", "Apache-2.0")),
 }
 # These actual upstream notices incorporate standard terms by reference.
 # Supplement the recovered notice; this is NOT another missing-text fallback.

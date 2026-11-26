@@ -167,6 +167,52 @@ class LicenseCollectionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "upstream notice hash mismatch"):
                 self.run_collection()
 
+    def test_upstream_override_rejects_conflicting_package_and_vcs_bindings(self):
+        overrides, _ = self.override()
+        record = overrides / "dependency-0.1.0/source.json"
+        original = json.loads(record.read_text())
+        for field, conflicting in (
+            ("name", "different-package"),
+            ("version", "0.2.0"),
+            ("license_expression", "Apache-2.0"),
+            ("vcs_sha1", "b" * 40),
+            ("path_in_vcs", "different/path"),
+        ):
+            with self.subTest(field=field):
+                record.write_text(json.dumps({**original, field: conflicting}))
+                with patch.object(collector, "OVERRIDES_ROOT", overrides):
+                    with self.assertRaisesRegex(ValueError, "upstream notice provenance mismatch"):
+                        collector.upstream_notices(
+                            self.packages[1], self.root / "dependency",
+                            self.root / "unused", self.root,
+                        )
+
+    def test_checked_in_phf_notices_match_published_vcs_bindings_and_hashes(self):
+        for name, version, commit, path in (
+            ("phf", "0.10.1", "bed01538ae576876f11189d541875d228acef9e8", "phf"),
+            ("phf_codegen", "0.10.0", "3ea14b2166553ad6e7b9afe7244144f5d661b6c6", ""),
+            ("phf_generator", "0.10.0", "3ea14b2166553ad6e7b9afe7244144f5d661b6c6", ""),
+            ("phf_shared", "0.10.0", "3ea14b2166553ad6e7b9afe7244144f5d661b6c6", ""),
+        ):
+            with self.subTest(name=name):
+                source = self.root / name
+                source.mkdir()
+                (source / ".cargo_vcs_info.json").write_text(json.dumps({
+                    "git": {"sha1": commit}, "path_in_vcs": path,
+                }))
+                package = {"name": name, "version": version, "license": "MIT"}
+                notices = collector.upstream_notices(
+                    package, source, self.root / "notices" / name, self.root,
+                )
+                self.assertEqual(len(notices), 1)
+                notice = notices[0]
+                self.assertEqual(
+                    notice["sha256"],
+                    "d8870d5e2ab20fc50915b711c5aa7588131c9abcc1bcb980da1efd7486522a46",
+                )
+                self.assertEqual(notice["vcs_sha1"], commit)
+                self.assertIn(f"/{commit}/LICENSE", notice["upstream_url"])
+
     def canonical_fixture(self, overrides, identifiers=("MIT",)):
         (overrides / "spdx").mkdir()
         commit = "a" * 40
@@ -329,6 +375,62 @@ class LicenseCollectionTests(unittest.TestCase):
         with patch.object(collector, "OVERRIDES_ROOT", overrides):
             with self.assertRaisesRegex(ValueError, "unrecognized/conflicting declared-SPDX"):
                 self.run_collection(strict=True)
+
+    def check_scraper_standard(self, name, version, expression, identifiers):
+        overrides, _ = self.standard_fixture(
+            name=name, version=version, expression=expression, identifiers=identifiers,
+        )
+        with patch.object(collector, "OVERRIDES_ROOT", overrides):
+            result = self.run_collection(strict=True)
+        package = next(p for p in result["packages"] if p["name"] == name)
+        self.assertEqual(package["license_text_status"], "declared-standard-text")
+        self.assertEqual(package["license_expression"], expression)
+        self.assertEqual(result["warnings"], [])
+        self.assertEqual(result["declared_standard_package_count"], 1)
+        self.assertEqual(
+            len([n for n in package["notices"] if n.get("kind") == "declared-standard-text"]),
+            len(identifiers),
+        )
+        self.assertTrue(any(n.get("kind") == "source-header-notice" for n in package["notices"]))
+
+    def test_reviewed_fxhash_exact_legacy_grant(self):
+        self.check_scraper_standard("fxhash", "0.2.1", "Apache-2.0/MIT", ("Apache-2.0", "MIT"))
+
+    def test_reviewed_mac_exact_legacy_grant(self):
+        self.check_scraper_standard("mac", "0.1.1", "MIT/Apache-2.0", ("MIT", "Apache-2.0"))
+
+    def test_reviewed_selectors_exact_mpl_grant(self):
+        self.check_scraper_standard("selectors", "0.25.0", "MPL-2.0", ("MPL-2.0",))
+
+    def test_reviewed_servo_arc_exact_legacy_grant(self):
+        self.check_scraper_standard("servo_arc", "0.3.0", "MIT/Apache-2.0", ("MIT", "Apache-2.0"))
+
+    def test_selectors_future_version_is_not_automatically_reviewed(self):
+        overrides, _ = self.standard_fixture(
+            name="selectors", version="0.26.0", expression="MPL-2.0", identifiers=("MPL-2.0",),
+        )
+        with patch.object(collector, "OVERRIDES_ROOT", overrides):
+            with self.assertRaisesRegex(ValueError, "unrecognized/conflicting declared-SPDX"):
+                self.run_collection(strict=True)
+
+    def test_fxhash_reordered_legacy_grant_is_not_automatically_reviewed(self):
+        overrides, _ = self.standard_fixture(
+            name="fxhash", version="0.2.1", expression="MIT/Apache-2.0",
+            identifiers=("MIT", "Apache-2.0"),
+        )
+        with patch.object(collector, "OVERRIDES_ROOT", overrides):
+            with self.assertRaisesRegex(ValueError, "unrecognized/conflicting declared-SPDX"):
+                self.run_collection(strict=True)
+
+    def test_checked_in_canonical_mpl_is_verbatim_and_hash_pinned(self):
+        _, terms = collector.canonical_standard_terms(("MPL-2.0",))
+        identifier, data, evidence = terms[0]
+        self.assertEqual(identifier, "MPL-2.0")
+        self.assertEqual(evidence["transform"], "verbatim")
+        self.assertEqual(
+            hashlib.sha256(data).hexdigest(),
+            "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172",
+        )
 
     def upstream_standard_fixture(self):
         overrides, raw = self.override()

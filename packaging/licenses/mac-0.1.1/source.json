@@ -1,0 +1,18 @@
+{
+  "record_type": "declared-spdx",
+  "name": "mac",
+  "version": "0.1.1",
+  "license_expression": "MIT/Apache-2.0",
+  "crate_sha256": "c41e0c4fef86961ac6d6f8a82609f55f31b05e4fce149ac5710e439df7619ba4",
+  "archive_url": "https://static.crates.io/crates/mac/mac-0.1.1.crate",
+  "canonical_license_ids": ["MIT", "Apache-2.0"],
+  "evidence": "Archive SHA-256 verified against Cargo.lock. No .cargo_vcs_info.json exists in this legacy archive. Every published member, including Cargo.toml, byte-matches the exact source release commit below. Complete exact-commit tree contains no standalone legal files; README declares MIT/Apache-2.0, like rust itself. No copyright/source-header notice was found in the archive; none invented. Actual manifest/authors/README are retained with canonical terms. Only this exact version and literal standard declaration are recognized; no legal approval.",
+  "source_evidence": {
+    "method": "all-published-archive-members-byte-match",
+    "repository": "https://github.com/reem/rust-mac",
+    "commit": "66afc663b68a65633ea165c742b5a9c6734581c2",
+    "tree_url": "https://api.github.com/repos/reem/rust-mac/git/trees/66afc663b68a65633ea165c742b5a9c6734581c2?recursive=1",
+    "matched_archive_members": [".gitignore", ".travis.yml", "Cargo.toml", "README.md", "src/cfg.rs", "src/format.rs", "src/inspect.rs", "src/lib.rs", "src/matches.rs", "src/mem.rs", "src/syntax_ext.rs", "src/test.rs"],
+    "actual_package_notice_count": 0
+  }
+}
