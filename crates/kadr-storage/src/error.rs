@@ -12,6 +12,10 @@ pub enum Error {
     DirectoriesUnavailable,
     Io,
     Database,
+    CredentialStoreUnavailable,
+    CredentialStoreLocked,
+    CredentialStoreDenied,
+    CredentialStore,
     FutureSchema { found: i64, supported: i64 },
     InvalidSchemaVersion,
 }
@@ -24,6 +28,12 @@ impl fmt::Display for Error {
             Self::DirectoriesUnavailable => f.write_str("standard user directories unavailable"),
             Self::Io => f.write_str("storage filesystem operation failed"),
             Self::Database => f.write_str("storage database operation failed"),
+            Self::CredentialStoreUnavailable => f.write_str("OS credential store unavailable"),
+            Self::CredentialStoreLocked => f.write_str("OS credential store is locked"),
+            Self::CredentialStoreDenied => {
+                f.write_str("OS credential store access denied or cancelled")
+            }
+            Self::CredentialStore => f.write_str("OS credential store operation failed"),
             Self::FutureSchema { found, supported } => write!(
                 f,
                 "database schema {found} is newer than supported schema {supported}"

@@ -9,5 +9,11 @@ directories = "6.0"
 kadr-core = { path = "../kadr-core" }
 rusqlite = { version = "0.42", features = ["bundled"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "=5.19.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "=3.7.0"
+
 [dev-dependencies]
 tempfile = "3"

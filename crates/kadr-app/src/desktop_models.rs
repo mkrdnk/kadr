@@ -115,6 +115,8 @@ pub(super) fn media_card(media: Media) -> MediaCard {
         year: media.year,
         description: Some(media.description),
         poster_url: media.poster_url,
+        backdrop_url: media.backdrop_url,
+        rating_tenths: media.rating_tenths,
         kind: match media.kind {
             MediaKind::Movie => kadr_ui::MediaKind::Movie,
             MediaKind::Series => kadr_ui::MediaKind::Series,
@@ -140,7 +142,10 @@ pub(super) fn source_row(index: usize, source: SourceCandidate) -> SourceRow {
         quality: source.quality,
         language: source.language,
         origin: source.origin,
-        license: Some(source.license),
+        license: (!source.license.is_empty()).then_some(source.license),
+        size: source.size,
+        seeds: source.seeds,
+        rutracker: source.rutracker,
     }
 }
 
@@ -188,6 +193,7 @@ pub(super) fn library_row(item: LibraryItem) -> LibraryRow {
     LibraryRow {
         id: item.id,
         title: item.title,
+        poster_url: item.poster_url,
         details,
         favorite: item.favorite,
         opened_at: item.opened_at,
@@ -278,6 +284,9 @@ mod tests {
             language: None,
             license: "CC0".into(),
             origin: "Публичный каталог".into(),
+            size: None,
+            seeds: None,
+            rutracker: false,
         };
         let row = source_row(7, source);
         assert_eq!(row.index, 7);
@@ -296,6 +305,8 @@ mod tests {
             original_title: None,
             year: None,
             description: "Описание".into(),
+            rating_tenths: None,
+            backdrop_url: None,
             poster_url: None,
             kind: MediaKind::Series,
             episodes: vec![kadr_engine::catalog::Episode {
@@ -343,6 +354,7 @@ mod tests {
         let row = library_row(LibraryItem {
             id: "test:series@2:3".into(),
             title: "Series".into(),
+            poster_url: None,
             favorite: true,
             opened_at: Some(123),
             episode: Some(kadr_engine::LibraryEpisode {
@@ -365,6 +377,7 @@ mod tests {
         let row = library_row(LibraryItem {
             id: "opaque-item".into(),
             title: "Movie".into(),
+            poster_url: None,
             favorite: false,
             opened_at: None,
             episode: None,

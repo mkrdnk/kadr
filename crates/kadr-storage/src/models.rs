@@ -52,9 +52,17 @@ pub enum StoredSource {
         path: PathBuf,
         file_id: Option<usize>,
     },
+    /// Re-resolve a RuTracker topic without storing its authenticated URLs or metainfo.
+    RuTracker {
+        topic_id: u64,
+        info_hash: String,
+        file_id: Option<usize>,
+    },
 }
 
 impl StoredSource {
+    pub(crate) const RUTRACKER_PREFIX: &str = "rutracker:v1:";
+
     /// Validates through the same rules and identity implementation as manual input.
     /// Does not read files or contact the network.
     pub fn manual_source(&self) -> Result<kadr_core::source::ManualSource> {
@@ -78,12 +86,39 @@ impl StoredSource {
                 }
                 ManualSource::torrent_file(path.clone())
             }
+            Self::RuTracker { .. } => return Err(Error::InvalidInput("not a manual source")),
         }
         .map_err(|_| Error::InvalidInput("stored source"))
     }
 
     pub fn source_id(&self) -> Result<SourceId> {
+        if let Self::RuTracker {
+            topic_id,
+            info_hash,
+            file_id,
+        } = self
+        {
+            if *topic_id == 0
+                || info_hash.len() != 40
+                || !info_hash
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                || file_id.is_some_and(|id| i64::try_from(id).is_err())
+            {
+                return Err(Error::InvalidInput("RuTracker source"));
+            }
+            return SourceId::new(format!("{}{topic_id}:{info_hash}", Self::RUTRACKER_PREFIX));
+        }
         SourceId::new(self.manual_source()?.id().as_str())
+    }
+
+    pub fn file_id(&self) -> Option<usize> {
+        match self {
+            Self::Link(_) => None,
+            Self::TorrentLink { file_id, .. }
+            | Self::TorrentFile { file_id, .. }
+            | Self::RuTracker { file_id, .. } => *file_id,
+        }
     }
 }
 

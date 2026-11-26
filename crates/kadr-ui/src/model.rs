@@ -1,20 +1,28 @@
 //! Display-only state. Source URLs and credentials belong to the controller.
-//! Metadata, public poster URLs and user-configured cache paths are display data.
+//! Metadata, public image URLs and user-configured cache paths are display data.
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Section {
+    #[default]
+    Home,
+    Movies,
+    Shows,
     Search,
     Library,
-    #[default]
+    History,
     Sources,
     Transfers,
     Settings,
 }
 
 impl Section {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 9] = [
+        Self::Home,
+        Self::Movies,
+        Self::Shows,
         Self::Search,
         Self::Library,
+        Self::History,
         Self::Sources,
         Self::Transfers,
         Self::Settings,
@@ -22,28 +30,30 @@ impl Section {
 
     pub fn title(self) -> &'static str {
         match self {
+            Self::Home => "Главная",
+            Self::Movies => "Фильмы",
+            Self::Shows => "Сериалы",
             Self::Search => "Поиск",
-            Self::Library => "Библиотека",
+            Self::Library => "Моя библиотека",
+            Self::History => "История",
             Self::Sources => "Источники",
-            Self::Transfers => "Передачи",
+            Self::Transfers => "Загрузки",
             Self::Settings => "Настройки",
         }
     }
 
     pub(crate) fn index(self) -> usize {
-        match self {
-            Self::Search => 0,
-            Self::Library => 1,
-            Self::Sources => 2,
-            Self::Transfers => 3,
-            Self::Settings => 4,
-        }
+        self as usize
     }
 
     pub(crate) fn id(self) -> &'static str {
         match self {
+            Self::Home => "nav-home",
+            Self::Movies => "nav-movies",
+            Self::Shows => "nav-shows",
             Self::Search => "nav-search",
             Self::Library => "nav-library",
+            Self::History => "nav-history",
             Self::Sources => "nav-sources",
             Self::Transfers => "nav-transfers",
             Self::Settings => "nav-settings",
@@ -183,15 +193,25 @@ pub enum UiEvent {
     Retry(Section),
     Cancel(Section),
     Search(String),
+    Browse,
     OpenMedia(String),
     FindSources,
-    SelectEpisode { season: u16, number: u16 },
+    SelectEpisode {
+        season: u16,
+        number: u16,
+    },
     ChooseSource(usize),
     ToggleFavorite,
-    SetFavorite { id: String, favorite: bool },
+    SetFavorite {
+        id: String,
+        favorite: bool,
+    },
     OpenLibrary(String),
     ChooseTorrentFile(usize),
-    AssignEpisode { season: u16, number: u16 },
+    AssignEpisode {
+        season: u16,
+        number: u16,
+    },
     Save,
     OpenIn(PlayerChoice),
     SavePreferences(PreferencesDraft),
@@ -199,6 +219,22 @@ pub enum UiEvent {
     ClearCache,
     ClearHistory,
     UnlinkMedia,
+    /// The controller remembers credentials only in the system vault, never config.
+    SignInRuTracker(RuTrackerCredentials),
+    ForgetRuTracker,
+}
+
+/// Transient sign-in input; neither field is available in debug formatting.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RuTrackerCredentials {
+    pub username: String,
+    pub password: String,
+}
+
+impl std::fmt::Debug for RuTrackerCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RuTrackerCredentials([redacted])")
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -223,6 +259,10 @@ pub struct MediaCard {
     pub description: Option<String>,
     /// Public metadata URL only, never a playback or authenticated URL.
     pub poster_url: Option<String>,
+    /// Public wide metadata image supplied by the controller; falls back to the poster.
+    pub backdrop_url: Option<String>,
+    /// Provider rating on a ten-point scale, in tenths (87 represents 8.7).
+    pub rating_tenths: Option<u8>,
     pub kind: MediaKind,
     pub episodes: Vec<EpisodeRow>,
     pub attribution: String,
@@ -237,6 +277,11 @@ pub struct SourceRow {
     pub language: Option<String>,
     pub origin: String,
     pub license: Option<String>,
+    /// Controller-provided size in bytes; absence is not a zero-size download.
+    pub size: Option<u64>,
+    pub seeds: Option<u32>,
+    /// Tracker metadata is unverified, including quality and rights claims.
+    pub rutracker: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -253,6 +298,7 @@ pub struct TorrentFileRow {
 pub struct LibraryRow {
     pub id: String,
     pub title: String,
+    pub poster_url: Option<String>,
     pub details: String,
     pub favorite: bool,
     /// Actual successful source open, independently of player telemetry.
@@ -321,7 +367,7 @@ impl Default for PreferencesDraft {
 
 pub(crate) struct ShellModel {
     pub section: Section,
-    pub states: [SectionState; 5],
+    pub states: [SectionState; Section::ALL.len()],
     pub default_player: PlayerChoice,
     pub source: Option<SourcePreview>,
     pub playback_available: bool,
@@ -329,6 +375,9 @@ pub(crate) struct ShellModel {
     pub status: UiStatus,
     pub preferences_status: String,
     pub results: Vec<MediaCard>,
+    pub movies: Vec<MediaCard>,
+    pub shows: Vec<MediaCard>,
+    pub browse_state: SectionState,
     pub media: Option<MediaCard>,
     pub sources: Vec<SourceRow>,
     pub files: Vec<TorrentFileRow>,
@@ -343,17 +392,23 @@ pub(crate) struct ShellModel {
 impl Default for ShellModel {
     fn default() -> Self {
         Self {
-            section: Section::Sources,
-            states: [
-                SectionState::Empty("Введите название фильма или сериала.".into()),
-                SectionState::Empty("Нет избранного и истории просмотра.".into()),
+            section: Section::Home,
+            states: Section::ALL.map(|section| {
                 SectionState::Empty(
-                    "Добавьте HTTP(S)- или magnet-ссылку из буфера обмена либо выберите файл .torrent."
-                        .into(),
-                ),
-                SectionState::Empty("Нет активной сессии.".into()),
-                SectionState::Empty("Настройки ещё не загружены.".into()),
-            ],
+                    match section {
+                        Section::Search => "Введите название фильма или сериала.",
+                        Section::Library => "Нет избранного и истории просмотра.",
+                        Section::History => "История пока пуста.",
+                        Section::Sources => {
+                            "Вставьте HTTP(S)- или magnet-ссылку либо откройте файл .torrent."
+                        }
+                        Section::Transfers => "Нет активной сессии.",
+                        Section::Settings => "Настройки ещё не загружены.",
+                        _ => "Каталог ещё не загружен.",
+                    }
+                    .into(),
+                )
+            }),
             default_player: PlayerChoice::Mpv,
             source: None,
             playback_available: false,
@@ -361,6 +416,9 @@ impl Default for ShellModel {
             status: UiStatus::info("Откройте источник или найдите фильм в каталоге."),
             preferences_status: "Изменения применяются после сохранения.".into(),
             results: Vec::new(),
+            movies: Vec::new(),
+            shows: Vec::new(),
+            browse_state: SectionState::Empty("Каталог ещё не загружен.".into()),
             media: None,
             sources: Vec::new(),
             files: Vec::new(),
@@ -418,10 +476,21 @@ impl ShellModel {
                     .iter()
                     .any(|episode| episode.season == *season && episode.number == *number)
             }),
-            UiEvent::OpenMedia(id) => self.results.iter().any(|media| media.id == *id),
-            UiEvent::OpenLibrary(id) | UiEvent::SetFavorite { id, .. } => {
-                self.library.iter().any(|row| row.id == *id)
+            UiEvent::OpenMedia(id) => {
+                !self.playback_active
+                    && self
+                        .results
+                        .iter()
+                        .chain(&self.movies)
+                        .chain(&self.shows)
+                        .chain(&self.media)
+                        .any(|media| media.id == *id)
             }
+            UiEvent::Browse => !matches!(self.browse_state, SectionState::Loading(_)),
+            UiEvent::OpenLibrary(id) => {
+                !self.playback_active && self.library.iter().any(|row| row.id == *id)
+            }
+            UiEvent::SetFavorite { id, .. } => self.library.iter().any(|row| row.id == *id),
             UiEvent::UnlinkMedia => self.media.is_some(),
             UiEvent::Save | UiEvent::OpenIn(_) => self.source.is_some() && self.playback_active,
             UiEvent::Search(query) => !query.trim().is_empty(),
@@ -435,10 +504,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rutracker_login_event_debug_redacts_both_fields() {
+        let event = UiEvent::SignInRuTracker(RuTrackerCredentials {
+            username: "example-account".into(),
+            password: "example-credential".into(),
+        });
+        assert_eq!(
+            format!("{event:?}"),
+            "SignInRuTracker(RuTrackerCredentials([redacted]))"
+        );
+    }
+
+    #[test]
     fn browser_history_does_not_require_or_invent_resume_position() {
         let mut row = LibraryRow {
             id: "local:item".into(),
             title: "Own video".into(),
+            poster_url: None,
             details: String::new(),
             favorite: false,
             opened_at: Some(100),
@@ -464,7 +546,9 @@ mod tests {
     #[test]
     fn starts_without_fabricated_results_or_playback() {
         let model = ShellModel::default();
-        assert_eq!(model.section, Section::Sources);
+        assert_eq!(model.section, Section::Home);
+        assert!(model.movies.is_empty());
+        assert!(model.shows.is_empty());
         assert_eq!(model.default_player, PlayerChoice::Mpv);
         assert_eq!(model.status.level, StatusLevel::Info);
         assert!(!model.preferences_status.is_empty());
@@ -587,6 +671,9 @@ mod tests {
             language: None,
             origin: "Provider".into(),
             license: None,
+            size: None,
+            seeds: None,
+            rutracker: false,
         });
         assert!(model.accepts(&UiEvent::ChooseSource(7)));
         assert!(!model.accepts(&UiEvent::ChooseSource(0)));

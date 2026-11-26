@@ -30,6 +30,45 @@ fn observation(episode: u16, source: &StoredSource, updated_at: i64) -> Playback
 }
 
 #[test]
+fn rutracker_history_keeps_topic_hash_and_each_selected_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let mut store = Storage::open(&path).unwrap();
+    let first = StoredSource::RuTracker {
+        topic_id: 42,
+        info_hash: "0123456789abcdef0123456789abcdef01234567".into(),
+        file_id: Some(7),
+    };
+    let mut second = first.clone();
+    if let StoredSource::RuTracker { file_id, .. } = &mut second {
+        *file_id = Some(9);
+    }
+    let id = first.source_id().unwrap();
+    assert_eq!(second.source_id().unwrap(), id);
+    assert!(first.manual_source().is_err());
+    for (episode, source) in [(1, &first), (2, &second)] {
+        let progress = observation(episode, source, i64::from(episode));
+        store.save_source(&id, source).unwrap();
+        store.link_source(&progress.target, &id).unwrap();
+        store.save_progress_for_source(&progress, source).unwrap();
+    }
+    drop(store);
+
+    let store = Storage::open(&path).unwrap();
+    for (episode, source) in [(1, first), (2, second)] {
+        let item = target(Some(episode));
+        assert_eq!(
+            store.source_for_target(&item).unwrap(),
+            Some(source.clone())
+        );
+        assert_eq!(
+            store.library_target(&item).unwrap().unwrap().source,
+            Some(source)
+        );
+    }
+}
+
+#[test]
 fn every_episode_remains_resumable_with_its_immutable_selection_after_restart() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");

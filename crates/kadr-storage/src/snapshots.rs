@@ -49,6 +49,9 @@ impl Storage {
                 Some(encode_path(path)),
                 file_id.map(|id| id as i64),
             ),
+            StoredSource::RuTracker { file_id, .. } => {
+                ("rutracker", None, None, file_id.map(|id| id as i64))
+            }
         };
         self.connection.execute(
             "INSERT INTO sources(source_id, kind, link, path, file_id)
@@ -90,6 +93,20 @@ impl Storage {
                 path: decode_path(path)?,
                 file_id: decode_file_id(file_id)?,
             },
+            ("rutracker", None, None, file_id) => {
+                let (topic, hash) = id
+                    .as_str()
+                    .strip_prefix(StoredSource::RUTRACKER_PREFIX)
+                    .and_then(|rest| rest.split_once(':'))
+                    .ok_or(Error::CorruptData("RuTracker source"))?;
+                StoredSource::RuTracker {
+                    topic_id: topic
+                        .parse()
+                        .map_err(|_| Error::CorruptData("RuTracker topic"))?,
+                    info_hash: hash.to_owned(),
+                    file_id: decode_file_id(file_id)?,
+                }
+            }
             _ => return Err(Error::CorruptData("source descriptor")),
         };
         if source.source_id().ok().as_ref() != Some(id) {
@@ -143,6 +160,15 @@ impl Storage {
             }),
             Some(StoredSource::TorrentLink { uri, .. }) => Some(StoredSource::TorrentLink {
                 uri,
+                file_id: selection,
+            }),
+            Some(StoredSource::RuTracker {
+                topic_id,
+                info_hash,
+                ..
+            }) => Some(StoredSource::RuTracker {
+                topic_id,
+                info_hash,
                 file_id: selection,
             }),
             Some(StoredSource::Link(uri)) if selection.is_some() => {

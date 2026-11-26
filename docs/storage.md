@@ -68,9 +68,15 @@ application identity. Reusing the deterministic core source ID as a media ID is
 sufficient for an initially uncatalogued manual item. Storage ID wrappers allow
 1..=256 ASCII bytes from `A-Z a-z 0-9 . _ : -`. Legacy opaque source IDs remain
 readable for v1/v2 compatibility, but **`save_source` rejects an ID that does not
-equal the validated descriptor's `kadr-core` source ID**. Use
-`StoredSource::source_id()` or convert a validated core ID with
-`SourceId::new(core_id.as_str())`. The keys never contain source URLs/paths.
+equal the validated descriptor's ID**. Use `StoredSource::source_id()`. For
+manual sources it derives from the core source identity. Keys never contain
+source URLs or paths.
+
+`StoredSource::RuTracker` uses a provider-specific identity consisting of a
+topic ID and v1 info hash. The engine resolves it again, checks the returned
+hash and only then reuses the selected file. It does not store magnet links or
+downloaded metainfo for these descriptors. Account credentials use the platform
+vault (macOS Keychain or Linux Secret Service), never SQLite.
 
 ## Directories and files
 
@@ -147,6 +153,8 @@ The public connection is opaque; callers cannot bypass validation via it.
 4. Exact per-target actual-open history with immutable source/file selections.
    Existing media-wide v3 open timestamps migrate to item-level history only.
    Neither measured progress nor a source link invents an episode open timestamp.
+5. RuTracker source descriptors; copies all existing source rows and keeps
+   playback targets, selections and history keys intact.
 
 Opening uses `BEGIN IMMEDIATE`, checks the version, applies the entire missing
 migration chain and updates `user_version` in **one transaction**. Any failure

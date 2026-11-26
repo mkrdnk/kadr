@@ -11,7 +11,7 @@ members = [
     "crates/kadr-ui",
 ]
 resolver = "3"
-exclude = ["vendor/gpui"]
+exclude = ["vendor/gpui", "vendor/rutracker-api"]
 
 [workspace.package]
 version = "0.1.0"

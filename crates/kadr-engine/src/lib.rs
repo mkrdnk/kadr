@@ -17,18 +17,28 @@ pub use dto::{
     CacheUsage, EngineDirectories, LibraryEpisode, LibraryItem, LibraryProgress, NetworkLimits,
     PlayerPreference, RateLimit, Settings, SourceCandidate,
 };
+pub use kadr_catalog::BrowseCatalog;
 pub use kadr_core::source;
 
 /// Provider-neutral metadata, without actionable source descriptors.
 ///
-/// Source events use the engine's own [`crate::SourceCandidate`], not the internal
-/// catalog type that carries playback URLs.
+/// Source events use the engine's own [`crate::SourceCandidate`]. Topic IDs,
+/// magnet URLs and tracker credentials remain behind the engine boundary.
 ///
 /// ```compile_fail
 /// use kadr_engine::catalog::SourceCandidate;
 /// ```
 pub mod catalog {
+    pub use kadr_catalog::is_public_catalog_image;
     pub use kadr_core::catalog::{Episode, Media, MediaKind};
+
+    /// A separate, disposable cache for public artwork, outside the torrent cache.
+    /// Returns a location only; the desktop image client owns access and eviction.
+    pub fn artwork_cache_directory() -> std::io::Result<std::path::PathBuf> {
+        super::AppPaths::discover()
+            .map(|paths| paths.cache_dir().join("catalog-images-v1"))
+            .map_err(|_| std::io::Error::other("Не удалось определить каталог кэша обложек."))
+    }
 }
 
 use std::{path::PathBuf, thread};
@@ -80,12 +90,17 @@ pub enum Event {
     },
     Status(Level, String),
     PlaybackActive(bool),
+    BrowseState(AsyncState<BrowseCatalog>),
     SearchState(AsyncState<Vec<Media>>),
     MediaSelected {
         media: Option<Media>,
         favorite: bool,
     },
     SourcesState(AsyncState<Vec<SourceCandidate>>),
+    RuTrackerLogin {
+        message: Option<String>,
+        pending: bool,
+    },
     SourceSelected {
         kind: Option<SourceKind>,
         title: String,
@@ -109,12 +124,21 @@ pub enum Level {
 }
 
 pub enum Command {
+    /// Fetch bounded provider shelves in response to explicit user action.
+    Browse,
     Search(String),
     OpenMedia(String),
     FindSources,
+    RetrySources,
     SelectEpisode(u16, u16),
     SelectSource(ManualSource),
     ChooseSource(usize),
+    /// Submit the user's own credentials. The command intentionally has no Debug.
+    SignInRuTracker {
+        username: String,
+        password: String,
+    },
+    ForgetRuTracker,
     ChooseTorrentFile(usize),
     AssignEpisode(u16, u16),
     Play {
@@ -144,6 +168,7 @@ struct Request {
 pub struct Engine {
     commands: mpsc::Sender<Request>,
     shutdown: CancellationToken,
+    browse_stop: CancellationToken,
     catalog_stop: CancellationToken,
     source_stop: CancellationToken,
     playback_stop: CancellationToken,
@@ -220,6 +245,7 @@ impl Engine {
         Ok((
             Self {
                 commands,
+                browse_stop: shutdown.child_token(),
                 catalog_stop: shutdown.child_token(),
                 source_stop: shutdown.child_token(),
                 playback_stop: shutdown.child_token(),
@@ -239,18 +265,30 @@ impl Engine {
         // Cancellation bypasses the queue: a pending metadata/IPC operation
         // cannot prevent Stop, a newer search, or application shutdown.
         let cancel = match &command {
+            Command::Browse => {
+                self.browse_stop.cancel();
+                self.browse_stop = self.shutdown.child_token();
+                self.browse_stop.clone()
+            }
             Command::Search(_)
             | Command::OpenMedia(_)
             | Command::FindSources
+            | Command::RetrySources
             | Command::SelectEpisode(_, _) => {
-                if matches!(&command, Command::OpenMedia(_)) {
+                if !matches!(&command, Command::Search(_)) {
                     self.source_stop.cancel();
                 }
                 self.catalog_stop.cancel();
                 self.catalog_stop = self.shutdown.child_token();
                 self.catalog_stop.clone()
             }
-            Command::SelectSource(_) | Command::ChooseSource(_) | Command::OpenLibrary(_) => {
+            Command::SelectSource(_)
+            | Command::ChooseSource(_)
+            | Command::OpenLibrary(_)
+            | Command::SignInRuTracker { .. }
+            | Command::ForgetRuTracker
+            | Command::UnlinkMedia => {
+                self.catalog_stop.cancel();
                 self.source_stop.cancel();
                 self.source_stop = self.shutdown.child_token();
                 self.source_stop.clone()
@@ -286,6 +324,7 @@ impl Engine {
             }
             Command::UpdateSettings(settings) => {
                 if !settings.catalog_enabled {
+                    self.browse_stop.cancel();
                     self.catalog_stop.cancel();
                 }
                 if !settings.network.torrents_enabled {

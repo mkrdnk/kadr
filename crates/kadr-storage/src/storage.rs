@@ -10,7 +10,7 @@ use crate::{
     snapshots::link_source_row,
 };
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Synchronous connection, intended to be owned by one background worker.
 /// No raw connection is exposed, so writes always pass validation.
@@ -282,12 +282,7 @@ impl Storage {
         if source.source_id()? != progress.source_id {
             return Err(Error::InvalidInput("progress source identity"));
         }
-        let file_id = match source {
-            StoredSource::Link(_) => None,
-            StoredSource::TorrentLink { file_id, .. }
-            | StoredSource::TorrentFile { file_id, .. } => *file_id,
-        };
-        self.save_progress_impl(progress, Some(file_id))
+        self.save_progress_impl(progress, Some(source.file_id()))
     }
 
     fn save_progress_impl(
@@ -642,6 +637,26 @@ fn migrate(connection: &mut Connection) -> Result<()> {
                  WHERE l.last_opened_at IS NOT NULL;",
         )?;
         transaction.pragma_update(None, "user_version", 4)?;
+    }
+    if version < 5 {
+        // No foreign key references sources: keep all target/history keys exactly as-is.
+        transaction.execute_batch(
+            "CREATE TABLE sources_v5 (
+                 source_id TEXT PRIMARY KEY NOT NULL,
+                 kind TEXT NOT NULL CHECK(kind IN ('link', 'magnet', 'torrent', 'rutracker')),
+                 link TEXT,
+                 path BLOB,
+                 file_id INTEGER CHECK(file_id >= 0),
+                 CHECK ((kind = 'link' AND link IS NOT NULL AND path IS NULL AND file_id IS NULL)
+                     OR (kind = 'magnet' AND link IS NOT NULL AND path IS NULL)
+                     OR (kind = 'rutracker' AND link IS NULL AND path IS NULL)
+                     OR (kind = 'torrent' AND link IS NULL AND path IS NOT NULL))
+             ) STRICT;
+             INSERT INTO sources_v5 SELECT source_id, kind, link, path, file_id FROM sources;
+             DROP TABLE sources;
+             ALTER TABLE sources_v5 RENAME TO sources;",
+        )?;
+        transaction.pragma_update(None, "user_version", 5)?;
     }
     if version < 1 {
         write_settings(&transaction, &Settings::default())?;

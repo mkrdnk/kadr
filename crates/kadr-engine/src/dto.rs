@@ -2,7 +2,7 @@
 
 use std::{fmt, path::PathBuf};
 
-use kadr_core::source::{ManualSource, SourceKind};
+use kadr_core::source::SourceKind;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlayerPreference {
@@ -160,6 +160,9 @@ pub struct SourceCandidate {
     pub language: Option<String>,
     pub license: String,
     pub origin: String,
+    pub size: Option<u64>,
+    pub seeds: Option<u32>,
+    pub rutracker: bool,
 }
 
 impl fmt::Debug for SourceCandidate {
@@ -169,17 +172,17 @@ impl fmt::Debug for SourceCandidate {
 }
 
 impl SourceCandidate {
-    pub(crate) fn from_core(value: kadr_core::catalog::SourceCandidate) -> Self {
-        let kind = ManualSource::parse_link(&value.url)
-            .map(|source| source.kind())
-            .unwrap_or(SourceKind::Http);
+    pub(crate) fn from_rutracker(value: &kadr_catalog::rutracker::Offer) -> Self {
         Self {
-            kind,
-            title: value.title,
-            quality: value.quality,
-            language: value.language,
-            license: value.license,
-            origin: value.origin,
+            kind: SourceKind::TorrentFile,
+            title: value.title.clone(),
+            quality: value.quality.clone(),
+            language: None,
+            license: String::new(),
+            origin: "RuTracker".into(),
+            size: value.size,
+            seeds: value.seeds,
+            rutracker: true,
         }
     }
 }
@@ -188,6 +191,7 @@ impl SourceCandidate {
 pub struct LibraryItem {
     pub id: String,
     pub title: String,
+    pub poster_url: Option<String>,
     pub favorite: bool,
     pub opened_at: Option<i64>,
     pub episode: Option<LibraryEpisode>,
@@ -224,12 +228,14 @@ impl LibraryItem {
             ),
             None => value.target.media_id.as_str().to_owned(),
         };
+        let (title, poster_url) = value.media.map_or_else(
+            || ("Ручной источник".into(), None),
+            |media| (media.title, public_catalog_poster(media.poster_url)),
+        );
         Self {
             id,
-            title: value
-                .media
-                .map(|media| media.title)
-                .unwrap_or_else(|| "Ручной источник".into()),
+            title,
+            poster_url,
             favorite: value.entry.favorite,
             opened_at: value.opened_at,
             episode: value.target.episode.map(|episode| LibraryEpisode {
@@ -243,6 +249,13 @@ impl LibraryItem {
             }),
         }
     }
+}
+
+/// Stored snapshots are not trusted as public assets.
+pub(crate) fn public_catalog_poster(value: Option<String>) -> Option<String> {
+    value.filter(|value| {
+        reqwest::Url::parse(value).is_ok_and(|url| kadr_catalog::is_public_catalog_image(&url))
+    })
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -383,72 +396,35 @@ mod tests {
         );
     }
 
-    fn core_candidate(url: &str) -> kadr_core::catalog::SourceCandidate {
-        kadr_core::catalog::SourceCandidate {
-            url: url.into(),
-            title: "/private/source-title".into(),
+    #[test]
+    fn source_display_has_no_topic_credentials_or_unverified_license() {
+        let candidate = SourceCandidate::from_rutracker(&kadr_catalog::rutracker::Offer {
+            topic_id: 42,
+            title: "Source title".into(),
             quality: Some("1080p".into()),
-            language: Some("ru".into()),
-            license: "CC BY".into(),
-            origin: "https://private.example/origin?secret=token".into(),
-        }
-    }
-
-    #[test]
-    fn source_conversion_preserves_metadata_and_parses_kind() {
-        for (url, kind) in [
-            ("https://example.org/video?token=secret", SourceKind::Http),
-            (
-                "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
-                SourceKind::Magnet,
-            ),
-        ] {
-            let original = core_candidate(url);
-            let candidate = SourceCandidate::from_core(original.clone());
-            // Exhaustive destructuring also ensures no URL field is retained.
-            let SourceCandidate {
-                kind: actual_kind,
-                title,
-                quality,
-                language,
-                license,
-                origin,
-            } = candidate;
-            assert_eq!(actual_kind, kind);
-            assert_eq!(title, original.title);
-            assert_eq!(quality, original.quality);
-            assert_eq!(language, original.language);
-            assert_eq!(license, original.license);
-            assert_eq!(origin, original.origin);
-        }
-    }
-
-    #[test]
-    fn invalid_source_links_fall_back_to_http() {
-        for url in [
-            "",
-            "not a URL",
-            "/private/file.torrent",
-            "file:///private/file.torrent",
-            "magnet:?xt=invalid",
-            "https://user:secret@example.org/video",
-        ] {
-            let mut original = core_candidate(url);
-            original.quality = None;
-            original.language = None;
-            let candidate = SourceCandidate::from_core(original);
-            assert_eq!(candidate.kind, SourceKind::Http);
-            assert_eq!(candidate.quality, None);
-            assert_eq!(candidate.language, None);
-        }
-    }
-
-    #[test]
-    fn source_debug_never_exposes_urls_or_private_metadata() {
-        let candidate =
-            SourceCandidate::from_core(core_candidate("https://example.org/video?token=secret"));
+            size: Some(1024),
+            seeds: Some(20),
+        });
         assert_eq!(format!("{candidate:?}"), "SourceCandidate([redacted])");
         assert_eq!(format!("{candidate:#?}"), "SourceCandidate([redacted])");
+        let SourceCandidate {
+            kind,
+            title,
+            quality,
+            language,
+            license,
+            origin,
+            size,
+            seeds,
+            rutracker,
+        } = candidate;
+        assert_eq!(kind, SourceKind::TorrentFile);
+        assert_eq!(title, "Source title");
+        assert_eq!(quality.as_deref(), Some("1080p"));
+        assert_eq!(language, None);
+        assert!(license.is_empty());
+        assert_eq!(origin, "RuTracker");
+        assert_eq!((size, seeds, rutracker), (Some(1024), Some(20), true));
     }
 
     fn stored_library_item() -> kadr_storage::LibraryItem {
@@ -505,6 +481,7 @@ mod tests {
         let LibraryItem {
             id,
             title,
+            poster_url,
             favorite,
             opened_at,
             episode,
@@ -512,6 +489,7 @@ mod tests {
         } = item;
         assert_eq!(id, "catalog:series@0:7");
         assert_eq!(title, "/private/title.mkv");
+        assert!(poster_url.is_none());
         assert!(favorite);
         assert_eq!(opened_at, Some(123));
         assert_eq!(
@@ -573,6 +551,34 @@ mod tests {
         let item = LibraryItem::from_storage(stored_library_item());
         assert_eq!(format!("{item:?}"), "LibraryItem([redacted])");
         assert_eq!(format!("{item:#?}"), "LibraryItem([redacted])");
+    }
+
+    #[test]
+    fn library_poster_is_a_public_provider_asset() {
+        for (url, allowed) in [
+            ("https://media.trakt.tv/movies/1/medium/poster.webp", true),
+            ("https://media.trakt.tv/shows/2/medium/fanart.webp", true),
+            (
+                "https://media.trakt.tv/movies/1/medium/poster.webp?token=private",
+                false,
+            ),
+            (
+                "https://media.trakt.tv/movies/1/medium/secret/poster.webp",
+                false,
+            ),
+            (
+                "https://media.trakt.tv.example/movies/1/medium/poster.webp",
+                false,
+            ),
+            ("https://image.tmdb.org/t/p/w500/movie.jpg", false),
+            ("https://archive.org/services/img/movie", false),
+            (
+                "https://static.tvmaze.com/uploads/images/medium_portrait/1.jpg",
+                false,
+            ),
+        ] {
+            assert_eq!(public_catalog_poster(Some(url.into())).is_some(), allowed);
+        }
     }
 
     #[test]

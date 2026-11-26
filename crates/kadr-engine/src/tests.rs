@@ -20,8 +20,8 @@ use std::{
 };
 
 use kadr_storage::{
-    EpisodeKey, MediaId, PlaybackProgress, PlaybackTarget, ProgressOrigin, SavedFile,
-    SourceId, Storage, StoredSource,
+    EpisodeKey, MediaId, PlaybackProgress, PlaybackTarget, ProgressOrigin, SavedFile, SourceId,
+    Storage, StoredSource,
 };
 use sha1::{Digest, Sha1};
 
@@ -219,11 +219,76 @@ fn assert_public_feedback_is_private(event: &Event) {
             check(&transfer.saving);
         }
         Event::SearchState(AsyncState::Error(message))
+        | Event::BrowseState(AsyncState::Error(message))
         | Event::SourcesState(AsyncState::Error(message)) => check(message),
         // Library snapshots contain no source descriptors and redact private titles.
         Event::Library(items) => check(&format!("{items:?}")),
         _ => {}
     }
+}
+
+#[test]
+fn browse_cancellation_is_independent_from_search_and_source_discovery() {
+    // Inspect queue tokens without running requests or contacting providers.
+    let (commands, mut receiver) = mpsc::channel(32);
+    let shutdown = CancellationToken::new();
+    let mut engine = Engine {
+        commands,
+        browse_stop: shutdown.child_token(),
+        catalog_stop: shutdown.child_token(),
+        source_stop: shutdown.child_token(),
+        playback_stop: shutdown.child_token(),
+        save_stop: shutdown.child_token(),
+        shutdown,
+        thread: None,
+    };
+    assert!(engine.dispatch(Command::Browse));
+    let first_browse = receiver.try_recv().unwrap().cancel;
+    let mut current_browse = first_browse.clone();
+    for command in [Command::Search("query".into()), Command::FindSources] {
+        assert!(engine.dispatch(command));
+        let catalog = receiver.try_recv().unwrap().cancel;
+        assert!(!current_browse.is_cancelled());
+        let source = engine.source_stop.clone();
+        let source_cancelled = source.is_cancelled();
+        assert!(engine.dispatch(Command::Browse));
+        let next_browse = receiver.try_recv().unwrap().cancel;
+        assert!(
+            !catalog.is_cancelled(),
+            "browse must not cancel catalog work"
+        );
+        assert_eq!(source.is_cancelled(), source_cancelled);
+        assert!(current_browse.is_cancelled());
+        assert!(!next_browse.is_cancelled());
+        current_browse = next_browse;
+    }
+    assert!(
+        first_browse.is_cancelled(),
+        "new Browse supersedes old Browse"
+    );
+    assert!(engine.dispatch(Command::Browse));
+    let browse = receiver.try_recv().unwrap().cancel;
+    for command in [Command::Cancel, Command::Stop] {
+        assert!(engine.dispatch(command));
+        receiver.try_recv().unwrap();
+        assert!(
+            !browse.is_cancelled(),
+            "an unrelated dialog must not cancel Browse"
+        );
+    }
+    assert!(engine.dispatch(Command::UpdateSettings(Settings {
+        catalog_enabled: false,
+        ..Settings::default()
+    })));
+    receiver.try_recv().unwrap();
+    assert!(
+        browse.is_cancelled(),
+        "disabling the catalog cancels Browse"
+    );
+    assert!(engine.dispatch(Command::Browse));
+    let browse = receiver.try_recv().unwrap().cancel;
+    engine.cancel();
+    assert!(browse.is_cancelled(), "shutdown cancels Browse too");
 }
 
 #[test]
@@ -893,6 +958,103 @@ fn selecting_another_library_torrent_file_recomputes_its_episode_target() {
             ..
         })
     ));
+    app.finish();
+}
+
+#[test]
+fn reopening_rutracker_history_without_consent_does_not_request_login_or_download() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = paths(directory.path());
+    let mut storage = Storage::open_default(&paths).unwrap();
+    let descriptor = StoredSource::RuTracker {
+        topic_id: 42,
+        info_hash: "0123456789abcdef0123456789abcdef01234567".into(),
+        file_id: Some(2),
+    };
+    let source_id = descriptor.source_id().unwrap();
+    let target = PlaybackTarget {
+        media_id: MediaId::new("test:tracker-history").unwrap(),
+        episode: None,
+    };
+    storage.save_source(&source_id, &descriptor).unwrap();
+    storage.link_source(&target, &source_id).unwrap();
+    storage
+        .record_opened_target(&target, &source_id, 1)
+        .unwrap();
+    let (backend, events) = Engine::start_with(Some(paths), false).unwrap();
+    let mut app = App { backend, events };
+    app.ready();
+    app.command(Command::OpenLibrary(library_id(&target)));
+    app.wait("the stored topic is gated before resolution", |event| {
+        assert!(!matches!(event, Event::RuTrackerLogin { message: Some(_), .. }));
+        assert!(!matches!(event, Event::SourceSelected { playable: true, .. }));
+        matches!(event, Event::SourcesState(crate::AsyncState::Error(message)) if message.contains("BitTorrent"))
+    });
+    assert_eq!(
+        storage.source_for_target(&target).unwrap(),
+        Some(descriptor)
+    );
+    app.finish();
+}
+
+#[test]
+fn legacy_library_can_reopen_a_saved_link_without_enabling_online_discovery() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = paths(directory.path());
+    let mut storage = Storage::open_default(&paths).unwrap();
+    let media_id = MediaId::new("archive:legacy-fixture").unwrap();
+    let target = PlaybackTarget {
+        media_id: media_id.clone(),
+        episode: None,
+    };
+    storage
+        .upsert_media(&kadr_storage::MediaRecord {
+            id: media_id,
+            title: "Legacy film".into(),
+            original_title: None,
+            year: None,
+            kind: kadr_storage::MediaKind::Movie,
+            description: String::new(),
+            poster_url: Some("https://archive.org/services/img/legacy-fixture".into()),
+            attribution: "Saved local snapshot".into(),
+        })
+        .unwrap();
+    let descriptor =
+        StoredSource::Link("https://archive.org/download/legacy-fixture/owned.mp4".into());
+    let source_id = descriptor.source_id().unwrap();
+    storage.save_source(&source_id, &descriptor).unwrap();
+    storage.link_source(&target, &source_id).unwrap();
+    storage
+        .record_opened_target(&target, &source_id, 1)
+        .unwrap();
+
+    let (backend, events) = Engine::start_with(Some(paths), false).unwrap();
+    let mut app = App { backend, events };
+    app.ready();
+    app.command(Command::OpenLibrary(library_id(&target)));
+    app.wait(
+        "legacy snapshot without an Archive poster request",
+        |event| {
+            matches!(event, Event::MediaSelected { media: Some(media), .. }
+            if media.id == "archive:legacy-fixture" && media.poster_url.is_none())
+        },
+    );
+    app.wait("saved HTTP link still available", |event| {
+        matches!(event, Event::SourceSelected { playable: true, .. })
+    });
+    app.command(Command::FindSources);
+    app.wait("explicit notice that RuTracker did not run", |event| {
+        assert!(!matches!(
+            event,
+            Event::SourcesState(crate::AsyncState::Loading)
+        ));
+        matches!(event, Event::SourcesState(crate::AsyncState::Error(message))
+            if message.contains("Поиск RuTracker не выполнялся"))
+    });
+    assert_eq!(
+        storage.source_for_target(&target).unwrap(),
+        Some(descriptor)
+    );
     app.finish();
 }
 

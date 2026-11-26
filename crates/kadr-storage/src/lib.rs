@@ -1,4 +1,4 @@
-//! Local persistence for kadr. All operations are synchronous disk I/O.
+//! Local persistence for kadr. All operations are synchronous.
 //!
 //! Own a [`Storage`] on a dedicated background worker; never open it or call it
 //! from a GPUI render callback. IDs are stable opaque keys, not source URLs or
@@ -7,6 +7,7 @@
 mod error;
 mod models;
 mod paths;
+pub mod rutracker_credentials;
 mod settings;
 mod snapshots;
 mod storage;

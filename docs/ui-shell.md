@@ -9,37 +9,47 @@ the application to configure a GPUI HTTP client.
 
 ## Screens
 
-- **Search**: editable query, Enter/button submission, result-card grid with
-  posters and provider attribution. Detail view shows original title, year,
-  description, favorite control and series season/episode selection.
-- **Sources** (initial screen): found sources with quality, language, origin and
+- **Home** (initial screen) and **Movies/Shows**: a measured-resume hero or
+  a real catalog spotlight, series and movie shelves, adaptive poster grid,
+  and sort by provider order, title, year or rating. A user action loads
+  the shelves; there are no startup requests or placeholder films.
+- **Search overlay** (`Ctrl+K` / `⌘K`): explicit Enter/button submission, poster
+  results, Arrow key selection and Escape to close. Detail view shows
+  available title, year, rating, description, attribution, favorite control
+  and series season/episode selection.
+- **Sources dialog** (also a page for manual input): quality tabs, optional
+  seed sorting, and found sources with quality, language, origin and
   license; manual clipboard attachment and `.torrent` picker; explicit unlink
   from the current media; player selection and playback controls. Private URLs
   and stream tokens have no fields in the presentation DTOs and are not shown.
+  RuTracker rows also show available size and seed count, without asserting
+  playback rights. If the selected topic has no magnet, Sources shows a masked
+  sign-in form only when requested by the engine.
 - **Torrent files**, within Sources: video-file names, byte sizes, recognized
   season/episode and ambiguity indication; file selection and editable numeric
   season/episode correction. The controller decides which files are videos.
-- **Library**: all/favorites/resume/history filters, favorite controls, measured
+- **Library and History**: all/favorites/resume/history filters, favorite controls, measured
   position/duration and open/resume actions. Unknown position stays unknown:
   neither browser launches nor downloaded byte counts imply playback progress.
-- **Transfers**: stage/player summary, downloaded/total bytes and percentage,
+- **Downloads and preparation overlay**: stage/player summary, downloaded/total bytes and percentage,
   buffered bytes, download/upload rates, peers, save summary; Save, Open in and
   Stop controls. Every unknown statistic is explicitly unknown, not zero.
 - **Settings**: default player; editable cache bytes/path, download/upload
   limits, peer cap, BitTorrent and catalogue toggles, directory picker, save,
   clear-cache and clear-history requests.
 
-All sections support `SectionState::{Unavailable,Loading,Empty,Error}`.
-Loading always exposes Cancel; Error exposes Retry. Real DTOs represent success,
+Sections support `SectionState::{Unavailable,Loading,Empty,Error}`.
+Source/search work is cancellable; retry repeats the corresponding request.
+Real DTOs represent success,
 so the default Empty card is hidden when there is data. Errors and Loading remain
 visible alongside previous data. Controllers should set an Empty state after
 successful completion (including a legitimate empty result), replacing any prior
 Loading/Error state. No fake rows or progress values are generated.
 
-## Frozen controller API
+## Controller API
 
-Every public presentation type is exported at the crate root. Existing APIs are
-preserved. Instantiate with `cx.new(|_| KadrView::new())` and subscribe to
+Every public presentation type is exported at the crate root.
+Instantiate with `cx.new(|_| KadrView::new())` and subscribe to
 `UiEvent` using GPUI `cx.subscribe`. Retain the returned `Subscription`.
 
 New DTOs (all derive Clone, Debug, PartialEq, Eq):
@@ -48,19 +58,22 @@ New DTOs (all derive Clone, Debug, PartialEq, Eq):
 MediaCard {
     id: String, title: String, original_title: Option<String>, year: Option<u16>,
     description: Option<String>, poster_url: Option<String>, kind: MediaKind,
+    rating_tenths: Option<u8>,
     episodes: Vec<EpisodeRow>, attribution: String,
 }
 EpisodeRow { season: u16, number: u16, title: String }
 SourceRow {
     index: usize, title: String, kind: SourceKind, quality: Option<String>,
     language: Option<String>, origin: String, license: Option<String>,
+    size: Option<u64>, seeds: Option<u32>, rutracker: bool,
 }
 TorrentFileRow {
     index: usize, name: String, size: u64, season: Option<u16>,
     episode: Option<u16>, ambiguous: bool,
 }
 LibraryRow {
-    id: String, title: String, details: String, favorite: bool,
+    id: String, title: String, poster_url: Option<String>, details: String, favorite: bool,
+    opened_at: Option<i64>, completed: bool,
     position: Option<u64>, duration: Option<u64>, // seconds
 }
 TransferView {
@@ -77,17 +90,19 @@ PreferencesDraft {
 
 Enums: `MediaKind::{Movie,Series}`, `RateLimit::{Paused,Unlimited,Bps(u64)}`,
 `SourceKind::{Http,Magnet,TorrentFile,LocalFile}`, `PlayerChoice::{Mpv,Vlc,Browser}`.
-Section remains `Search,Library,Sources,Transfers,Settings`; detail is inside Search.
+The shell adds `Home, Movies, Shows, History` to the existing sections. Search
+and the detail's Sources open over the current page rather than replacing it.
 
 New events:
 
 ```rust,ignore
-Search(String), OpenMedia(String), FindSources,
+Search(String), Browse, OpenMedia(String), FindSources,
 SelectEpisode { season: u16, number: u16 }, ChooseSource(usize),
 ToggleFavorite, SetFavorite { id: String, favorite: bool }, OpenLibrary(String),
 ChooseTorrentFile(usize), AssignEpisode { season: u16, number: u16 },
 Save, OpenIn(PlayerChoice), SavePreferences(PreferencesDraft),
-ChooseCacheDirectory, ClearCache, ClearHistory, UnlinkMedia
+ChooseCacheDirectory, ClearCache, ClearHistory, UnlinkMedia,
+SignInRuTracker(RuTrackerCredentials), ForgetRuTracker
 ```
 
 Existing events remain `PasteSource,OpenTorrent,Play,PlayFromStart,Stop`,
@@ -104,6 +119,8 @@ Every setter takes `(&mut self, value, &mut Context<KadrView>)` and notifies GPU
 
 ```rust,ignore
 set_search_results(Vec<MediaCard>)
+set_browse_catalog(Vec<MediaCard>, Vec<MediaCard>) // movies, shows
+set_browse_state(SectionState)
 set_media_detail(Option<MediaCard>)
 set_media_favorite(bool)
 set_sources(Vec<SourceRow>)

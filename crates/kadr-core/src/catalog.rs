@@ -16,8 +16,15 @@ pub struct Media {
     pub title: String,
     pub original_title: Option<String>,
     pub year: Option<u16>,
+    /// Provider-reported score out of ten, rounded to one decimal (0–100).
+    /// None means absent or unsupported; never inferred from popularity or search rank.
+    #[serde(default)]
+    pub rating_tenths: Option<u8>,
     pub description: String,
     pub poster_url: Option<String>,
+    /// Public provider image, independent of the poster; absent in older records.
+    #[serde(default)]
+    pub backdrop_url: Option<String>,
     pub kind: MediaKind,
     /// Populated by series details; search cards need not contain episodes.
     pub episodes: Vec<Episode>,

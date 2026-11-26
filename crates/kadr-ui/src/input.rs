@@ -11,6 +11,8 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+use super::{ACCENT, BACKGROUND, BORDER, MUTED, TEXT};
+
 actions!(
     kadr_input,
     [
@@ -56,9 +58,83 @@ pub(crate) fn init(cx: &mut App) {
 
 actions!(kadr_input, [SelectHome, SelectEnd]);
 
+const PASSWORD_MASK: &str = "•";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputMode {
+    Plain,
+    Password,
+}
+
+impl InputMode {
+    fn display_text(self, content: &SharedString) -> SharedString {
+        match self {
+            Self::Plain => content.clone(),
+            // One mask per scalar keeps every valid IME boundary representable,
+            // including boundaries inside a combining sequence or ZWJ grapheme.
+            Self::Password => PASSWORD_MASK.repeat(content.chars().count()).into(),
+        }
+    }
+
+    fn layout_index(self, content: &str, byte: usize) -> usize {
+        match self {
+            Self::Plain => byte,
+            Self::Password => {
+                content
+                    .char_indices()
+                    .take_while(|(start, ch)| start + ch.len_utf8() <= byte)
+                    .count()
+                    * PASSWORD_MASK.len()
+            }
+        }
+    }
+
+    fn content_index(self, content: &str, byte: usize) -> usize {
+        match self {
+            Self::Plain => byte,
+            Self::Password => content
+                .char_indices()
+                .nth(byte / PASSWORD_MASK.len())
+                .map_or(content.len(), |(index, _)| index),
+        }
+    }
+
+    fn platform_text(
+        self,
+        content: &str,
+        range: Range<usize>,
+        actual: &mut Option<Range<usize>>,
+    ) -> Option<String> {
+        match self {
+            Self::Plain => {
+                let range = utf16_to_utf8(content, range.start)..utf16_to_utf8(content, range.end);
+                *actual = Some(
+                    content[..range.start].encode_utf16().count()
+                        ..content[..range.end].encode_utf16().count(),
+                );
+                Some(content[range].into())
+            }
+            // Do not disclose surrounding or composing text to the OS/IME.
+            // Returning None also avoids inventing a different UTF-16 document.
+            Self::Password => {
+                *actual = None;
+                None
+            }
+        }
+    }
+
+    fn clipboard_text(self, content: &str, range: Range<usize>) -> Option<&str> {
+        match self {
+            Self::Plain if !range.is_empty() => Some(&content[range]),
+            _ => None,
+        }
+    }
+}
+
 pub(crate) struct TextInput {
     focus: FocusHandle,
     content: SharedString,
+    mode: InputMode,
     placeholder: SharedString,
     selected: Range<usize>,
     reversed: bool,
@@ -80,6 +156,7 @@ impl TextInput {
         Self {
             focus: cx.focus_handle(),
             content,
+            mode: InputMode::Plain,
             placeholder: placeholder.into(),
             selected: end..end,
             reversed: false,
@@ -88,6 +165,15 @@ impl TextInput {
             bounds: None,
             selecting: false,
             scroll: px(0.),
+        }
+    }
+
+    /// An initially empty password field. Only `value()` exposes its real text;
+    /// rendering, clipboard actions and OS surrounding-text queries never do.
+    pub fn password(placeholder: &'static str, cx: &mut Context<Self>) -> Self {
+        Self {
+            mode: InputMode::Password,
+            ..Self::new("", placeholder, cx)
         }
     }
 
@@ -200,13 +286,17 @@ impl TextInput {
         }
     }
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(
-                self.content[self.selected.clone()].into(),
-            ));
+        if let Some(text) = self
+            .mode
+            .clipboard_text(&self.content, self.selected.clone())
+        {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.into()));
         }
     }
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mode == InputMode::Password {
+            return;
+        }
         self.copy(&Copy, window, cx);
         if !self.selected.is_empty() {
             self.replace_text_in_range(None, "", window, cx);
@@ -214,9 +304,10 @@ impl TextInput {
     }
     fn mouse_index(&self, position: Point<Pixels>) -> usize {
         match (&self.bounds, &self.layout) {
-            (Some(bounds), Some(line)) if !self.content.is_empty() => {
-                line.closest_index_for_x(position.x - bounds.left() + self.scroll)
-            }
+            (Some(bounds), Some(line)) if !self.content.is_empty() => self.mode.content_index(
+                &self.content,
+                line.closest_index_for_x(position.x - bounds.left() + self.scroll),
+            ),
             _ => 0,
         }
     }
@@ -277,9 +368,7 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<String> {
-        let range = self.range_from_utf16(&range);
-        *actual = Some(self.to_utf16(&range));
-        Some(self.content[range].into())
+        self.mode.platform_text(&self.content, range, actual)
     }
     fn selected_text_range(
         &mut self,
@@ -363,6 +452,8 @@ impl EntityInputHandler for TextInput {
     ) -> Option<Bounds<Pixels>> {
         let line = self.layout.as_ref()?;
         let range = self.range_from_utf16(&range);
+        let range = self.mode.layout_index(&self.content, range.start)
+            ..self.mode.layout_index(&self.content, range.end);
         Some(Bounds::from_corners(
             point(
                 bounds.left() + line.x_for_index(range.start) - self.scroll,
@@ -382,7 +473,14 @@ impl EntityInputHandler for TextInput {
     ) -> Option<usize> {
         let bounds = self.bounds?;
         let line = self.layout.as_ref()?;
-        let index = line.closest_index_for_x(point.x - bounds.left() + self.scroll);
+        let index = if self.mode == InputMode::Password && self.content.is_empty() {
+            0
+        } else {
+            self.mode.content_index(
+                &self.content,
+                line.closest_index_for_x(point.x - bounds.left() + self.scroll),
+            )
+        };
         Some(
             self.content[..index.min(self.content.len())]
                 .encode_utf16()
@@ -442,13 +540,13 @@ impl Element for TextElement {
         let text = if input.content.is_empty() {
             input.placeholder.clone()
         } else {
-            input.content.clone()
+            input.mode.display_text(&input.content)
         };
         let run = TextRun {
             len: text.len(),
             font: style.font(),
             color: if input.content.is_empty() {
-                rgb(0xa9b7c6).into()
+                rgb(MUTED).into()
             } else {
                 style.color
             },
@@ -457,6 +555,8 @@ impl Element for TextElement {
             strikethrough: None,
         };
         let runs = if let Some(marked) = &input.marked {
+            let marked = input.mode.layout_index(&input.content, marked.start)
+                ..input.mode.layout_index(&input.content, marked.end);
             vec![
                 TextRun {
                     len: marked.start,
@@ -488,7 +588,7 @@ impl Element for TextElement {
             &runs,
             None,
         );
-        let x = line.x_for_index(input.cursor());
+        let x = line.x_for_index(input.mode.layout_index(&input.content, input.cursor()));
         let width = bounds.size.width;
         let scroll = input.scroll.min(x).max(x - width + px(3.)).max(px(0.));
         let cursor = input.selected.is_empty().then(|| {
@@ -497,22 +597,32 @@ impl Element for TextElement {
                     point(bounds.left() + x - scroll, bounds.top()),
                     size(px(2.), bounds.size.height),
                 ),
-                rgb(0x9adbc5),
+                rgb(ACCENT),
             )
         });
         let selection = (!input.selected.is_empty()).then(|| {
             fill(
                 Bounds::from_corners(
                     point(
-                        bounds.left() + line.x_for_index(input.selected.start) - scroll,
+                        bounds.left()
+                            + line.x_for_index(
+                                input
+                                    .mode
+                                    .layout_index(&input.content, input.selected.start),
+                            )
+                            - scroll,
                         bounds.top(),
                     ),
                     point(
-                        bounds.left() + line.x_for_index(input.selected.end) - scroll,
+                        bounds.left()
+                            + line.x_for_index(
+                                input.mode.layout_index(&input.content, input.selected.end),
+                            )
+                            - scroll,
                         bounds.bottom(),
                     ),
                 ),
-                rgba(0x9adbc540),
+                rgba((ACCENT << 8) | 0x40),
             )
         });
         Prepaint {
@@ -575,16 +685,16 @@ impl Render for TextInput {
             .cursor(CursorStyle::IBeam)
             .w_full()
             .min_w_0()
-            .bg(rgb(0x11161c))
+            .bg(rgb(BACKGROUND))
             .border_1()
-            .border_color(rgb(0x334150))
-            .rounded_md()
-            .focus(|style| style.border_color(rgb(0x9adbc5)))
-            .px_3()
-            .py_2()
-            .text_base()
-            .text_color(rgb(0xe8edf3))
-            .line_height(px(24.))
+            .border_color(rgb(BORDER))
+            .rounded(px(5.))
+            .focus(|style| style.border_color(rgb(ACCENT)))
+            .px(px(11.))
+            .py(px(7.))
+            .text_size(px(14.))
+            .text_color(rgb(TEXT))
+            .line_height(px(20.))
             .overflow_hidden()
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
@@ -618,6 +728,7 @@ impl Render for TextInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn utf16_offsets_never_split_utf8_or_surrogates() {
         let text = "A🎬ё";
@@ -626,5 +737,83 @@ mod tests {
             vec![0, 1, 1, 5, 7, 7, 7]
         );
         assert_eq!(single_line("a\r\nb\tc"), "a  b c");
+    }
+
+    #[test]
+    fn password_layout_masks_every_scalar_including_composition() {
+        let content: SharedString = "Aё🎬e\u{301}👩\u{200d}💻".into();
+        let mode = InputMode::Password;
+        let displayed = mode.display_text(&content);
+        assert_eq!(displayed.as_ref(), "••••••••");
+
+        // Selected and marked runs must slice only the masked layout. The
+        // combining sequence and ZWJ sequence remain entirely confidential.
+        for range in [1..7, 7..10, 10..content.len(), 0..content.len()] {
+            let layout =
+                mode.layout_index(&content, range.start)..mode.layout_index(&content, range.end);
+            assert!(displayed[layout].chars().all(|ch| ch == '•'));
+        }
+        assert!(mode.display_text(&SharedString::default()).is_empty());
+    }
+
+    #[test]
+    fn password_offsets_round_trip_utf8_layout_and_platform_utf16() {
+        let content = "Aё🎬e\u{301}👩\u{200d}💻";
+        let mode = InputMode::Password;
+        let real_bytes = [0, 1, 3, 7, 8, 10, 14, 17, 21];
+        let utf16_offsets = [0, 1, 2, 4, 5, 6, 8, 9, 11];
+        for (scalar, (&byte, &utf16)) in real_bytes.iter().zip(&utf16_offsets).enumerate() {
+            let layout = scalar * PASSWORD_MASK.len();
+            assert_eq!(mode.layout_index(content, byte), layout);
+            assert_eq!(mode.content_index(content, layout), byte);
+            assert_eq!(utf16_to_utf8(content, utf16), byte);
+            assert_eq!(
+                content[..mode.content_index(content, layout)]
+                    .encode_utf16()
+                    .count(),
+                utf16
+            );
+            // A malformed layout offset cannot produce a partial UTF-8 scalar.
+            assert_eq!(mode.content_index(content, layout + 1), byte);
+        }
+        assert_eq!(mode.layout_index(content, usize::MAX), 24);
+        assert_eq!(mode.content_index(content, usize::MAX), content.len());
+        assert_eq!(mode.layout_index(content, 5), 6);
+        assert_eq!(mode.content_index("", 3), 0);
+        // The low half of the emoji's surrogate pair maps to its start.
+        assert_eq!(mode.layout_index(content, utf16_to_utf8(content, 3)), 6);
+    }
+
+    #[test]
+    fn password_never_exports_platform_or_clipboard_text() {
+        let content = "sё🎬e\u{301}cret";
+        for range in [0..0, 0..content.len(), 1..4, 2..3, usize::MAX..usize::MAX] {
+            let mut actual = Some(1..2);
+            assert_eq!(
+                InputMode::Password.platform_text(content, range.clone(), &mut actual),
+                None,
+            );
+            assert_eq!(actual, None);
+            assert_eq!(InputMode::Password.clipboard_text(content, range), None);
+        }
+    }
+
+    #[test]
+    fn plain_mode_preserves_text_offsets_and_exports() {
+        let content: SharedString = "A🎬ё".into();
+        let mode = InputMode::Plain;
+        assert_eq!(mode.display_text(&content), content);
+        for byte in [0, 1, 5, 7] {
+            assert_eq!(mode.layout_index(&content, byte), byte);
+            assert_eq!(mode.content_index(&content, byte), byte);
+        }
+        let mut actual = None;
+        assert_eq!(
+            mode.platform_text(&content, 2..4, &mut actual).as_deref(),
+            Some("🎬ё"),
+        );
+        assert_eq!(actual, Some(1..4));
+        assert_eq!(mode.clipboard_text(&content, 1..5), Some("🎬"));
+        assert_eq!(mode.clipboard_text(&content, 1..1), None);
     }
 }

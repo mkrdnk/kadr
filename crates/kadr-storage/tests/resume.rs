@@ -592,5 +592,5 @@ fn v3_late_migration_failure_rolls_back_the_entire_new_database_chain() {
             .unwrap(),
         "preserve"
     );
-    assert_eq!(SCHEMA_VERSION, 4);
+    assert_eq!(SCHEMA_VERSION, 5);
 }

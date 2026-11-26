@@ -113,7 +113,7 @@ license-compliance sign-off.
 All three packagers run `scripts/package-licenses.py` against
 `cargo metadata --offline --locked --format-version 1`, filtered to the native
 Rust target. Cargo and already-cached dependency sources are required even with
-`--binary`; the five declared-standard cases also require their cached `.crate`
+`--binary`; declared-standard cases also require their cached `.crate`
 archives. Collection never downloads missing sources or executes build scripts.
 Use the checkout/lockfile that actually produced the supplied executable.
 
@@ -135,7 +135,7 @@ lack a final newline: their `json-utf8` storage encodes the exact UTF-8 text, an
 the hash is checked against the decoded bytes embedded in the package.
 These source-file supplements never invent copyright attributions.
 
-Five separately labeled `declared-spdx` records cover only `convert_case 0.4.0`,
+The original five `declared-spdx` records cover only `convert_case 0.4.0`,
 `hexf-parse 0.2.1`, `simd_helpers 0.1.0`, `seahash 4.1.0`, and
 `pathfinder_geometry 0.5.1`. Their exact published archives must match the
 checked-in record **and Cargo.lock SHA-256**; published normalized/original
@@ -192,7 +192,16 @@ The original 43 Linux text-file gaps are covered by 38 commit/hash-verified
 source-file supplements and five authenticated declared-standard records.
 The Mac target adds eight exact-upstream notices with full standard-term
 supplements and five additional explicitly reviewed declared-standard cases.
-The combined allowlist is exactly ten cases, not a generic fallback. Normal strict
+The RuTracker/scraper closure adds four exact-commit upstream MIT notices
+(`phf 0.10.1` and `phf_codegen`/`phf_generator`/`phf_shared 0.10.0`) and four
+exact-archive standard declarations (`fxhash 0.2.1`, `mac 0.1.1`,
+`selectors 0.25.0`, `servo_arc 0.3.0`). The legacy archives lack VCS metadata;
+the Servo commits are unavailable, so the locked archive hashes authenticate
+their actual declarations and source notices. Canonical MPL-2.0 terms for
+`selectors` are pinned to the same SPDX commit, not claimed as a recovered
+upstream LICENSE. Source availability/notice obligations, including MPL §3.2,
+remain for human review before distribution.
+The combined allowlist is exactly fourteen cases, not a generic fallback. Normal strict
 commands accept those recognized grants without needing the QA override; the
 overall status remains `texts-collected-not-audit`. Package manifests and
 requirements explicitly count the declared-standard packages. This is notice
@@ -305,6 +314,12 @@ separately privileged host PID. A custom/broken host player that ignores both
 IPC quit and SIGINT can survive forced bridge shutdown; this is not a host
 process-group SIGKILL guarantee. Real mpv/VLC normal shutdown and EOF were tested,
 but arbitrary hostile executables are outside that guarantee.
+
+RuTracker password storage on Linux uses the session service
+`org.freedesktop.secrets`. The Flatpak grants access to that name, not to the
+entire session bus. The application uses one entry in the default collection;
+if the service is absent or locked and the unlock is cancelled, kadr can keep
+the RuTracker session in memory but does not persist the password to a file.
 
 ### Flatpak permanent saves
 

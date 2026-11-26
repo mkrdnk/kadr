@@ -42,7 +42,6 @@ pub struct Desktop {
     suggested_filename: String,
     last_search: String,
     media_id: Option<String>,
-    opening_library: bool,
     source_input_invalid: bool,
 }
 
@@ -92,6 +91,7 @@ impl Desktop {
         self.playable = false;
         self.source_input_invalid = false;
         self.suggested_filename.clear();
+        view.set_rutracker_login(None, false, cx);
         view.set_source_preview(None, cx);
         view.set_torrent_files(Vec::new(), cx);
         view.set_playback_available(false, cx);
@@ -107,6 +107,7 @@ impl Desktop {
         self.active = true;
         view.set_playback_active(true, cx);
         if self.dispatch(command, view, cx) {
+            view.set_preparing(true, cx);
             view.set_status(
                 UiStatus::info("Запуск плеера… Можно отменить кнопкой «Стоп»."),
                 cx,
@@ -142,7 +143,6 @@ pub fn attach(
         suggested_filename: String::new(),
         last_search: String::new(),
         media_id: None,
-        opening_library: false,
         source_input_invalid: false,
     }));
     let state = desktop.clone();
@@ -169,6 +169,14 @@ pub fn attach(
                     state.last_search = query.clone();
                     state.dispatch(Command::Search(query.clone()), view, cx);
                 }
+                UiEvent::Browse => {
+                    if state.dispatch(Command::Browse, view, cx) {
+                        view.set_browse_state(
+                            SectionState::Loading("Загружаем каталог…".into()),
+                            cx,
+                        );
+                    }
+                }
                 UiEvent::OpenMedia(id) | UiEvent::OpenLibrary(id) => {
                     if state.active {
                         return;
@@ -180,23 +188,18 @@ pub fn attach(
                     } else {
                         Command::OpenLibrary(id.clone())
                     };
-                    if state.dispatch(command, view, cx) {
-                        state.opening_library = matches!(event, UiEvent::OpenLibrary(_));
-                        view.show_section(
-                            if state.opening_library {
-                                Section::Sources
-                            } else {
-                                Section::Search
-                            },
-                            cx,
-                        );
-                    }
+                    state.dispatch(command, view, cx);
                 }
                 UiEvent::FindSources => {
                     if !state.active {
                         state.invalidate_source(view, cx);
                         if state.dispatch(Command::FindSources, view, cx) {
-                            view.show_section(Section::Sources, cx);
+                            view.show_source_overlay(cx);
+                            view.set_section_state(
+                                Section::Sources,
+                                SectionState::Loading("Поиск источников…".into()),
+                                cx,
+                            );
                         }
                     }
                 }
@@ -227,7 +230,35 @@ pub fn attach(
                     };
                     if state.dispatch(command, view, cx) {
                         state.source_input_invalid = false;
+                        if matches!(event, UiEvent::ChooseSource(_)) {
+                            view.set_section_state(
+                                Section::Sources,
+                                SectionState::Loading("Проверка источника…".into()),
+                                cx,
+                            );
+                        }
                     }
+                }
+                UiEvent::SignInRuTracker(credentials) => {
+                    if !state.active
+                        && !state.dispatch(
+                            Command::SignInRuTracker {
+                                username: credentials.username.clone(),
+                                password: credentials.password.clone(),
+                            },
+                            view,
+                            cx,
+                        )
+                    {
+                        view.set_rutracker_login(
+                            Some("Не удалось начать вход. Повторите попытку.".into()),
+                            false,
+                            cx,
+                        );
+                    }
+                }
+                UiEvent::ForgetRuTracker => {
+                    state.dispatch(Command::ForgetRuTracker, view, cx);
                 }
                 UiEvent::ToggleFavorite => {
                     let media_id = state.media_id.clone().unwrap_or_default();
@@ -325,7 +356,7 @@ pub fn attach(
                             return;
                         }
                         state.source_requests.begin();
-                        state.dispatch(Command::FindSources, view, cx);
+                        state.dispatch(Command::RetrySources, view, cx);
                     }
                     Section::Transfers => state.launch(Command::Play { resume: true }, view, cx),
                     Section::Settings => {
@@ -382,6 +413,8 @@ pub fn attach(
         state.source_requests.begin();
         state.cache_requests.begin();
         let _ = view.update(cx, |view, cx| {
+            view.set_rutracker_login(None, false, cx);
+            view.set_preparing(false, cx);
             view.set_playback_available(false, cx);
             view.set_playback_active(false, cx);
             view.set_transfer(None, cx);
@@ -454,6 +487,7 @@ fn apply_event(state: &mut Desktop, view: &mut KadrView, event: Event, cx: &mut 
         ),
         Event::PlaybackActive(active) => {
             state.active = active;
+            view.set_preparing(false, cx);
             view.set_playback_active(active, cx);
             view.set_playback_available(state.playback_available(), cx);
         }
@@ -480,8 +514,23 @@ fn apply_event(state: &mut Desktop, view: &mut KadrView, event: Event, cx: &mut 
             }
             AsyncState::Error(message) => {
                 view.set_search_results(Vec::new(), cx);
+                view.set_status(UiStatus::error(message.clone()), cx);
                 view.set_section_state(Section::Search, SectionState::Error(message), cx);
             }
+        },
+        Event::BrowseState(result) => match result {
+            AsyncState::Loading => {
+                view.set_browse_state(SectionState::Loading("Загружаем каталог…".into()), cx);
+            }
+            AsyncState::Ready(catalog) => {
+                view.set_browse_catalog(
+                    catalog.movies.into_iter().map(models::media_card).collect(),
+                    catalog.shows.into_iter().map(models::media_card).collect(),
+                    cx,
+                );
+                view.set_browse_state(SectionState::Empty("Больше результатов нет.".into()), cx);
+            }
+            AsyncState::Error(message) => view.set_browse_state(SectionState::Error(message), cx),
         },
         Event::MediaSelected { media, favorite } => {
             let media_id = media.as_ref().map(|media| media.id.clone());
@@ -489,24 +538,19 @@ fn apply_event(state: &mut Desktop, view: &mut KadrView, event: Event, cx: &mut 
                 state.source_requests.begin();
                 state.media_id = media_id;
             }
-            if state.opening_library {
-                view.show_section(
-                    if media.is_some() {
-                        Section::Search
-                    } else {
-                        Section::Sources
-                    },
-                    cx,
-                );
-                state.opening_library = false;
-            }
             view.set_media_detail(media.map(models::media_card), cx);
             view.set_media_favorite(favorite, cx);
         }
         // Cancellation and queued metadata events must not erase a local
         // validation error or make a rejected replacement's old source usable.
-        Event::SourcesState(_) | Event::SourceSelected { .. } | Event::TorrentFiles(_)
+        Event::SourcesState(_)
+        | Event::SourceSelected { .. }
+        | Event::TorrentFiles(_)
+        | Event::RuTrackerLogin { .. }
             if state.source_input_invalid => {}
+        Event::RuTrackerLogin { message, pending } => {
+            view.set_rutracker_login(message, pending, cx);
+        }
         Event::SourcesState(result) => match result {
             AsyncState::Loading => {
                 state.playable = false;
@@ -601,15 +645,9 @@ fn apply_event(state: &mut Desktop, view: &mut KadrView, event: Event, cx: &mut 
             );
         }
         Event::LibraryOpened { source_available } => {
-            state.opening_library = false;
-            view.show_section(
-                if source_available || state.media_id.is_none() {
-                    Section::Sources
-                } else {
-                    Section::Search
-                },
-                cx,
-            );
+            if source_available || state.media_id.is_none() {
+                view.show_source_overlay(cx);
+            }
         }
         Event::Transfer(transfer) => {
             let active = transfer.is_some();
@@ -657,7 +695,7 @@ fn select_source(
         match result {
             Ok(source) => {
                 if state.dispatch(Command::SelectSource(source), view, cx) {
-                    view.show_section(Section::Sources, cx);
+                    view.show_source_overlay(cx);
                     view.set_section_state(
                         Section::Sources,
                         SectionState::Loading("Проверка источника…".into()),

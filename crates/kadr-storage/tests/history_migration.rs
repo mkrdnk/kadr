@@ -113,7 +113,7 @@ fn failed_v3_upgrade_preserves_all_prior_rows_version_and_database_bytes() {
 }
 
 #[test]
-fn future_v5_is_refused_without_erasing_history_or_touching_database_bytes() {
+fn future_schema_is_refused_without_erasing_history_or_touching_database_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");
     let mut store = Storage::open(&path).unwrap();
@@ -123,15 +123,16 @@ fn future_v5_is_refused_without_erasing_history_or_touching_database_bytes() {
         .unwrap();
     drop(store);
     let raw = Connection::open(&path).unwrap();
-    raw.pragma_update(None, "user_version", 5).unwrap();
+    raw.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+        .unwrap();
     drop(raw);
     let before = std::fs::read(&path).unwrap();
     assert!(matches!(
         Storage::open(&path),
         Err(Error::FutureSchema {
-            found: 5,
-            supported: 4
-        })
+            found,
+            supported: SCHEMA_VERSION,
+        }) if found == SCHEMA_VERSION + 1
     ));
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
