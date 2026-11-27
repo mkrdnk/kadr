@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+  <channel>
+    <title>Fixture indexer</title>
+    <link>https://example.org/</link>
+    <description>Fixture Torznab search</description>
+    <item>
+      <title>Example Show S01E02-E04 1080p</title>
+      <guid>https://private.invalid/item?apikey=fixture-secret</guid>
+      <torznab:attr name="infohash" value="0123456789abcdef0123456789abcdef01234567"/>
+      <torznab:attr name="category" value="5000"/>
+      <torznab:attr name="category" value="5040"/>
+      <torznab:attr name="size" value="123456789"/>
+      <torznab:attr name="seeders" value="12"/>
+      <torznab:attr name="leechers" value="3"/>
+      <torznab:attr name="season" value="1"/>
+      <torznab:attr name="episode" value="2"/>
+      <torznab:attr name="episode" value="4"/>
+      <torznab:attr name="tvdbid" value="123"/>
+      <torznab:attr name="language" value="English"/>
+    </item>
+  </channel>
+</rss>

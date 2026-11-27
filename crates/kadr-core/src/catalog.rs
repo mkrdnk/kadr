@@ -9,6 +9,40 @@ pub enum MediaKind {
     Series,
 }
 
+/// Optional provider-reported identifiers and aliases, never inferred from a title.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct ExternalMetadata {
+    pub imdb_id: Option<String>,
+    pub tmdb_id: Option<u64>,
+    pub alternative_titles: Vec<String>,
+}
+
+impl ExternalMetadata {
+    /// Bound untrusted aliases and discard malformed identifiers. Does not fetch metadata.
+    pub fn normalized(mut self) -> Self {
+        self.imdb_id = self.imdb_id.filter(|id| valid_imdb_id(id));
+        self.tmdb_id = self.tmdb_id.filter(|id| *id > 0);
+        let mut seen = std::collections::BTreeSet::new();
+        self.alternative_titles = self
+            .alternative_titles
+            .into_iter()
+            .take(100)
+            .filter(|title| title.chars().count() <= 500 && !title.chars().any(char::is_control))
+            .map(|title| title.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|title| !title.is_empty() && seen.insert(title.to_lowercase()))
+            .take(20)
+            .collect();
+        self
+    }
+}
+
+pub(crate) fn valid_imdb_id(id: &str) -> bool {
+    id.strip_prefix("tt").is_some_and(|digits| {
+        (7..=10).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Media {
     /// Stable, storage-safe, namespaced provider identifier, not a title.
@@ -16,6 +50,9 @@ pub struct Media {
     pub title: String,
     pub original_title: Option<String>,
     pub year: Option<u16>,
+    /// Missing in older snapshots; absence does not mean a negative ID match.
+    #[serde(default)]
+    pub external: ExternalMetadata,
     /// Provider-reported score out of ten, rounded to one decimal (0–100).
     /// None means absent or unsupported; never inferred from popularity or search rank.
     #[serde(default)]

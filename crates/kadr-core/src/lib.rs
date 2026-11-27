@@ -5,4 +5,5 @@ pub mod catalog;
 pub mod proxy;
 pub mod session;
 pub mod source;
+pub mod sources;
 pub mod torrent;

@@ -361,6 +361,7 @@ mod tests {
             attribution: "Автор".into(),
             license: Some("CC BY".into()),
             source_page: "https://example.invalid/public-item".into(),
+            external: Default::default(),
         });
         assert_eq!(card.id, "test:series");
         assert_eq!(card.kind, kadr_ui::MediaKind::Series);

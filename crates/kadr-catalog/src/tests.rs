@@ -58,6 +58,9 @@ fn movie_show_fixtures_use_only_documented_trakt_metadata() {
     assert_eq!(media.id, "trakt:movie:1");
     assert_eq!(media.title, "Dune");
     assert_eq!(media.original_title, None);
+    assert_eq!(media.external.imdb_id.as_deref(), Some("tt1160419"));
+    assert_eq!(media.external.tmdb_id, Some(438631));
+    assert!(media.external.alternative_titles.is_empty());
     assert_eq!(media.year, Some(2021));
     assert_eq!(media.rating_tenths, Some(83));
     assert_eq!(media.description, "История Арракиса.");
@@ -79,6 +82,7 @@ fn movie_show_fixtures_use_only_documented_trakt_metadata() {
     assert_eq!(series.title, "Sherlock");
     assert_eq!(series.year, Some(2010));
     assert_eq!(series.original_title, None);
+    assert_eq!(series.external, Default::default());
     assert_eq!(series.source_page, "https://trakt.tv/shows/2");
 
     // An explicitly supplied original title is metadata, not a fabricated fallback.
@@ -110,6 +114,181 @@ fn movie_show_fixtures_use_only_documented_trakt_metadata() {
     );
     data["ids"].as_object_mut().unwrap().remove("trakt");
     assert!(trakt::media(&data, MediaKind::Movie).is_none());
+}
+
+#[test]
+fn external_ids_accept_only_explicit_canonical_imdb_and_positive_u64_tmdb() {
+    for id in ["tt0000000", "tt12345678", "tt123456789", "tt1234567890"] {
+        let mut data = movie(1);
+        data["ids"]["imdb"] = json!(id);
+        assert_eq!(
+            trakt::media(&data, MediaKind::Movie)
+                .unwrap()
+                .external
+                .imdb_id
+                .as_deref(),
+            Some(id)
+        );
+    }
+    for id in [
+        Value::Null,
+        json!(1234567),
+        json!({}),
+        json!(""),
+        json!("tt123456"),
+        json!("tt12345678901"),
+        json!("TT1234567"),
+        json!(" tt1234567"),
+        json!("tt1234567\n"),
+        json!("tt１２３４５６７"),
+        json!("tt123456a"),
+        json!("https://imdb.com/title/tt1234567"),
+        json!(format!("tt{}", "1".repeat(100_000))),
+    ] {
+        let mut data = movie(1);
+        data["ids"]["imdb"] = id;
+        let media = trakt::media(&data, MediaKind::Movie).unwrap();
+        assert_eq!(media.external.imdb_id, None);
+        assert_eq!(media.external.tmdb_id, Some(438631));
+    }
+    for (id, expected) in [
+        (json!(1), Some(1)),
+        (json!(u64::MAX), Some(u64::MAX)),
+        (json!(0), None),
+        (json!(-1), None),
+        (json!(1.0), None),
+        (json!(1.5), None),
+        (json!(18446744073709551616.0_f64), None),
+        (json!("438631"), None),
+        (json!(true), None),
+        (json!([]), None),
+        (Value::Null, None),
+    ] {
+        let mut data = movie(1);
+        data["ids"]["tmdb"] = id;
+        let media = trakt::media(&data, MediaKind::Movie).unwrap();
+        assert_eq!(media.external.tmdb_id, expected);
+        assert_eq!(media.external.imdb_id.as_deref(), Some("tt1160419"));
+    }
+    let data = json!({
+        "ids":{"trakt":1,"slug":"tt1234567","tvdb":123},
+        "title":"Only title", "imdb_id":"tt1234567", "tmdb_id":123
+    });
+    assert_eq!(
+        trakt::media(&data, MediaKind::Movie).unwrap().external,
+        Default::default()
+    );
+}
+
+#[test]
+fn alternative_titles_accept_only_explicit_strings_and_title_objects() {
+    let mut data = movie(1);
+    data["alternative_titles"] = json!([
+        "  Дюна\nЧасть\tпервая\u{0000} ",
+        {"title":"дюна часть ПЕРВАЯ","language":"ru"},
+        {"title":" Dune Part One "},
+        "DUNE  PART ONE",
+        "<script>alert(1)</script>",
+        {"title":"A < B & <3"},
+        "", " \n\t ", "\u{0000}",
+        null, 123, true, ["Nested title"],
+        {"title":123}, {"title":null}, {"name":"Not a title"},
+        {"title":{"title":"Not recursive"}}
+    ]);
+    data["aliases"] = json!(["Ignored alias", {"title":"Ignored title"}]);
+    data["translations"] = json!([{"title":"Ignored translation","language":"ru"}]);
+    let media = trakt::media(&data, MediaKind::Movie).unwrap();
+    assert_eq!(
+        media.external.alternative_titles,
+        [
+            "Дюна Часть первая",
+            "Dune Part One",
+            "<script>alert(1)</script>",
+            "A < B & <3"
+        ]
+    );
+    // Titles remain literal display text, not interpreted markup.
+    assert_eq!(media.original_title, None);
+    for value in [
+        Value::Null,
+        json!("Not an array"),
+        json!({"title":"Not an array"}),
+        json!({"titles":["Not an array"]}),
+    ] {
+        data["alternative_titles"] = value;
+        assert!(
+            trakt::media(&data, MediaKind::Movie)
+                .unwrap()
+                .external
+                .alternative_titles
+                .is_empty()
+        );
+    }
+    data.as_object_mut().unwrap().remove("alternative_titles");
+    assert!(
+        trakt::media(&data, MediaKind::Movie)
+            .unwrap()
+            .external
+            .alternative_titles
+            .is_empty()
+    );
+}
+
+#[test]
+fn alternative_titles_bound_scanning_outputs_and_characters_before_deduplication() {
+    let mut data = movie(1);
+    let long = "я".repeat(100_000);
+    data["alternative_titles"] = json!([long, format!("{}different suffix", "я".repeat(500))]);
+    let titles = trakt::media(&data, MediaKind::Movie)
+        .unwrap()
+        .external
+        .alternative_titles;
+    assert_eq!(titles, ["я".repeat(500)]);
+
+    data["alternative_titles"] = json!((0..100).map(|n| format!("Title {n}")).collect::<Vec<_>>());
+    let titles = trakt::media(&data, MediaKind::Movie)
+        .unwrap()
+        .external
+        .alternative_titles;
+    assert_eq!(titles.len(), 20);
+    assert_eq!(titles[0], "Title 0");
+    assert_eq!(titles[19], "Title 19");
+
+    // Invalid and duplicate entries consume the same bounded inspection budget.
+    let mut entries = vec![Value::Null; 98];
+    entries.extend([
+        json!("Last accepted"),
+        json!("LAST ACCEPTED"),
+        json!("Too late"),
+    ]);
+    data["alternative_titles"] = json!(entries);
+    assert_eq!(
+        trakt::media(&data, MediaKind::Movie)
+            .unwrap()
+            .external
+            .alternative_titles,
+        ["Last accepted"]
+    );
+    let mut entries = vec![Value::Null; 99];
+    entries.extend([json!("Hundredth entry"), json!("Too late")]);
+    data["alternative_titles"] = json!(entries);
+    assert_eq!(
+        trakt::media(&data, MediaKind::Movie)
+            .unwrap()
+            .external
+            .alternative_titles,
+        ["Hundredth entry"]
+    );
+    let mut entries = vec![Value::Null; 100];
+    entries.push(json!("Too late"));
+    data["alternative_titles"] = json!(entries);
+    assert!(
+        trakt::media(&data, MediaKind::Movie)
+            .unwrap()
+            .external
+            .alternative_titles
+            .is_empty()
+    );
 }
 
 #[test]
@@ -406,14 +585,131 @@ fn literal_titles_are_display_text_not_html() {
 }
 
 #[test]
-fn old_serialized_media_defaults_backdrop_and_rating() {
+fn old_serialized_media_defaults_backdrop_rating_and_external_metadata() {
     let mut data =
         serde_json::to_value(trakt::media(&movie(1), MediaKind::Movie).unwrap()).unwrap();
     data.as_object_mut().unwrap().remove("backdrop_url");
     data.as_object_mut().unwrap().remove("rating_tenths");
+    data.as_object_mut().unwrap().remove("external");
     let media: Media = serde_json::from_value(data).unwrap();
     assert_eq!(media.backdrop_url, None);
     assert_eq!(media.rating_tenths, None);
+    assert_eq!(media.external, Default::default());
+}
+
+#[test]
+fn serialized_media_accepts_partial_external_metadata_and_preserves_roundtrip() {
+    let mut data =
+        serde_json::to_value(trakt::media(&movie(1), MediaKind::Movie).unwrap()).unwrap();
+    for (external, imdb_id, tmdb_id, titles) in [
+        (json!({}), None, None, vec![]),
+        (
+            json!({"imdb_id":"tt1234567"}),
+            Some("tt1234567"),
+            None,
+            vec![],
+        ),
+        (json!({"tmdb_id":42}), None, Some(42), vec![]),
+        (
+            json!({"alternative_titles":["Дюна"]}),
+            None,
+            None,
+            vec!["Дюна"],
+        ),
+        (json!({"imdb_id":null,"tmdb_id":null}), None, None, vec![]),
+    ] {
+        data["external"] = external;
+        let media: Media = serde_json::from_value(data.clone()).unwrap();
+        assert_eq!(media.external.imdb_id.as_deref(), imdb_id);
+        assert_eq!(media.external.tmdb_id, tmdb_id);
+        assert_eq!(media.external.alternative_titles, titles);
+        let encoded = serde_json::to_value(&media).unwrap();
+        assert_eq!(serde_json::from_value::<Media>(encoded).unwrap(), media);
+    }
+    data["external"] = json!({
+        "imdb_id":"tt1234567","tmdb_id":42,"alternative_titles":["Дюна","Dune"]
+    });
+    let media: Media = serde_json::from_value(data.clone()).unwrap();
+    assert_eq!(serde_json::to_value(media).unwrap(), data);
+}
+
+#[test]
+fn source_models_roundtrip_without_exposing_private_metadata_in_debug() {
+    use kadr_core::sources::{Locator, MediaQuery, MediaSource, SourcePreferences};
+
+    let locator = Locator::TorrentUrl("https://example.org/a?token=secret".into());
+    let mut source = MediaSource::new(
+        "private-provider",
+        locator.clone(),
+        "private title",
+        MediaKind::Movie,
+    )
+    .unwrap();
+    source.provider_item_id = Some("private-provider-item-id".into());
+    source.release_title = Some("private release title".into());
+    source.fetched_at = 123;
+    source.video_codec = Some("private-video-codec".into());
+    source.audio_codec = Some("private-audio-codec".into());
+    source.peers = Some(7);
+    source.match_score = 90;
+    let encoded = serde_json::to_value(&source).unwrap();
+    assert_eq!(
+        serde_json::from_value::<MediaSource>(encoded.clone()).unwrap(),
+        source
+    );
+    let debug = format!("{source:?} {locator:?}");
+    for private in [
+        "private-provider",
+        "private-provider-item-id",
+        "private title",
+        "private release title",
+        "example.org",
+        "token=secret",
+        "private-video-codec",
+        "private-audio-codec",
+    ] {
+        assert!(!debug.contains(private), "{private}");
+    }
+    if let Some(id) = encoded.get("id").and_then(Value::as_str) {
+        assert!(!debug.contains(id));
+    }
+    assert_eq!(
+        serde_json::from_value::<Locator>(serde_json::to_value(&locator).unwrap()).unwrap(),
+        locator
+    );
+
+    let preferences = SourcePreferences {
+        resolutions: vec![1080],
+        languages: vec!["ru".into()],
+    };
+    let encoded = serde_json::to_value(&preferences).unwrap();
+    assert_eq!(
+        serde_json::from_value::<SourcePreferences>(encoded).unwrap(),
+        preferences
+    );
+    let media = trakt::media(&movie(1), MediaKind::Movie).unwrap();
+    let query = MediaQuery::from_media(&media, None).unwrap();
+    assert_eq!(
+        serde_json::from_value::<MediaQuery>(serde_json::to_value(&query).unwrap()).unwrap(),
+        query
+    );
+    let debug = format!("{query:?}");
+    for private in ["Dune", "trakt:movie:1", "tt1160419"] {
+        assert!(!debug.contains(private), "{private}");
+    }
+}
+
+#[test]
+fn episode_number_serde_preserves_specials_and_rejects_episode_zero() {
+    use kadr_core::torrent::EpisodeNumber;
+
+    let special = EpisodeNumber::new(0, 1).unwrap();
+    let encoded = serde_json::to_value(special).unwrap();
+    assert_eq!(
+        serde_json::from_value::<EpisodeNumber>(encoded).unwrap(),
+        special
+    );
+    assert!(serde_json::from_value::<EpisodeNumber>(json!({"season":0,"episode":0})).is_err());
 }
 
 #[test]

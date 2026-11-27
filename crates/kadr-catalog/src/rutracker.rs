@@ -10,6 +10,8 @@ use std::{collections::HashSet, fmt, future::Future, time::Duration};
 use kadr_core::{
     catalog::{Episode, Media, MediaKind},
     source::{ManualSource, SourceKind},
+    sources::{MediaQuery, movie_release_has_pack_suffix},
+    torrent::{EpisodeRecognition, recognize_episode},
 };
 use rutracker_api as api;
 
@@ -338,12 +340,38 @@ fn queries(media: &Media) -> Result<Vec<String>, Error> {
     }
 }
 
+/// Revalidate film release evidence on cache reads as well as live discovery.
+/// RuTracker has no external film IDs: only a full title and an unambiguous,
+/// identical production year can establish eligibility.
+pub fn matches_movie_release(title: &str, query: &MediaQuery) -> bool {
+    if query.kind != MediaKind::Movie || query.episode.is_some() {
+        return false;
+    }
+    let titles: Vec<_> = std::iter::once(query.title.clone())
+        .chain(query.original_title.clone())
+        .collect();
+    matches_release_metadata(title, query.kind, query.year, None, &titles)
+}
+
 fn matches_release(
     title: &str,
     media: &Media,
     episode: Option<&Episode>,
     queries: &[String],
 ) -> bool {
+    matches_release_metadata(title, media.kind, media.year, episode, queries)
+}
+
+fn matches_release_metadata(
+    title: &str,
+    kind: MediaKind,
+    year: Option<u16>,
+    episode: Option<&Episode>,
+    queries: &[String],
+) -> bool {
+    if kind == MediaKind::Movie && (year.is_none() || episode.is_some()) {
+        return false;
+    }
     let heading = title.split(['[', '(']).next().unwrap_or("");
     let title_matches = heading.split(['/', '|']).any(|part| {
         let normalized = normalize(strip_scope(part));
@@ -354,19 +382,23 @@ fn matches_release(
     }
     // A number anywhere in the release title is NOT a production year: it may
     // be the title itself, resolution, remaster year or unrelated metadata.
-    if let Some(year) = media.year {
+    if let Some(year) = year {
         let Some((first, last)) = production_years(title) else {
             return false;
         };
-        if match media.kind {
+        if match kind {
             MediaKind::Movie => first != year || last != year,
             MediaKind::Series => year < first || year > last,
         } {
             return false;
         }
     }
-    match (media.kind, episode) {
-        (MediaKind::Movie, _) => !has_scope(title),
+    match (kind, episode) {
+        (MediaKind::Movie, _) => {
+            !has_scope(title)
+                && !movie_release_has_pack_suffix(title)
+                && matches!(recognize_episode(title), EpisodeRecognition::Unrecognized)
+        }
         (MediaKind::Series, Some(episode)) => episode_scope(title, episode),
         (MediaKind::Series, None) => has_scope(title),
     }

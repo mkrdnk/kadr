@@ -6,7 +6,9 @@
 #![forbid(unsafe_code)]
 
 mod browse;
+pub mod commons;
 pub mod rutracker;
+pub mod torznab;
 mod trakt;
 
 pub use browse::BrowseCatalog;

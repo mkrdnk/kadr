@@ -290,7 +290,7 @@ fn decode_hex(input: &str, len: usize) -> Option<Vec<u8>> {
         .collect()
 }
 
-fn decode_btih(input: &str) -> Option<Vec<u8>> {
+pub(crate) fn decode_btih(input: &str) -> Option<Vec<u8>> {
     if input.len() == 40 {
         return decode_hex(input, 20);
     }

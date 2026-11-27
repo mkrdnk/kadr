@@ -5,6 +5,7 @@ fn movie(title: &str, original: Option<&str>, year: Option<u16>) -> Media {
         id: "test:1".into(),
         title: title.into(),
         original_title: original.map(str::to_owned),
+        external: Default::default(),
         year,
         rating_tenths: None,
         description: String::new(),
@@ -92,6 +93,41 @@ fn film_matching_requires_full_title_and_production_year_not_release_numbers() {
     let numeric = movie("1917", None, Some(2019));
     assert!(matches("1917 [2019, UK] 1080p", &numeric, None));
     assert!(!matches("1917 [2020, UK]", &numeric, None));
+}
+
+#[test]
+fn film_cache_eligibility_uses_the_live_rule_and_requires_known_year() {
+    let mut media = movie("Нечто", Some("The Thing"), Some(1982));
+    media.id = "trakt:movie:42".into();
+    let query = MediaQuery::from_media(&media, None).unwrap();
+    for title in [
+        "Нечто / The Thing [1982, USA] 1080p",
+        "The Thing (1982) [Remastered 2024]",
+        "The Thing [2011, USA] 1080p",
+        "The Thing [1982-2011]",
+        "The Thing (2011) [1982, USA]",
+        "The Thing [1982] S01E01",
+        "The Thing [1982] 1x01",
+        "The Thing [1982] Collection",
+        "The Thing [1982] Complete Films",
+        "The Thing [1982] Сборник",
+        "The Thing Returns [1982]",
+        "The Thing 1982 1080p",
+    ] {
+        assert_eq!(
+            matches_movie_release(title, &query),
+            matches(title, &media, None),
+            "{title}"
+        );
+    }
+    media.year = None;
+    let unknown = MediaQuery::from_media(&media, None).unwrap();
+    assert!(!matches("The Thing [1982]", &media, None));
+    assert!(!matches_movie_release("The Thing [1982]", &unknown));
+    let mut collection = movie("The Collection", None, Some(2012));
+    collection.id = "trakt:movie:43".into();
+    let query = MediaQuery::from_media(&collection, None).unwrap();
+    assert!(matches_movie_release("The Collection [2012] 1080p", &query));
 }
 
 #[test]

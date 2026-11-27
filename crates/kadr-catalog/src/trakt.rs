@@ -1,9 +1,12 @@
 use super::*;
+use kadr_core::catalog::ExternalMetadata;
 use std::collections::BTreeSet;
 
 const SEASON_LIMIT: usize = 100;
 const EPISODES_PER_SEASON: usize = 1_000;
 const EPISODE_LIMIT: usize = 20_000;
+const ALTERNATIVE_TITLE_SCAN_LIMIT: usize = 100;
+const ALTERNATIVE_TITLE_LIMIT: usize = 20;
 
 pub(super) fn kind_path(kind: MediaKind) -> &'static str {
     match kind {
@@ -145,6 +148,44 @@ fn plain_title(value: &Value) -> String {
         .collect()
 }
 
+/// Read only the existing media payload: `ids.imdb`, `ids.tmdb`, and an
+/// `alternative_titles` array of strings or objects with a string `title`.
+/// Do not guess at aliases/translations layouts or fetch another endpoint.
+/// Inspect at most 100 entries, keep at most 20 nonempty 500-character titles,
+/// and deduplicate their sanitized forms by whitespace and lowercase.
+fn external_metadata(data: &Value) -> ExternalMetadata {
+    let imdb_id = data["ids"]["imdb"]
+        .as_str()
+        .filter(|id| {
+            (9..=12).contains(&id.len())
+                && id.starts_with("tt")
+                && id.as_bytes()[2..].iter().all(u8::is_ascii_digit)
+        })
+        .map(str::to_owned);
+    let tmdb_id = data["ids"]["tmdb"].as_u64().filter(|id| *id > 0);
+    let mut seen = BTreeSet::new();
+    let alternative_titles = data["alternative_titles"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(ALTERNATIVE_TITLE_SCAN_LIMIT)
+        .map(|entry| {
+            plain_title(if entry.is_string() {
+                entry
+            } else {
+                &entry["title"]
+            })
+        })
+        .filter(|title| !title.is_empty() && seen.insert(matching_title(title)))
+        .take(ALTERNATIVE_TITLE_LIMIT)
+        .collect();
+    ExternalMetadata {
+        imdb_id,
+        tmdb_id,
+        alternative_titles,
+    }
+}
+
 /// Canonical public image allowlist, also used by image downloaders and storage.
 /// Images must not carry credentials, tracking queries, fragments or arbitrary
 /// hosts. URL parsing normalizes HTTPS's explicit default port to no port.
@@ -261,6 +302,7 @@ pub(super) fn media(data: &Value, kind: MediaKind) -> Option<Media> {
         // Preserve the provider's original title when present, never infer it
         // from the primary title or issue per-card translation requests.
         original_title: (!original.is_empty()).then_some(original),
+        external: external_metadata(data),
         year: data["year"]
             .as_u64()
             .filter(|year| (1800..2200).contains(year))

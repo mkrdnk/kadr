@@ -1,0 +1,76 @@
+{
+  "batchcomplete": true,
+  "query": {
+    "pages": [
+      {
+        "pageid": 40108642,
+        "ns": 6,
+        "title": "File:Big Buck Bunny 4K.webm",
+        "imagerepository": "local",
+        "videoinfo": [{
+          "size": 2964839055,
+          "width": 4000,
+          "height": 2250,
+          "duration": 634.553,
+          "url": "https://upload.wikimedia.org/wikipedia/commons/c/c0/Big_Buck_Bunny_4K.webm?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+          "descriptionurl": "https://commons.wikimedia.org/wiki/File:Big_Buck_Bunny_4K.webm",
+          "descriptionshorturl": "https://commons.wikimedia.org/wiki/Special:Redirect/page/40108642",
+          "extmetadata": {
+            "ObjectName": {"value": "Big Buck Bunny 4K", "source": "mediawiki-metadata"},
+            "Categories": {"value": "WebM videos|Anthropomorphic animals|Files with closed captioning in Czech|Featured media|Featured pictures by others nominated by Yann Forget|Featured pictures on Wikipedia, English|Media of the day|Big Buck Bunny multimedia|Files with closed captioning in Norwegian Bokmål|Files with closed captioning in English|Videos of 2008 from the Netherlands|Video display resolution 4000 x 2250|Blender movies|Files with closed captioning in German|Files with closed captioning in Spanish|Files with closed captioning in Italian|Files with closed captioning in Chinese|Files with closed captioning in Dutch|Files with closed captioning in Turkish|Files with closed captioning in Finnish|Files with closed captioning in Portuguese|Files with closed captioning in Romanian|Files with closed captioning in Russian|Files with closed captioning in Polish|Files with closed captioning in Swedish|Files with closed captioning in Vietnamese|Files with closed captioning in French|Files with closed captioning in Hungarian|Files with closed captioning in Japanese|Files with closed captioning in Korean|Files with closed captioning in Malay|Files with closed captioning in Urdu|Files with closed captioning in Indonesian|Files with closed captioning in Arabic|Files with closed captioning in Danish|Files with closed captioning in Persian|Files with closed captioning in Slovak|Files with closed captioning in Hindi|Videos of short films from 2008|Featured media of animated videos|Files with closed captioning in Croatian|Files with closed captioning in Thai|Featured media uploaded by Matanya|Vorbis videos|VP8 videos", "source": "commons-categories", "hidden": ""},
+            "Artist": {"value": "Blender Foundation", "source": "commons-desc-page"},
+            "LicenseShortName": {"value": "CC BY 3.0", "source": "commons-desc-page", "hidden": ""},
+            "UsageTerms": {"value": "Creative Commons Attribution 3.0", "source": "commons-desc-page"},
+            "AttributionRequired": {"value": "true", "source": "commons-desc-page", "hidden": ""},
+            "Attribution": {"value": "(c) copyright Blender Foundation | www.bigbuckbunny.org", "source": "commons-desc-page", "hidden": ""},
+            "LicenseUrl": {"value": "https://creativecommons.org/licenses/by/3.0", "source": "commons-desc-page"},
+            "Copyrighted": {"value": "True", "source": "commons-desc-page", "hidden": ""},
+            "Restrictions": {"value": "", "source": "commons-desc-page", "hidden": ""},
+            "License": {"value": "cc-by-3.0", "source": "commons-templates", "hidden": ""}
+          },
+          "mime": "video/webm",
+          "derivatives": [
+            {"src": "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.3x1080p.vp9.mpd", "type": "application/dash+xml", "transcodekey": "3x1080p.vp9.mpd", "width": 1920, "height": 1080, "bandwidth": -1},
+            {"src": "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.240p.vp9.webm", "type": "video/webm; codecs=\"vp9, opus\"", "transcodekey": "240p.vp9.webm", "width": 426, "height": 240, "bandwidth": 383864},
+            {"src": "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.360p.mpeg4.mov", "type": "video/quicktime; codecs=\"mp4v\"", "transcodekey": "360p.mpeg4.mov", "width": 640, "height": 360, "bandwidth": 1636936},
+            {"src": "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.480p.vp9.webm", "type": "video/webm; codecs=\"vp9, opus\"", "transcodekey": "480p.vp9.webm", "width": 854, "height": 480, "bandwidth": 1218440},
+            {"src": "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.1080p.vp9.webm", "type": "video/webm; codecs=\"vp9, opus\"", "transcodekey": "1080p.vp9.webm", "width": 1920, "height": 1080, "bandwidth": 3788064}
+          ]
+        }]
+      },
+      {
+        "pageid": 8819826,
+        "ns": 6,
+        "title": "File:Elephants Dream.ogv",
+        "imagerepository": "local",
+        "videoinfo": [{
+          "size": 35614993,
+          "width": 426,
+          "height": 240,
+          "duration": 653.7916666666666,
+          "url": "https://upload.wikimedia.org/wikipedia/commons/d/d5/Elephants_Dream.ogv?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+          "descriptionurl": "https://commons.wikimedia.org/wiki/File:Elephants_Dream.ogv",
+          "descriptionshorturl": "https://commons.wikimedia.org/wiki/Special:Redirect/page/8819826",
+          "extmetadata": {
+            "ObjectName": {"value": "Elephants Dream", "source": "mediawiki-metadata"},
+            "Categories": {"value": "Files with closed captioning in Czech|Media of the day|Elephants Dream videos|Ogv videos|Files with closed captioning in Norwegian Bokmål|Files with closed captioning in English|Videos needing thumbtime correction|Video display resolution 426 x 240|Files with closed captioning in British English|Files with closed captioning in Slovene|Files with closed captioning in German|Files with closed captioning in Afrikaans|Files with closed captioning in Serbian|Files with closed captioning in Spanish|Files with closed captioning in Hebrew|Files with closed captioning in Italian|Files with closed captioning in Chinese|Files with closed captioning in Dutch|Files with closed captioning in Turkish|Files with closed captioning in Finnish|Files with closed captioning in Portuguese|Files with closed captioning in Romanian|Files with closed captioning in Bengali|Files with closed captioning in Russian|Files with closed captioning in Brazilian Portuguese|Files with closed captioning in Polish|Files with closed captioning in Swedish|Files with closed captioning in Vietnamese|Files with closed captioning in French|Files with closed captioning in Hungarian|Files with closed captioning in Bosnian|Files with closed captioning in Estonian|Files with closed captioning in Greek|Files with closed captioning in Japanese|Files with closed captioning in Korean|Files with closed captioning in Malay|Files with closed captioning in Malayalam|Files with closed captioning in Maltese|Files with closed captioning in Urdu|Files with closed captioning in Ukrainian|Files with closed captioning in Indonesian|Files with closed captioning in Arabic|Files with closed captioning in Breton|Files with closed captioning in Bulgarian|Files with closed captioning in Burmese|Files with closed captioning in Catalan|Files with closed captioning in Danish|Files with closed captioning in Persian|Files with closed captioning in Slovak|Files with closed captioning in Hindi|Files with closed captioning in Latvian|Files with closed captioning in Telugu|Files with closed captioning in Croatian|Files with closed captioning in Thai|Files with closed captioning in Tamil|Files with closed captioning in Albanian|Files with closed captioning in Latin|Vorbis videos|Theora videos", "source": "commons-categories", "hidden": ""},
+            "Artist": {"value": "(c) copyright 2006, Blender Foundation / Netherlands Media Art Institute / www.elephantsdream.org", "source": "commons-desc-page"},
+            "LicenseShortName": {"value": "CC BY-SA 2.5", "source": "commons-desc-page", "hidden": ""},
+            "UsageTerms": {"value": "Creative Commons Attribution-Share Alike 2.5", "source": "commons-desc-page"},
+            "AttributionRequired": {"value": "true", "source": "commons-desc-page", "hidden": ""},
+            "Attribution": {"value": "(c) copyright 2006, Blender Foundation / Netherlands Media Art Institute / www.elephantsdream.org", "source": "commons-desc-page", "hidden": ""},
+            "LicenseUrl": {"value": "https://creativecommons.org/licenses/by-sa/2.5", "source": "commons-desc-page"},
+            "Copyrighted": {"value": "True", "source": "commons-desc-page", "hidden": ""},
+            "Restrictions": {"value": "", "source": "commons-desc-page", "hidden": ""},
+            "License": {"value": "cc-by-sa-2.5", "source": "commons-templates", "hidden": ""}
+          },
+          "mime": "application/ogg",
+          "derivatives": [
+            {"src": "https://upload.wikimedia.org/wikipedia/commons/transcoded/d/d5/Elephants_Dream.ogv/Elephants_Dream.ogv.240p.vp9.webm", "type": "video/webm; codecs=\"vp9, opus\"", "transcodekey": "240p.vp9.webm", "width": 426, "height": 240, "bandwidth": 345392},
+            {"src": "https://upload.wikimedia.org/wikipedia/commons/transcoded/d/d5/Elephants_Dream.ogv/Elephants_Dream.ogv.360p.mpeg4.mov", "type": "video/quicktime; codecs=\"mp4v\"", "transcodekey": "360p.mpeg4.mov", "width": 426, "height": 240, "bandwidth": 932280}
+          ]
+        }]
+      }
+    ]
+  }
+}

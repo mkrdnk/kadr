@@ -276,6 +276,11 @@ impl Endpoint {
             ));
         }
         let client = Client::builder()
+            .user_agent(concat!(
+                "Kadr/",
+                env!("CARGO_PKG_VERSION"),
+                " (https://github.com/mkrdnk/kadr; media playback)"
+            ))
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
             .no_gzip()

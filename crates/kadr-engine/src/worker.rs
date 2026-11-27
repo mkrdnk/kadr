@@ -1687,6 +1687,7 @@ impl Worker {
         let target = item.target;
         self.media = item.media.map(|record| Media {
             id: record.id.as_str().to_owned(),
+            external: Default::default(),
             title: record.title,
             original_title: record.original_title,
             year: record.year,

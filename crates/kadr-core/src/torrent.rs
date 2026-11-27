@@ -2,6 +2,7 @@
 //! These checks do not replace symlink-safe filesystem operations in the IO layer.
 
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path, sync::LazyLock};
 
 /// Portable relative metadata path, split using `/`, never host-OS path normalization.
@@ -71,10 +72,25 @@ fn reserved_component(part: &str) -> bool {
 }
 
 /// Season zero is allowed for specials; episode zero is not recognized automatically.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(try_from = "StoredEpisodeNumber")]
 pub struct EpisodeNumber {
     season: u16,
     episode: u16,
+}
+
+#[derive(Deserialize)]
+struct StoredEpisodeNumber {
+    season: u16,
+    episode: u16,
+}
+
+impl TryFrom<StoredEpisodeNumber> for EpisodeNumber {
+    type Error = &'static str;
+
+    fn try_from(value: StoredEpisodeNumber) -> Result<Self, Self::Error> {
+        Self::new(value.season, value.episode).ok_or("Episode number must be nonzero.")
+    }
 }
 
 impl EpisodeNumber {
