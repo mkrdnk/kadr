@@ -168,13 +168,13 @@ impl KadrView {
             self.model.preferences.torrents_enabled,
         ) {
             (false, _) => Some(
-                "Сетевой поиск источников (Wikimedia Commons / RuTracker / Torznab) недоступен: разрешите внешний каталог \
+                "Сетевой поиск источников (Wikimedia Commons / RuTracker / Torznab / Popcorn API) недоступен: разрешите внешний каталог \
                  в настройках и сохраните изменения. Trakt предоставляет только метаданные и ссылки на изображения, не видео. \
-                 Для Commons BitTorrent не нужен; RuTracker и Torznab требуют отдельного разрешения BitTorrent. \
+                 Для Commons BitTorrent не нужен; RuTracker, Torznab и Popcorn API требуют отдельного разрешения BitTorrent. \
                  Свой HTTP(S)-источник можно открыть без поиска.",
             ),
             (true, false) => Some(
-                "Поиск RuTracker / Torznab недоступен: разрешите BitTorrent в настройках и сохраните изменения. \
+                "Поиск RuTracker / Torznab / Popcorn API недоступен: разрешите BitTorrent в настройках и сохраните изменения. \
                  Поиск Wikimedia Commons доступен, если поставщик включён; он ограничен проверенными фильмами Blender. \
                  BitTorrent обменивается частями файлов с другими участниками сети. \
                  Свой HTTP(S)-источник можно открыть без BitTorrent.",
@@ -405,76 +405,194 @@ impl KadrView {
                     )),
             );
         }
-        let rows = self.visible_sources();
-        if rows.is_empty() && !self.model.sources.is_empty() {
+        let groups = self.visible_source_groups();
+        let has_possible = groups
+            .iter()
+            .any(|(group, _)| *group == SourceGroup::Possible);
+        if groups.is_empty() && !self.model.sources.is_empty() {
             content = content.child(body("Нет раздач с указанным качеством."));
-        } else if !rows.is_empty() {
-            content = content
-                .child(
-                    column().gap_0().rounded_md().border_1().border_color(rgb(BORDER))
-                        .bg(rgb(PANEL)).overflow_hidden()
-                        .child(
-                            source_table_row().py_2().text_size(px(9.)).text_color(rgb(MUTED))
-                                .child(div().flex_1().min_w(px(150.)).child("КАЧЕСТВО / ТИП"))
-                                .child(div().w(px(150.)).flex_shrink_0().child("ПРОВАЙДЕР / ЯЗЫК"))
-                                .child(div().w(px(78.)).flex_shrink_0().child("РАЗМЕР"))
-                                .child(div().w(px(58.)).flex_shrink_0().child("СИДЫ"))
-                                .child(div().w(px(94.)).flex_shrink_0()),
-                        )
-                        .children(rows.into_iter().map(|source| {
-                            source_table_row()
-                                .py_3().border_t_1().border_color(rgb(BORDER))
-                                .child(
-                                    column().gap_1().flex_1().min_w(px(150.))
-                                        .child(div().flex().items_center().flex_wrap().gap_2()
-                                            .child(div().text_size(px(14.)).font_weight(gpui::FontWeight::SEMIBOLD)
-                                                .child(source.quality.clone().unwrap_or_else(|| "Неизвестно".into())))
-                                            .child(div().text_size(px(10.)).text_color(rgb(MUTED))
-                                                .child(if source.rutracker { "BitTorrent" } else { source.kind.label() })))
-                                        .when(source.recommended, |cell| cell.child(
-                                            div().text_size(px(10.)).text_color(rgb(ACCENT)).child("Рекомендуемый"),
-                                        ))
-                                        .child(div().text_size(px(11.)).text_color(rgb(MUTED)).child(source.title.clone()))
-                                        .when_some(source.video_codec.as_ref(), |cell, codec| cell.child(body(format!("Видео: {codec}"))))
-                                        .when_some(source.audio_codec.as_ref(), |cell, codec| cell.child(body(format!("Аудио: {codec}"))))
-                                        .child(div().text_size(px(10.)).text_color(rgb(MUTED))
-                                            .child(format!("Лицензия: {}", source.license.as_deref().unwrap_or("не указана"))))
-                                        .when(source.rutracker, |cell| cell.child(
-                                            div().text_size(px(10.)).text_color(rgb(WARNING)).child("Не проверено · права неизвестны"),
-                                        )),
-                                )
-                                .child(
-                                    column().gap_1().w(px(150.)).flex_shrink_0()
-                                        .child(div().text_size(px(11.)).child(
-                                            if source.rutracker && !source.origin.to_ascii_lowercase().contains("rutracker") {
+        } else if !groups.is_empty() {
+            for (group, rows) in groups {
+                let table = column()
+                    .gap_0()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(PANEL))
+                    .overflow_hidden()
+                    .child(
+                        source_table_row()
+                            .py_2()
+                            .text_size(px(9.))
+                            .text_color(rgb(MUTED))
+                            .child(div().flex_1().min_w(px(150.)).child("КАЧЕСТВО / ТИП"))
+                            .child(div().w(px(150.)).flex_shrink_0().child("ПРОВАЙДЕР / ЯЗЫК"))
+                            .child(div().w(px(78.)).flex_shrink_0().child("РАЗМЕР"))
+                            .child(div().w(px(58.)).flex_shrink_0().child("СИДЫ"))
+                            .child(div().w(px(94.)).flex_shrink_0()),
+                    )
+                    .children(rows.into_iter().map(|source| {
+                        source_table_row()
+                            .py_3()
+                            .border_t_1()
+                            .border_color(rgb(BORDER))
+                            .child(
+                                column()
+                                    .gap_1()
+                                    .flex_1()
+                                    .min_w(px(150.))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .flex_wrap()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_size(px(14.))
+                                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                    .child(
+                                                        source
+                                                            .quality
+                                                            .clone()
+                                                            .unwrap_or_else(|| "Неизвестно".into()),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.))
+                                                    .text_color(rgb(MUTED))
+                                                    .child(if source.rutracker {
+                                                        "BitTorrent"
+                                                    } else {
+                                                        source.kind.label()
+                                                    }),
+                                            ),
+                                    )
+                                    .when(source.recommended, |cell| {
+                                        cell.child(
+                                            div()
+                                                .text_size(px(10.))
+                                                .text_color(rgb(ACCENT))
+                                                .child("Рекомендуемый"),
+                                        )
+                                    })
+                                    .child(
+                                        div()
+                                            .text_size(px(11.))
+                                            .text_color(rgb(MUTED))
+                                            .child(source.title.clone()),
+                                    )
+                                    .when_some(source.video_codec.as_ref(), |cell, codec| {
+                                        cell.child(body(format!("Видео: {codec}")))
+                                    })
+                                    .when_some(source.audio_codec.as_ref(), |cell, codec| {
+                                        cell.child(body(format!("Аудио: {codec}")))
+                                    })
+                                    .child(div().text_size(px(10.)).text_color(rgb(MUTED)).child(
+                                        format!(
+                                            "Лицензия: {}",
+                                            source.license.as_deref().unwrap_or("не указана")
+                                        ),
+                                    ))
+                                    .when(source.rutracker, |cell| {
+                                        cell.child(
+                                            div()
+                                                .text_size(px(10.))
+                                                .text_color(rgb(WARNING))
+                                                .child("Не проверено · права неизвестны"),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                column()
+                                    .gap_1()
+                                    .w(px(150.))
+                                    .flex_shrink_0()
+                                    .child(
+                                        div().text_size(px(11.)).child(
+                                            if source.rutracker
+                                                && !source
+                                                    .origin
+                                                    .to_ascii_lowercase()
+                                                    .contains("rutracker")
+                                            {
                                                 format!("RuTracker · {}", source.origin)
                                             } else {
                                                 source.origin.clone()
                                             },
-                                        ))
-                                        .child(div().text_size(px(10.)).text_color(rgb(MUTED))
-                                            .child(source.language.clone().unwrap_or_else(|| "Язык неизвестен".into()))),
+                                        ),
+                                    )
+                                    .child(
+                                        div().text_size(px(10.)).text_color(rgb(MUTED)).child(
+                                            source
+                                                .language
+                                                .clone()
+                                                .unwrap_or_else(|| "Язык неизвестен".into()),
+                                        ),
+                                    ),
+                            )
+                            .child(
+                                div().w(px(78.)).flex_shrink_0().text_size(px(11.)).child(
+                                    source
+                                        .size
+                                        .map(bytes)
+                                        .unwrap_or_else(|| "Неизвестно".into()),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .w(px(58.))
+                                    .flex_shrink_0()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(if source.seeds.is_some_and(|n| n > 0) {
+                                        ACCENT
+                                    } else {
+                                        MUTED
+                                    }))
+                                    .child(
+                                        source
+                                            .seeds
+                                            .map(|n| n.to_string())
+                                            .unwrap_or_else(|| "—".into()),
+                                    )
+                                    .when_some(source.peers, |cell, peers| {
+                                        cell.child(
+                                            div()
+                                                .text_color(rgb(MUTED))
+                                                .child(format!("Пиры: {peers}")),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                self.button(
+                                    ("choose-source", source.index),
+                                    "Выбрать",
+                                    Command::Emit(UiEvent::ChooseSource(source.index)),
+                                    false,
+                                    self.model.accepts(&UiEvent::ChooseSource(source.index)),
+                                    cx,
                                 )
-                                .child(div().w(px(78.)).flex_shrink_0().text_size(px(11.))
-                                    .child(source.size.map(bytes).unwrap_or_else(|| "Неизвестно".into())))
-                                .child(div().w(px(58.)).flex_shrink_0().text_size(px(11.))
-                                    .text_color(rgb(if source.seeds.is_some_and(|n| n > 0) { ACCENT } else { MUTED }))
-                                    .child(source.seeds.map(|n| n.to_string()).unwrap_or_else(|| "—".into()))
-                                    .when_some(source.peers, |cell, peers| cell.child(div().text_color(rgb(MUTED)).child(format!("Пиры: {peers}")))))
-                                .child(
-                                    self.button(
-                                        ("choose-source", source.index),
-                                        "Выбрать",
-                                        Command::Emit(UiEvent::ChooseSource(source.index)),
-                                        false,
-                                        self.model.accepts(&UiEvent::ChooseSource(source.index)),
-                                        cx,
-                                    ).w(px(94.)).flex_shrink_0().px_2().py_2().text_size(px(11.)).text_center(),
-                                )
-                        })),
-                )
-                .child(div().text_size(px(10.)).text_color(rgb(MUTED))
-                    .child("«Неизвестно» и «—» — нет данных. Выбор источника не запускает воспроизведение."));
+                                .w(px(94.))
+                                .flex_shrink_0()
+                                .px_2()
+                                .py_2()
+                                .text_size(px(11.))
+                                .text_center(),
+                            )
+                    }));
+                content = content
+                    .when(has_possible, |content| {
+                        content.child(eyebrow(group.heading()))
+                    })
+                    .when_some(group.explanation(), |content, explanation| {
+                        content.child(body(explanation))
+                    })
+                    .child(table);
+            }
+            content = content.child(div().text_size(px(10.)).text_color(rgb(MUTED)).child(
+                "«Неизвестно» и «—» — нет данных. Выбор источника не запускает воспроизведение.",
+            ));
         }
         content
     }
@@ -938,7 +1056,8 @@ impl KadrView {
                 .child(body("Для разработки: KADR_TRAKT_CLIENT_ID — публичный ID приложения Trakt; \
                     его можно задать вне приложения, в окружении процесса. Это не личный токен и не client secret."))
                 .child(body(COMMONS_DISCLOSURE))
-                .child(body("RuTracker и настроенные Torznab API используются для поиска источников. Для них внешний каталог и BitTorrent должны быть разрешены. \
+                .child(body(MOVIE_PREFETCH_DISCLOSURE))
+                .child(body("RuTracker, настроенные Torznab API и включённый Popcorn API используются для поиска источников. Для них внешний каталог и BitTorrent должны быть разрешены. \
                     Данные раздач и права на контент не проверены.")))
             .child(panel().gap_4()
                 .child(eyebrow("ХРАНИЛИЩЕ"))
@@ -958,11 +1077,11 @@ impl KadrView {
                 .child(field("Максимум пиров", inputs.peers.clone()))
                 .child(field("Прокси", inputs.catalog_proxy.clone()))
                 .child(body("http://, https://, socks5:// или socks5h:// — без имени пользователя и пароля. Пустое поле — прямое соединение."))
-                .child(body("Для Trakt, постеров и API Wikimedia Commons, RuTracker и Torznab. Не применяется к BitTorrent, HTTP-видео, внешним плеерам и локальному серверу воспроизведения. При недоступности прокси автоматического перехода на прямое соединение нет."))
+                .child(body("Для Trakt, постеров и API Wikimedia Commons, RuTracker, Torznab и Popcorn API / YTS. Не применяется к BitTorrent, HTTP-видео, внешним плеерам и локальному серверу воспроизведения. При недоступности прокси автоматического перехода на прямое соединение нет."))
                 .child(div().flex().flex_wrap().items_center().gap_4().pt_4().border_t_1().border_color(rgb(BORDER))
                     .child(column().gap_1().flex_1().min_w(px(180.))
                         .child(div().text_sm().child("Обмен BitTorrent"))
-                        .child(body("Может отдавать загруженные части другим участникам сети. Отключение блокирует поиск RuTracker/Torznab, но не Wikimedia Commons.")))
+                        .child(body("Может отдавать загруженные части другим участникам сети. Отключение блокирует поиск RuTracker/Torznab/Popcorn API, но не Wikimedia Commons.")))
                     .child(self.button("enable-torrents",
                         if self.model.preferences.torrents_enabled { "Включён" } else { "Выключен" },
                         Command::ToggleTorrents, self.model.preferences.torrents_enabled, true, cx)))
@@ -1142,6 +1261,7 @@ mod tests {
         assert!(notice.contains("Сетевой поиск источников"));
         assert!(notice.contains("Wikimedia Commons"));
         assert!(notice.contains("RuTracker"));
+        assert!(notice.contains("Popcorn API"));
         assert!(notice.contains("внешний каталог"));
         assert!(notice.contains("Trakt"));
         assert!(notice.contains("только метаданные"));
@@ -1151,6 +1271,7 @@ mod tests {
         view.model.preferences.torrents_enabled = false;
         let notice = view.source_search_notice().unwrap();
         assert!(notice.contains("разрешите BitTorrent"));
+        assert!(notice.contains("Popcorn API"));
         assert!(notice.contains("Поиск Wikimedia Commons доступен, если поставщик включён"));
         assert!(!notice.contains("Сетевой поиск источников"));
         assert!(notice.contains("HTTP(S)"));

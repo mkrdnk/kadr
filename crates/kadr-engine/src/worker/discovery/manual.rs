@@ -103,11 +103,11 @@ impl SourceProvider for ManualProvider {
     fn search<'a>(&'a self, query: &'a MediaQuery, cancel: &'a CancellationToken) -> Search<'a> {
         Box::pin(async move {
             if cancel.is_cancelled() || !self.supports(query) {
-                return Ok(Vec::new());
+                return Ok(Vec::new().into());
             }
             let mut offer = self.offer.clone();
             offer.fetched_at = super::now();
-            Ok(vec![offer])
+            Ok(vec![offer].into())
         })
     }
 }
@@ -141,6 +141,7 @@ mod tests {
             .search(query, &CancellationToken::new())
             .await
             .unwrap_or_else(|_| panic!("local search should succeed"))
+            .rows
     }
 
     #[tokio::test]
@@ -236,6 +237,7 @@ mod tests {
                 .search(&query, &cancel)
                 .await
                 .unwrap_or_else(|_| panic!("cancel"))
+                .rows
                 .is_empty()
         );
     }

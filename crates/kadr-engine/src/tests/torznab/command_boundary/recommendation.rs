@@ -231,12 +231,17 @@ fn snapshot(
             pending: left,
             succeeded,
             failures,
+            notices,
         } = event
         {
             assert!(stamp.is_current());
             assert_eq!(media_id, target.media_id.as_str());
             assert_eq!(*episode, None);
             assert!(failures.is_empty(), "{failures:?}");
+            assert!(
+                notices.is_empty(),
+                "unexpected notice for the Torznab fixtures"
+            );
             assert_eq!(left + succeeded, 2);
             if *left > 0 {
                 assert!(

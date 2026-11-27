@@ -18,6 +18,7 @@ struct Endpoint {
 pub(super) struct SourcePreferencesEditor {
     commons_enabled: bool,
     rutracker_enabled: bool,
+    popcorn_enabled: bool,
     endpoints: Vec<Endpoint>,
     next_id: usize,
     resolution: String,
@@ -36,6 +37,7 @@ impl From<SourcePreferencesDraft> for SourcePreferencesEditor {
         Self {
             commons_enabled: draft.commons_enabled,
             rutracker_enabled: draft.rutracker_enabled,
+            popcorn_enabled: draft.popcorn_enabled,
             next_id: draft.torznab.len(),
             endpoints: draft
                 .torznab
@@ -170,6 +172,10 @@ impl SourcePreferencesEditor {
         self.rutracker_enabled = !self.rutracker_enabled;
     }
 
+    pub(super) fn toggle_popcorn(&mut self) {
+        self.popcorn_enabled = !self.popcorn_enabled;
+    }
+
     pub(super) fn draft(&self, cx: &gpui::App) -> Result<SourcePreferencesDraft, &'static str> {
         self.snapshot(|input| input.read(cx).value().to_owned())
     }
@@ -205,6 +211,7 @@ impl SourcePreferencesEditor {
         Ok(SourcePreferencesDraft {
             commons_enabled: self.commons_enabled,
             rutracker_enabled: self.rutracker_enabled,
+            popcorn_enabled: self.popcorn_enabled,
             torznab,
             preferred_resolution: resolution,
             preferred_language: language,
@@ -220,6 +227,7 @@ impl KadrView {
             .gap_4()
             .child(eyebrow("ПОИСК ИСТОЧНИКОВ"))
             .child(body(COMMONS_DISCLOSURE))
+            .child(body(MOVIE_PREFETCH_DISCLOSURE))
             .child(self.button(
                 "enable-commons",
                 if editor.commons_enabled { "Wikimedia Commons: включён" } else { "Wikimedia Commons: выключен" },
@@ -230,6 +238,12 @@ impl KadrView {
                 "enable-rutracker",
                 if editor.rutracker_enabled { "RuTracker: включён" } else { "RuTracker: выключен" },
                 Command::ToggleRuTracker, editor.rutracker_enabled, true, cx,
+            ))
+            .child(body(POPCORN_DISCLOSURE))
+            .child(self.button(
+                "enable-popcorn",
+                if editor.popcorn_enabled { "Popcorn API / YTS: включён" } else { "Popcorn API / YTS: выключен" },
+                Command::TogglePopcorn, editor.popcorn_enabled, true, cx,
             ))
             .children(editor.endpoints.iter().map(|endpoint| {
                 let inputs = endpoint.inputs.as_ref().expect("inputs initialized");
@@ -335,6 +349,7 @@ mod tests {
             let loaded = SourcePreferencesDraft {
                 commons_enabled,
                 rutracker_enabled: !commons_enabled,
+                popcorn_enabled: false,
                 torznab: vec![TorznabDraft {
                     name: "One".into(),
                     base_url: "https://one.example/api".into(),
@@ -365,10 +380,49 @@ mod tests {
     }
 
     #[test]
+    fn popcorn_editor_roundtrips_both_states_and_only_toggles_its_own_flag() {
+        for popcorn_enabled in [false, true] {
+            let loaded = SourcePreferencesDraft {
+                popcorn_enabled,
+                torznab: vec![TorznabDraft {
+                    name: "One".into(),
+                    base_url: "https://one.example/api".into(),
+                    enabled: true,
+                    ..TorznabDraft::default()
+                }],
+                preferred_resolution: Some("1080p".into()),
+                preferred_language: Some("ru".into()),
+                ..SourcePreferencesDraft::default()
+            };
+            let snapshot = |editor: &SourcePreferencesEditor| {
+                editor.snapshot(|_| unreachable!("no live inputs")).unwrap()
+            };
+            let mut editor = SourcePreferencesEditor::from(loaded.clone());
+            assert_eq!(snapshot(&editor), loaded);
+            editor.toggle_popcorn();
+            assert_eq!(
+                snapshot(&editor),
+                SourcePreferencesDraft {
+                    popcorn_enabled: !popcorn_enabled,
+                    ..loaded.clone()
+                }
+            );
+            editor.toggle_commons();
+            editor.toggle_rutracker();
+            editor.toggle(0);
+            assert_eq!(snapshot(&editor).popcorn_enabled, !popcorn_enabled);
+            // A persisted-settings acknowledgement replaces unsaved state.
+            editor = SourcePreferencesEditor::from(loaded.clone());
+            assert_eq!(snapshot(&editor), loaded);
+        }
+    }
+
+    #[test]
     fn loaded_editor_preserves_independent_provider_flags_and_preferences() {
         let editor = SourcePreferencesEditor::from(SourcePreferencesDraft {
             commons_enabled: true,
             rutracker_enabled: false,
+            popcorn_enabled: true,
             torznab: vec![
                 TorznabDraft {
                     name: "One".into(),
@@ -386,6 +440,7 @@ mod tests {
         });
         assert!(editor.commons_enabled);
         assert!(!editor.rutracker_enabled);
+        assert!(editor.popcorn_enabled);
         assert!(editor.endpoints[0].draft.enabled);
         assert!(!editor.endpoints[1].draft.enabled);
         assert_eq!(editor.resolution, "1080p");

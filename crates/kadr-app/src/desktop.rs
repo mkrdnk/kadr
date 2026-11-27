@@ -17,7 +17,10 @@ use crate::posters::PosterPolicy;
 mod models;
 #[path = "desktop_sources.rs"]
 mod sources;
-use sources::{DiscoveryIntent, MovieChoice, SourcePresentation, SourceRequests, WatchDecision};
+use sources::{
+    CardOpenRequest, DiscoveryIntent, MovieChoice, SourcePresentation, SourceRequests,
+    WatchDecision,
+};
 
 pub struct Desktop {
     backend: Engine,
@@ -34,7 +37,7 @@ pub struct Desktop {
     suggested_filename: String,
     last_search: String,
     media_id: Option<String>,
-    requested_media: Option<String>,
+    requested_media: Option<CardOpenRequest>,
     library_intent: Option<u64>,
     episode: Option<(u16, u16)>,
     sources: SourcePresentation,
@@ -248,7 +251,10 @@ pub fn attach(
                         state.requested_media = if opening_library {
                             None
                         } else {
-                            Some(id.clone())
+                            Some(CardOpenRequest {
+                                media_id: id.clone(),
+                                navigation: view.navigation_revision(),
+                            })
                         };
                         state.episode = None;
                         if opening_library {
@@ -397,6 +403,11 @@ pub fn attach(
                     if state.dispatch(Command::Cancel, view, cx) {
                         view.set_status(UiStatus::info("Отмена операции…"), cx);
                     }
+                }
+                UiEvent::CancelMoviePrefetch => {
+                    // Speculative work must not clear a ready source or report
+                    // errors when a card is simply dismissed.
+                    state.backend.dispatch(Command::CancelMoviePrefetch);
                 }
                 UiEvent::SetDefaultPlayer(player) => {
                     if let Some(mut settings) = state.editable_settings() {
@@ -693,11 +704,19 @@ fn apply_event(state: &mut Desktop, view: &mut KadrView, event: Event, cx: &mut 
             let media_id = media.as_ref().map(|media| media.id.clone());
             // Details/favorite replies never get to replace a newer requested card.
             if let Some(requested) = &state.requested_media
-                && media_id.as_ref() != Some(requested)
+                && media_id.as_deref() != Some(requested.media_id.as_str())
             {
                 return;
             }
-            state.requested_media = None;
+            let prefetch = state.requested_media.take().filter(|request| {
+                request.should_prefetch(
+                    media_id.as_deref(),
+                    media
+                        .as_ref()
+                        .is_some_and(|media| media.kind == kadr_engine::catalog::MediaKind::Movie),
+                    view.navigation_revision(),
+                )
+            });
             if state.media_id != media_id {
                 state.source_requests.begin();
                 state.media_id = media_id;
@@ -706,6 +725,17 @@ fn apply_event(state: &mut Desktop, view: &mut KadrView, event: Event, cx: &mut 
             view.set_media_detail(media.map(models::media_card), cx);
             view.set_catalog_episode(episode, cx);
             view.set_media_favorite(favorite, cx);
+            if let Some(request) = prefetch
+                && view.movie_card_open()
+                && state.ready
+                && !state.closed
+            {
+                // The engine enforces permissions and keeps this quiet: no
+                // discovery UI, login prompts, selection changes or playback.
+                state
+                    .backend
+                    .dispatch(Command::PrefetchMovieSources(request.media_id));
+            }
         }
         Event::SourceDiscovery {
             media_id,
@@ -714,6 +744,7 @@ fn apply_event(state: &mut Desktop, view: &mut KadrView, event: Event, cx: &mut 
             pending,
             succeeded,
             failures,
+            notices,
             stamp,
         } => {
             if !stamp.is_current()
@@ -735,6 +766,7 @@ fn apply_event(state: &mut Desktop, view: &mut KadrView, event: Event, cx: &mut 
                     pending,
                     succeeded,
                     failures,
+                    notices,
                 }),
                 cx,
             );

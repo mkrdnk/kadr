@@ -146,6 +146,7 @@ pub(super) fn source_preferences_draft(settings: &SourcePreferences) -> SourcePr
     SourcePreferencesDraft {
         rutracker_enabled: settings.rutracker_enabled,
         commons_enabled: settings.commons_enabled,
+        popcorn_enabled: settings.popcorn_enabled,
         torznab: settings
             .torznab
             .iter()
@@ -184,6 +185,7 @@ pub(super) fn source_preferences(
     let preferences = SourcePreferences {
         rutracker_enabled: draft.rutracker_enabled,
         commons_enabled: draft.commons_enabled,
+        popcorn_enabled: draft.popcorn_enabled,
         torznab,
         preferred_resolution: optional(&draft.preferred_resolution),
         preferred_language: optional(&draft.preferred_language),
@@ -198,6 +200,7 @@ pub(super) fn source_row(source: SourceCandidate) -> SourceRow {
     SourceRow {
         index: source.index,
         recommended: source.recommended,
+        possible_match: source.possible_match,
         title: source.title,
         kind: source_kind(Some(source.kind)),
         quality: source.quality,
@@ -301,6 +304,7 @@ mod tests {
                 let preferences = SourcePreferences {
                     commons_enabled,
                     rutracker_enabled,
+                    popcorn_enabled: false,
                     torznab: vec![TorznabConfig {
                         name: "Local".into(),
                         base_url: "http://localhost:9696/api".into(),
@@ -319,10 +323,44 @@ mod tests {
     }
 
     #[test]
+    fn popcorn_preference_round_trips_both_states_independently() {
+        assert!(!SourcePreferencesDraft::default().popcorn_enabled);
+        for popcorn_enabled in [false, true] {
+            for other_providers_enabled in [false, true] {
+                let preferences = SourcePreferences {
+                    popcorn_enabled,
+                    commons_enabled: other_providers_enabled,
+                    rutracker_enabled: other_providers_enabled,
+                    torznab: vec![TorznabConfig {
+                        name: "Local".into(),
+                        base_url: "http://localhost:9696/api".into(),
+                        api_key_env: None,
+                        enabled: other_providers_enabled,
+                    }],
+                    preferred_resolution: Some("1080p".into()),
+                    preferred_language: Some("ru".into()),
+                };
+                let mut draft = source_preferences_draft(&preferences);
+                assert_eq!(draft.popcorn_enabled, popcorn_enabled);
+                assert_eq!(source_preferences(&draft).unwrap(), preferences);
+                draft.popcorn_enabled = !popcorn_enabled;
+                assert_eq!(
+                    source_preferences(&draft).unwrap(),
+                    SourcePreferences {
+                        popcorn_enabled: !popcorn_enabled,
+                        ..preferences
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
     fn source_preferences_preserve_multiple_endpoints_and_independent_rutracker_toggle() {
         let draft = SourcePreferencesDraft {
             rutracker_enabled: false,
             commons_enabled: true,
+            popcorn_enabled: true,
             torznab: vec![
                 TorznabDraft {
                     name: " Public ".into(),
@@ -343,6 +381,7 @@ mod tests {
         let preferences = source_preferences(&draft).unwrap();
         assert!(!preferences.rutracker_enabled);
         assert!(preferences.commons_enabled);
+        assert!(preferences.popcorn_enabled);
         assert_eq!(preferences.torznab.len(), 2);
         assert!(preferences.torznab[0].enabled);
         assert_eq!(preferences.torznab[0].name, "Public");
@@ -367,6 +406,7 @@ mod tests {
         let mut draft = SourcePreferencesDraft {
             rutracker_enabled: true,
             commons_enabled: false,
+            popcorn_enabled: false,
             torznab: vec![TorznabDraft {
                 name: "Endpoint".into(),
                 base_url: "http://localhost:9696".into(),
@@ -480,6 +520,7 @@ mod tests {
         let source = SourceCandidate {
             index: 7,
             recommended: true,
+            possible_match: false,
             kind: SourceKind::Magnet,
             title: "Разрешённое видео".into(),
             quality: Some("720p".into()),
@@ -496,6 +537,7 @@ mod tests {
         let row = source_row(source);
         assert_eq!(row.index, 7);
         assert!(row.recommended);
+        assert!(!row.possible_match);
         assert_eq!(row.kind, UiSourceKind::Magnet);
         assert_eq!(row.quality.as_deref(), Some("720p"));
         assert_eq!(
@@ -509,6 +551,63 @@ mod tests {
         assert_eq!(row.language, None);
         assert_eq!(row.license.as_deref(), Some("CC0"));
         assert_eq!(row.origin, "Публичный каталог");
+    }
+
+    #[test]
+    fn popcorn_rows_preserve_provider_and_upstream_without_special_playback_handles() {
+        for origin in ["Popcorn API", "Popcorn API · YTS"] {
+            let row = source_row(SourceCandidate {
+                index: 53,
+                recommended: false,
+                possible_match: false,
+                kind: SourceKind::Magnet,
+                title: "Movie release".into(),
+                quality: Some("1080p".into()),
+                video_codec: None,
+                audio_codec: None,
+                language: None,
+                license: String::new(),
+                origin: origin.into(),
+                size: Some(1_024),
+                seeds: Some(8),
+                peers: None,
+                rutracker: false,
+            });
+            assert_eq!(row.index, 53);
+            assert_eq!(row.origin, origin);
+            assert_eq!(row.kind, UiSourceKind::Magnet);
+            assert_eq!(row.license, None);
+            assert!(!row.rutracker);
+            assert!(!row.recommended);
+        }
+    }
+
+    #[test]
+    fn source_rows_preserve_possible_and_exact_matches_without_changing_handles() {
+        for possible_match in [false, true] {
+            let row = source_row(SourceCandidate {
+                index: 42,
+                recommended: false,
+                possible_match,
+                kind: SourceKind::Magnet,
+                title: "Tracker release".into(),
+                quality: None,
+                video_codec: None,
+                audio_codec: None,
+                peers: None,
+                language: None,
+                license: String::new(),
+                origin: "RuTracker".into(),
+                size: Some(1_024),
+                seeds: Some(8),
+                rutracker: true,
+            });
+            assert_eq!(row.possible_match, possible_match);
+            assert_eq!(row.index, 42);
+            assert!(!row.recommended);
+            assert!(row.rutracker);
+            assert_eq!(row.seeds, Some(8));
+        }
     }
 
     #[test]

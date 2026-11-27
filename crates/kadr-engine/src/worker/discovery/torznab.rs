@@ -82,6 +82,7 @@ impl SourceProvider for Provider {
             self.client()?
                 .search(query, &self.id, now(), cancel)
                 .await
+                .map(Into::into)
                 .map_err(provider_error)
         })
     }
@@ -185,7 +186,10 @@ impl Worker {
         match result {
             Ok(prepared) => {
                 self.finish_selection(Selection {
-                    origin: Origin::RemoteTorrent { prepared },
+                    origin: Origin::RemoteTorrent {
+                        prepared,
+                        kind: SourceKind::TorrentFile,
+                    },
                     file_id: None,
                     title: "Torznab · BitTorrent".into(),
                     filename: "video.mp4".into(),

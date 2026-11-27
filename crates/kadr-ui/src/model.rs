@@ -192,6 +192,8 @@ pub enum UiEvent {
     SetDefaultPlayer(PlayerChoice),
     Retry(Section),
     Cancel(Section),
+    /// Stop quiet card warming without discarding an explicit source choice.
+    CancelMoviePrefetch,
     Search(String),
     Browse,
     OpenMedia(String),
@@ -278,6 +280,8 @@ pub struct SourceRow {
     pub index: usize,
     /// Resolver recommendation only; never implies selection or starts playback.
     pub recommended: bool,
+    /// Plausible release for explicit selection only.
+    pub possible_match: bool,
     pub title: String,
     pub kind: SourceKind,
     pub quality: Option<String>,
@@ -294,12 +298,14 @@ pub struct SourceRow {
     pub rutracker: bool,
 }
 
-/// Controller-sanitized provider failures only, never raw URLs or credentials.
+/// Controller-sanitized provider feedback, never raw URLs or credentials.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SourceDiscovery {
     pub pending: usize,
     pub succeeded: usize,
     pub failures: Vec<String>,
+    /// Non-error provider statuses, independent of failures and row count.
+    pub notices: Vec<String>,
 }
 
 impl SourceDiscovery {
@@ -347,6 +353,7 @@ impl std::fmt::Debug for TorznabDraft {
 pub struct SourcePreferencesDraft {
     pub commons_enabled: bool,
     pub rutracker_enabled: bool,
+    pub popcorn_enabled: bool,
     pub torznab: Vec<TorznabDraft>,
     pub preferred_resolution: Option<String>,
     pub preferred_language: Option<String>,
@@ -357,6 +364,7 @@ impl Default for SourcePreferencesDraft {
         Self {
             commons_enabled: true,
             rutracker_enabled: true,
+            popcorn_enabled: false,
             torznab: Vec::new(),
             preferred_resolution: None,
             preferred_language: None,
@@ -889,6 +897,7 @@ mod tests {
             sources: vec![SourceRow {
                 index: 71,
                 recommended: false,
+                possible_match: true,
                 title: "Source".into(),
                 kind: SourceKind::Magnet,
                 quality: None,
@@ -900,7 +909,7 @@ mod tests {
                 license: None,
                 size: None,
                 seeds: None,
-                rutracker: false,
+                rutracker: true,
             }],
             ..ShellModel::default()
         };
@@ -912,16 +921,19 @@ mod tests {
                 pending: 2,
                 succeeded: 0,
                 failures: vec![],
+                notices: vec![],
             }),
             Some(SourceDiscovery {
                 pending: 1,
                 succeeded: 1,
                 failures: vec![],
+                notices: vec!["RuTracker: найдено возможное совпадение".into()],
             }),
             Some(SourceDiscovery {
                 pending: 0,
                 succeeded: 1,
                 failures: vec!["Indexer unavailable".into()],
+                notices: vec!["RuTracker: найдено возможное совпадение".into()],
             }),
         ] {
             model.source_discovery_starting = snapshot.is_none();
@@ -986,10 +998,35 @@ mod tests {
     }
 
     #[test]
+    fn provider_notices_survive_empty_possible_and_mixed_failure_results() {
+        let notices = vec![
+            "RuTracker: темы найдены, подходящих раздач нет".to_owned(),
+            "Commons: источники не найдены".to_owned(),
+        ];
+        let mut discovery = SourceDiscovery {
+            pending: 1,
+            succeeded: 2,
+            notices: notices.clone(),
+            failures: vec!["Indexer: недоступен".into()],
+        };
+        assert_eq!(discovery.heading(false), "Поиск источников…");
+        discovery.pending = 0;
+        assert_eq!(discovery.heading(false), "Источники не найдены");
+        assert_eq!(discovery.heading(true), "Поиск завершён частично");
+        assert_eq!(discovery.notices, notices);
+        assert_eq!(discovery.failures, ["Indexer: недоступен"]);
+        discovery.failures.clear();
+        assert_eq!(discovery.heading(true), "Поиск завершён");
+        assert_eq!(discovery.heading(false), "Источники не найдены");
+        assert_eq!(discovery.notices, notices, "notices are not failures");
+    }
+
+    #[test]
     fn commons_is_enabled_by_default_and_independent_of_torrent_providers() {
         let defaults = SourcePreferencesDraft::default();
         assert!(defaults.commons_enabled);
         assert!(defaults.rutracker_enabled);
+        assert!(!defaults.popcorn_enabled);
         assert!(defaults.torznab.is_empty());
         let disabled = SourcePreferencesDraft {
             commons_enabled: false,
@@ -997,6 +1034,7 @@ mod tests {
         };
         assert!(!disabled.commons_enabled);
         assert_eq!(disabled.rutracker_enabled, defaults.rutracker_enabled);
+        assert_eq!(disabled.popcorn_enabled, defaults.popcorn_enabled);
         assert_eq!(disabled.torznab, defaults.torznab);
     }
 
@@ -1077,6 +1115,7 @@ mod tests {
         model.sources.push(SourceRow {
             index: 7,
             recommended: false,
+            possible_match: false,
             title: "Public source".into(),
             kind: SourceKind::Http,
             quality: None,
