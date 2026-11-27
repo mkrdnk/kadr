@@ -98,6 +98,7 @@ enum Command {
     SaveSourcePreferences,
     ToggleCommons,
     ToggleRuTracker,
+    TogglePopcorn,
     AddTorznab,
     RemoveTorznab(usize),
     ToggleTorznab(usize),
@@ -140,6 +141,37 @@ impl SourceQuality {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceGroup {
+    Suitable,
+    Possible,
+}
+
+impl SourceGroup {
+    const ALL: [Self; 2] = [Self::Suitable, Self::Possible];
+
+    fn of(row: &SourceRow) -> Self {
+        if row.possible_match {
+            Self::Possible
+        } else {
+            Self::Suitable
+        }
+    }
+
+    fn heading(self) -> &'static str {
+        match self {
+            Self::Suitable => "Подходящие источники",
+            Self::Possible => "Возможные совпадения",
+        }
+    }
+
+    fn explanation(self) -> Option<&'static str> {
+        (self == Self::Possible).then_some(
+            "Название похоже, год или эпизод не подтверждён. Проверьте раздачу и выберите источник вручную.",
+        )
+    }
+}
+
 impl KadrView {
     pub fn new() -> Self {
         Self::default()
@@ -149,6 +181,17 @@ impl KadrView {
     /// completion if the user has not navigated elsewhere in the meantime.
     pub fn navigation_revision(&self) -> u64 {
         self.navigation_revision
+    }
+
+    /// Only a visible movie card can authorize speculative source warming.
+    pub fn movie_card_open(&self) -> bool {
+        self.detail_open
+            && self.modal_from.is_none()
+            && self
+                .model
+                .media
+                .as_ref()
+                .is_some_and(|media| media.kind == MediaKind::Movie)
     }
 
     fn record_navigation(&mut self) {
@@ -238,13 +281,19 @@ impl KadrView {
             self.run_command(&Command::OpenSearch, cx);
             return;
         }
-        if self.model.section == section && self.detail_open {
-            self.cancel_detail_sources(cx);
+        if self.model.section == section {
+            if self.detail_open {
+                self.cancel_detail_sources(cx);
+            }
+            // Even before the details reply, navigating to the same section
+            // invalidates the pending card's permission to prefetch.
             self.record_navigation();
+        } else if self.detail_open && section == Section::Sources && !self.source_work_active() {
+            self.cancel_detail_sources(cx);
         }
         self.modal_from = None;
-        self.detail_open = false;
         self.change_section(section, cx);
+        self.detail_open = false;
     }
 
     fn change_section(&mut self, section: Section, cx: &mut Context<Self>) {
@@ -267,10 +316,17 @@ impl KadrView {
     }
 
     fn source_exit_event(&self, next: Section) -> Option<UiEvent> {
-        (next != self.model.section
-            && (self.model.movie_watch_pending
-                || (self.model.section == Section::Sources && self.source_work_active())))
-        .then_some(UiEvent::Cancel(Section::Sources))
+        if next == self.model.section {
+            None
+        } else if self.model.movie_watch_pending
+            || (self.model.section == Section::Sources && self.source_work_active())
+        {
+            Some(UiEvent::Cancel(Section::Sources))
+        } else if self.detail_open && next != Section::Sources {
+            Some(UiEvent::CancelMoviePrefetch)
+        } else {
+            None
+        }
     }
 
     fn source_work_active(&self) -> bool {
@@ -288,6 +344,8 @@ impl KadrView {
             self.model.movie_watch_pending = false;
             self.clear_rutracker_login(cx);
             cx.emit(UiEvent::Cancel(Section::Sources));
+        } else if self.detail_open {
+            cx.emit(UiEvent::CancelMoviePrefetch);
         }
     }
 
@@ -319,6 +377,13 @@ impl KadrView {
 
     fn dismiss_overlay(&mut self, cx: &mut Context<Self>) {
         if let Some(section) = self.modal_from.take() {
+            if self.returns_to_movie_with_results() {
+                // Closing the table is not leaving the movie. Keep its finished
+                // lookup for Watch, but never leave a pending watch/login running.
+                self.record_section_change(section);
+                cx.notify();
+                return;
+            }
             // A card opened from Sources has the same section as its overlay.
             // Closing that overlay still leaves discovery, but not a ready choice.
             if self.model.section == Section::Sources && section == Section::Sources {
@@ -335,6 +400,25 @@ impl KadrView {
             }
             self.change_section(section, cx);
         }
+    }
+
+    fn returns_to_movie_with_results(&self) -> bool {
+        self.detail_open
+            && self.model.section == Section::Sources
+            && self
+                .model
+                .media
+                .as_ref()
+                .is_some_and(|card| card.kind == MediaKind::Movie)
+            && self
+                .model
+                .source_discovery
+                .as_ref()
+                .is_some_and(|result| result.pending == 0)
+            && !self.model.movie_watch_pending
+            && self.rutracker_login.is_none()
+            && !self.model.source_discovery_starting
+            && !self.model.preparing
     }
 
     pub fn set_search_results(&mut self, rows: Vec<MediaCard>, cx: &mut Context<Self>) {
@@ -564,7 +648,7 @@ impl KadrView {
                     }
                     UiEvent::OpenMedia(_) | UiEvent::OpenLibrary(_) => {
                         // Opening another card can keep the same section.
-                        if self.model.section != Section::Sources {
+                        if self.model.section != Section::Sources || self.detail_open {
                             self.cancel_detail_sources(cx);
                         }
                         self.record_navigation();
@@ -619,6 +703,10 @@ impl KadrView {
             }
             Command::ToggleRuTracker => {
                 self.source_preferences.toggle_rutracker();
+                cx.notify();
+            }
+            Command::TogglePopcorn => {
+                self.source_preferences.toggle_popcorn();
                 cx.notify();
             }
             Command::AddTorznab => {
@@ -1092,6 +1180,21 @@ impl KadrView {
         rows
     }
 
+    fn visible_source_groups(&self) -> Vec<(SourceGroup, Vec<&SourceRow>)> {
+        let rows = self.visible_sources();
+        SourceGroup::ALL
+            .into_iter()
+            .filter_map(|group| {
+                let sources: Vec<_> = rows
+                    .iter()
+                    .copied()
+                    .filter(|row| SourceGroup::of(row) == group)
+                    .collect();
+                (!sources.is_empty()).then_some((group, sources))
+            })
+            .collect()
+    }
+
     fn show_source_section_state(&self) -> bool {
         !self.model.discovering()
             || matches!(
@@ -1129,6 +1232,7 @@ impl KadrView {
                         && !self.model.sources.iter().any(|row| row.recommended),
                     |card| card.child(body("Нет подходящей раздачи с известным числом сидов больше нуля. Выберите источник вручную.")),
                 )
+                .children(discovery.notices.iter().map(|message| body(message.clone())))
                 .children(
                     discovery
                         .failures
@@ -1451,18 +1555,33 @@ const COMMONS_DISCLOSURE: &str = "Встроенный Wikimedia Commons раб�
      проверенных фильмов Blender, не универсальный каталог видео. Для поиска нужно разрешение \
      внешнего каталога, но BitTorrent не нужен.";
 
+const POPCORN_DISCLOSURE: &str = "Popcorn API / YTS выключен по умолчанию; прежнее согласие не переносится. \
+     Только кнопки «Источники» и «Смотреть» отправляют IMDb ID: \
+     Popcorn (fusme.link, jfper.link, uxert.link, yrkde.link) — фильмы и нумерованные эпизоды, включая аниме с IMDb; \
+     YTS (yts.lt, yts.gg) — только фильмы. Нужную серию kadr выбирает локально из ответа по IMDb ID сериала. \
+     Открытие карточки не вызывает запросов к этим сервисам. Фильмы могут запрашиваться в обеих группах независимо. \
+     В каждой группе резервные зеркала используются при временных сбоях, но не при 401/403/429. \
+     Только YTS: один переход на https://yts.pw с тем же путём и параметрами запроса; \
+     другие перенаправления запрещены. Нужны разрешения каталога и BitTorrent.";
+
+const MOVIE_PREFETCH_DISCLOSURE: &str = "При открытии карточки фильма kadr может заранее найти раздачи и magnet-ссылки RuTracker, \
+     если RuTracker включён, а внешний каталог и BitTorrent разрешены. Для сериалов такого поиска нет. \
+     Фоновый поиск не запрашивает пароль и не запускает скачивание видео или воспроизведение. \
+     Wikimedia Commons, Torznab и Popcorn API запрашиваются по кнопке «Источники» или «Смотреть».";
+
 const SOURCE_DISCLOSURE: &str = "Trakt предоставляет только метаданные и ссылки на изображения, не видео. \
      При сетевом поиске приложение обращается только к включённым поставщикам: \
-     Wikimedia Commons, RuTracker и настроенным Torznab API. \
+     Wikimedia Commons, RuTracker, настроенным Torznab API и Popcorn API. \
      Отключение внешнего каталога отключает сетевой поиск источников. \
-     Отключение BitTorrent отключает только поиск RuTracker и Torznab, не Commons. \
-     Данные раздач RuTracker/Torznab и права на их контент не проверены. \
+     Отключение BitTorrent отключает поиск RuTracker, Torznab и Popcorn API, не Commons. \
+     Данные раздач RuTracker/Torznab/Popcorn API и права на их контент не проверены. \
      Вход не включает BitTorrent: разрешение на обмен частями файлов задаётся отдельно в настройках.";
 
 fn source_disclosure() -> Div {
     column()
         .child(body(COMMONS_DISCLOSURE))
         .child(body(SOURCE_DISCLOSURE))
+        .child(body(MOVIE_PREFETCH_DISCLOSURE))
 }
 
 fn browser_warning() -> Div {
@@ -1501,18 +1620,53 @@ mod shell_tests {
             "Trakt предоставляет только метаданные",
             "только к включённым поставщикам",
             "Отключение внешнего каталога отключает сетевой поиск источников",
-            "Отключение BitTorrent отключает только поиск RuTracker и Torznab, не Commons",
-            "Данные раздач RuTracker/Torznab и права на их контент не проверены",
+            "Wikimedia Commons, RuTracker, настроенным Torznab API и Popcorn API",
+            "Отключение BitTorrent отключает поиск RuTracker, Torznab и Popcorn API, не Commons",
+            "Данные раздач RuTracker/Torznab/Popcorn API и права на их контент не проверены",
             "Вход не включает BitTorrent",
         ] {
             assert!(SOURCE_DISCLOSURE.contains(text), "{text}");
         }
+        for text in [
+            "При открытии карточки фильма",
+            "RuTracker включён",
+            "внешний каталог и BitTorrent разрешены",
+            "Для сериалов такого поиска нет",
+            "не запрашивает пароль",
+            "не запускает скачивание видео или воспроизведение",
+            "Wikimedia Commons, Torznab и Popcorn API запрашиваются по кнопке",
+        ] {
+            assert!(MOVIE_PREFETCH_DISCLOSURE.contains(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn popcorn_disclosure_explains_opt_in_scope_privacy_and_permissions() {
+        for text in [
+            "выключен по умолчанию",
+            "прежнее согласие не переносится",
+            "Только кнопки «Источники» и «Смотреть» отправляют IMDb ID",
+            "Popcorn (fusme.link, jfper.link, uxert.link, yrkde.link)",
+            "фильмы и нумерованные эпизоды, включая аниме с IMDb",
+            "YTS (yts.lt, yts.gg) — только фильмы",
+            "Нужную серию kadr выбирает локально",
+            "Открытие карточки не вызывает запросов к этим сервисам",
+            "Фильмы могут запрашиваться в обеих группах независимо",
+            "В каждой группе резервные зеркала используются при временных сбоях, но не при 401/403/429",
+            "Только YTS: один переход на https://yts.pw с тем же путём и параметрами запроса",
+            "другие перенаправления запрещены",
+            "каталога и BitTorrent",
+        ] {
+            assert!(POPCORN_DISCLOSURE.contains(text), "{text}");
+        }
+        assert!(!POPCORN_DISCLOSURE.contains("Для сериалов запросов нет"));
     }
 
     fn source(index: usize, quality: Option<&str>, seeds: Option<u32>) -> SourceRow {
         SourceRow {
             index,
             recommended: false,
+            possible_match: false,
             title: format!("Source {index}"),
             kind: SourceKind::Magnet,
             quality: quality.map(str::to_owned),
@@ -1549,6 +1703,103 @@ mod shell_tests {
         view.source_quality = SourceQuality::UltraHd;
         assert_eq!(indices(&view), [8, 3]);
         assert!(view.model.accepts(&UiEvent::ChooseSource(8)));
+    }
+
+    #[test]
+    fn popcorn_rows_keep_origin_and_use_existing_manual_selection() {
+        let mut view = KadrView::new();
+        let mut popcorn = source(53, Some("1080p"), Some(8));
+        popcorn.rutracker = false;
+        popcorn.origin = "Popcorn API · YTS".into();
+        view.model.sources = vec![popcorn];
+        let rows = view.visible_sources();
+        assert_eq!(rows[0].origin, "Popcorn API · YTS");
+        assert_eq!(rows[0].index, 53);
+        assert!(view.model.accepts(&UiEvent::ChooseSource(53)));
+        assert!(!view.model.accepts(&UiEvent::ChooseSource(0)));
+        assert!(view.model.source.is_none());
+        assert!(!view.model.can_play(), "discovery must not start playback");
+    }
+
+    #[test]
+    fn possible_rutracker_matches_are_separate_without_reordering_other_providers() {
+        let mut view = KadrView::new();
+        let mut possible = source(71, Some("1080p"), Some(100));
+        possible.possible_match = true;
+        let mut commons = source(42, None, None);
+        commons.rutracker = false;
+        commons.kind = SourceKind::Http;
+        commons.origin = "Wikimedia Commons".into();
+        let mut torznab = source(98, Some("1080p"), Some(20));
+        torznab.rutracker = false;
+        torznab.origin = "Indexer".into();
+        view.model.sources = vec![
+            possible,
+            commons,
+            source(7, Some("1080p"), Some(10)),
+            torznab,
+        ];
+        let groups = |view: &KadrView| {
+            view.visible_source_groups()
+                .into_iter()
+                .map(|(group, rows)| {
+                    (
+                        group,
+                        rows.into_iter().map(|row| row.index).collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            groups(&view),
+            [
+                (SourceGroup::Suitable, vec![42, 7, 98]),
+                (SourceGroup::Possible, vec![71]),
+            ]
+        );
+        view.source_order_seeds = true;
+        assert_eq!(
+            groups(&view),
+            [
+                (SourceGroup::Suitable, vec![98, 7, 42]),
+                (SourceGroup::Possible, vec![71]),
+            ]
+        );
+        view.source_quality = SourceQuality::FullHd;
+        assert_eq!(
+            groups(&view),
+            [
+                (SourceGroup::Suitable, vec![98, 7]),
+                (SourceGroup::Possible, vec![71]),
+            ]
+        );
+        assert!(view.model.accepts(&UiEvent::ChooseSource(71)));
+        assert!(!view.model.accepts(&UiEvent::ChooseSource(0)));
+        assert!(view.model.source.is_none());
+        assert!(!view.model.can_play());
+        assert_eq!(
+            SourceGroup::Possible.explanation(),
+            Some(
+                "Название похоже, год или эпизод не подтверждён. Проверьте раздачу и выберите источник вручную."
+            )
+        );
+        assert!(SourceGroup::Suitable.explanation().is_none());
+        view.source_quality = SourceQuality::UltraHd;
+        assert!(groups(&view).is_empty(), "do not render empty groups");
+    }
+
+    #[test]
+    fn match_confidence_is_not_inferred_from_other_providers_titles_or_names() {
+        let mut row = source(7, None, None);
+        row.rutracker = false;
+        row.origin = "RuTracker via indexer".into();
+        row.title = "Возможное совпадение".into();
+        row.possible_match = false;
+        assert_eq!(SourceGroup::of(&row), SourceGroup::Suitable);
+        row.possible_match = true;
+        assert_eq!(SourceGroup::of(&row), SourceGroup::Possible);
+        row.possible_match = false;
+        assert_eq!(SourceGroup::of(&row), SourceGroup::Suitable);
     }
 
     #[test]
@@ -1598,7 +1849,74 @@ mod shell_tests {
         view.model.playback_available = true;
         assert!(!view.source_work_active());
         assert!(view.model.can_play());
-        assert_eq!(view.source_exit_event(Section::Home), None);
+        assert_eq!(
+            view.source_exit_event(Section::Home),
+            Some(UiEvent::CancelMoviePrefetch),
+            "idle card exit cancels warming without discarding the source"
+        );
+    }
+
+    #[test]
+    fn idle_card_exit_cancels_only_prefetch_and_sources_overlay_keeps_it() {
+        let mut view = KadrView::new();
+        view.detail_open = true;
+        for current in Section::ALL {
+            view.model.section = current;
+            for next in Section::ALL {
+                assert_eq!(
+                    view.source_exit_event(next),
+                    (current != next && next != Section::Sources)
+                        .then_some(UiEvent::CancelMoviePrefetch)
+                );
+            }
+        }
+        assert!(!view.model.movie_watch_pending);
+        assert!(!view.model.discovering());
+        assert!(!view.model.playback_active);
+        assert!(!view.source_work_active());
+        view.detail_open = false;
+        view.model.section = Section::Home;
+        assert_eq!(view.source_exit_event(Section::Settings), None);
+    }
+
+    #[test]
+    fn prefetch_requires_visible_movie_card_not_overlay_or_series() {
+        let mut view = KadrView::new();
+        view.model.media = Some(MediaCard {
+            id: "movie".into(),
+            title: "Film".into(),
+            original_title: None,
+            year: None,
+            description: None,
+            poster_url: None,
+            backdrop_url: None,
+            rating_tenths: None,
+            kind: MediaKind::Movie,
+            episodes: vec![],
+            attribution: String::new(),
+        });
+        assert!(!view.movie_card_open());
+        view.detail_open = true;
+        assert!(view.movie_card_open());
+        view.modal_from = Some(Section::Home);
+        assert!(!view.movie_card_open());
+        view.model.section = Section::Sources;
+        view.model.source_discovery = Some(SourceDiscovery::default());
+        assert!(
+            view.returns_to_movie_with_results(),
+            "dismissing settled Sources returns to the same movie and keeps prepared links"
+        );
+        view.model.source_discovery.as_mut().unwrap().pending = 1;
+        assert!(!view.returns_to_movie_with_results());
+        view.model.source_discovery.as_mut().unwrap().pending = 0;
+        view.model.movie_watch_pending = true;
+        assert!(!view.returns_to_movie_with_results());
+        view.model.movie_watch_pending = false;
+        view.modal_from = None;
+        view.model.media.as_mut().unwrap().kind = MediaKind::Series;
+        assert!(!view.movie_card_open());
+        view.model.media = None;
+        assert!(!view.movie_card_open());
     }
 
     #[test]
@@ -1633,6 +1951,7 @@ mod shell_tests {
             pending: 0,
             succeeded: 1,
             failures: Vec::new(),
+            notices: Vec::new(),
         });
         for state in [
             SectionState::Empty("Complete".into()),
@@ -1710,6 +2029,7 @@ mod shell_tests {
             pending: 0,
             succeeded: 1,
             failures: Vec::new(),
+            notices: Vec::new(),
         });
         for state in [
             SectionState::Error("Selected source failed".into()),

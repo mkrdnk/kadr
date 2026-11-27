@@ -27,6 +27,7 @@ pub struct SourcePreferences {
     /// Built-in Wikimedia Commons provider for a limited reviewed Blender film set.
     /// Requires no credentials; callers must enforce the global catalog permission.
     pub commons_enabled: bool,
+    pub popcorn_enabled: bool,
     /// At most 16 configs, in user order, with distinct normalized endpoints.
     pub torznab: Vec<TorznabConfig>,
     /// Optional nonblank, control-free labels, at most 64 UTF-8 bytes each.
@@ -53,6 +54,7 @@ impl Default for SourcePreferences {
         Self {
             rutracker_enabled: true,
             commons_enabled: true,
+            popcorn_enabled: false,
             torznab: Vec::new(),
             preferred_resolution: None,
             preferred_language: None,
@@ -183,12 +185,13 @@ impl Storage {
             transaction.execute(
                 "UPDATE source_preferences SET rutracker_enabled = ?1,
                  preferred_resolution = ?2, preferred_language = ?3,
-                 commons_enabled = ?4 WHERE singleton = 1",
+                 commons_enabled = ?4, popcorn_enabled = ?5 WHERE singleton = 1",
                 params![
                     preferences.rutracker_enabled,
                     preferences.preferred_resolution,
                     preferences.preferred_language,
                     preferences.commons_enabled,
+                    preferences.popcorn_enabled,
                 ],
             )?;
             transaction.execute("DELETE FROM torznab_configs", [])?;
@@ -235,6 +238,16 @@ impl Storage {
             .optional()?;
         transaction.commit()?;
         Ok(data)
+    }
+
+    /// Invalidate one previous batch when a refreshed result is not cacheable.
+    pub fn source_cache_remove(&mut self, media_key: &str, provider_key: &str) -> Result<()> {
+        validate_cache_keys(media_key, provider_key)?;
+        self.connection.execute(
+            "DELETE FROM source_cache WHERE media_key = ?1 AND provider_key = ?2",
+            params![media_key, provider_key],
+        )?;
+        Ok(())
     }
 
     /// Cache only successful results, encoded by the resolver. `empty` means a
@@ -291,14 +304,20 @@ impl Storage {
 }
 
 fn validate_cache_input(media: &str, provider: &str, now: i64) -> Result<()> {
-    MediaId::new(media).map_err(|_| Error::InvalidInput("source cache media key"))?;
-    MediaId::new(provider).map_err(|_| Error::InvalidInput("source cache provider key"))?;
+    validate_cache_keys(media, provider)?;
     validate_timestamp(now)
 }
 
+fn validate_cache_keys(media: &str, provider: &str) -> Result<()> {
+    MediaId::new(media).map_err(|_| Error::InvalidInput("source cache media key"))?;
+    MediaId::new(provider).map_err(|_| Error::InvalidInput("source cache provider key"))?;
+    Ok(())
+}
+
 fn read_preferences(connection: &Connection) -> Result<SourcePreferences> {
-    let (enabled, resolution, language, commons) = connection.query_row(
-        "SELECT rutracker_enabled, preferred_resolution, preferred_language, commons_enabled
+    let (enabled, resolution, language, commons, popcorn) = connection.query_row(
+        "SELECT rutracker_enabled, preferred_resolution, preferred_language,
+                commons_enabled, popcorn_enabled
          FROM source_preferences WHERE singleton = 1",
         [],
         |row| {
@@ -307,12 +326,14 @@ fn read_preferences(connection: &Connection) -> Result<SourcePreferences> {
                 row.get(1)?,
                 row.get(2)?,
                 row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
             ))
         },
     )?;
     let mut preferences = SourcePreferences {
         rutracker_enabled: decode_bool(enabled)?,
         commons_enabled: decode_bool(commons)?,
+        popcorn_enabled: decode_bool(popcorn)?,
         preferred_resolution: resolution,
         preferred_language: language,
         torznab: Vec::new(),

@@ -16,6 +16,7 @@ fn preferences() -> SourcePreferences {
     SourcePreferences {
         rutracker_enabled: false,
         commons_enabled: false,
+        popcorn_enabled: false,
         torznab: vec![
             config("https://private.example/indexer/api"),
             TorznabConfig {
@@ -40,11 +41,263 @@ fn downgrade_to_v6(raw: &Connection) {
 }
 
 fn downgrade_to_v7(raw: &Connection) {
+    downgrade_to_v8(raw);
     raw.execute_batch(
         "ALTER TABLE source_preferences DROP COLUMN commons_enabled;
          PRAGMA user_version = 7;",
     )
     .unwrap();
+}
+
+fn downgrade_to_v8(raw: &Connection) {
+    downgrade_to_v9(raw);
+    raw.execute_batch(
+        "ALTER TABLE source_preferences DROP COLUMN popcorn_enabled;
+         PRAGMA user_version = 8;",
+    )
+    .unwrap();
+}
+
+fn downgrade_to_v9(raw: &Connection) {
+    // v10 changes consent data only; v9 has the same schema.
+    raw.pragma_update(None, "user_version", 9).unwrap();
+}
+
+#[test]
+fn v9_upgrade_resets_only_popcorn_consent_and_v10_reopening_preserves_new_opt_in() {
+    for popcorn_enabled in [false, true] {
+        for commons_enabled in [false, true] {
+            for rutracker_enabled in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("db");
+                let mut store = Storage::open(&path).unwrap();
+                let mut settings = Settings {
+                    catalog_enabled: !popcorn_enabled,
+                    catalog_proxy: Some("http://127.0.0.1:8080".into()),
+                    ..Settings::default()
+                };
+                settings.network.torrents_enabled = !commons_enabled;
+                store.save_settings(&settings).unwrap();
+                let mut expected = SourcePreferences {
+                    popcorn_enabled,
+                    commons_enabled,
+                    rutracker_enabled,
+                    ..preferences()
+                };
+                store.save_source_preferences(&expected).unwrap();
+                store
+                    .source_cache_put("media:1", "provider:1", 100, false, b"v9 result")
+                    .unwrap();
+                let media = MediaId::new("media:favorite").unwrap();
+                store.set_favorite(&media, true).unwrap();
+                drop(store);
+                let raw = Connection::open(&path).unwrap();
+                downgrade_to_v9(&raw);
+                drop(raw);
+
+                expected.popcorn_enabled = false;
+                for _ in 0..2 {
+                    let store = Storage::open(&path).unwrap();
+                    assert_eq!(store.load_source_preferences().unwrap(), expected);
+                    assert_eq!(store.load_settings().unwrap(), settings);
+                    assert!(store.library_entry(&media).unwrap().unwrap().favorite);
+                    assert_eq!(
+                        store
+                            .source_cache_get("media:1", "provider:1", 101)
+                            .unwrap(),
+                        Some(b"v9 result".to_vec())
+                    );
+                }
+                let raw = Connection::open(&path).unwrap();
+                assert_eq!(
+                    raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                        .unwrap(),
+                    10
+                );
+                drop(raw);
+
+                let mut store = Storage::open(&path).unwrap();
+                expected.popcorn_enabled = true;
+                store.save_source_preferences(&expected).unwrap();
+                drop(store);
+                let store = Storage::open(&path).unwrap();
+                assert_eq!(store.load_source_preferences().unwrap(), expected);
+                assert_eq!(store.load_settings().unwrap(), settings);
+            }
+        }
+    }
+}
+
+#[test]
+fn v10_reset_failure_preserves_v9_consent_data_and_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let mut store = Storage::open(&path).unwrap();
+    store
+        .save_source_preferences(&SourcePreferences {
+            popcorn_enabled: true,
+            ..preferences()
+        })
+        .unwrap();
+    drop(store);
+    let raw = Connection::open(&path).unwrap();
+    downgrade_to_v9(&raw);
+    raw.execute_batch(
+        "CREATE TRIGGER fail_reset BEFORE UPDATE OF popcorn_enabled ON source_preferences BEGIN
+             SELECT RAISE(ABORT, 'reset failed');
+         END;",
+    )
+    .unwrap();
+    drop(raw);
+    let before = std::fs::read(&path).unwrap();
+    assert!(matches!(Storage::open(&path), Err(Error::Database)));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let raw = Connection::open(&path).unwrap();
+    assert_eq!(
+        raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        9
+    );
+    assert_eq!(
+        raw.query_row(
+            "SELECT popcorn_enabled FROM source_preferences",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn popcorn_opt_in_and_opt_out_survive_restart_and_invalidate_only_resolver_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let mut store = Storage::open(&path).unwrap();
+    let mut expected = store.load_source_preferences().unwrap();
+    assert!(!expected.popcorn_enabled);
+    let settings = store.load_settings().unwrap();
+    for enabled in [true, false, true] {
+        store
+            .source_cache_put("media:1", "provider:1", 100, false, b"result")
+            .unwrap();
+        store.save_source_preferences(&expected).unwrap();
+        assert_eq!(
+            store
+                .source_cache_get("media:1", "provider:1", 101)
+                .unwrap(),
+            Some(b"result".to_vec())
+        );
+        expected.popcorn_enabled = enabled;
+        store.save_source_preferences(&expected).unwrap();
+        drop(store);
+        store = Storage::open(&path).unwrap();
+        assert_eq!(store.load_source_preferences().unwrap(), expected);
+        assert_eq!(store.load_settings().unwrap(), settings);
+        assert_eq!(
+            store
+                .source_cache_get("media:1", "provider:1", 101)
+                .unwrap(),
+            None
+        );
+        let raw = Connection::open(&path).unwrap();
+        assert_eq!(
+            raw.query_row(
+                "SELECT popcorn_enabled FROM source_preferences",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            i64::from(enabled)
+        );
+    }
+}
+
+#[test]
+fn v8_upgrade_preserves_preferences_settings_and_cache_without_popcorn_consent() {
+    for catalog_enabled in [false, true] {
+        for torrents_enabled in [false, true] {
+            for commons_enabled in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("db");
+                let mut store = Storage::open(&path).unwrap();
+                let mut settings = Settings {
+                    catalog_enabled,
+                    ..Settings::default()
+                };
+                settings.network.torrents_enabled = torrents_enabled;
+                store.save_settings(&settings).unwrap();
+                let mut expected = preferences();
+                expected.rutracker_enabled = torrents_enabled;
+                expected.commons_enabled = commons_enabled;
+                store.save_source_preferences(&expected).unwrap();
+                store
+                    .source_cache_put("media:1", "provider:1", 100, false, b"v8 result")
+                    .unwrap();
+                let media = MediaId::new("media:favorite").unwrap();
+                store.set_favorite(&media, true).unwrap();
+                drop(store);
+                let raw = Connection::open(&path).unwrap();
+                downgrade_to_v8(&raw);
+                drop(raw);
+
+                for _ in 0..2 {
+                    let store = Storage::open(&path).unwrap();
+                    assert_eq!(store.load_source_preferences().unwrap(), expected);
+                    assert!(!store.load_source_preferences().unwrap().popcorn_enabled);
+                    assert_eq!(store.load_settings().unwrap(), settings);
+                    assert!(store.library_entry(&media).unwrap().unwrap().favorite);
+                    assert_eq!(
+                        store
+                            .source_cache_get("media:1", "provider:1", 101)
+                            .unwrap(),
+                        Some(b"v8 result".to_vec())
+                    );
+                }
+                let raw = Connection::open(&path).unwrap();
+                assert_eq!(
+                    raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                        .unwrap(),
+                    SCHEMA_VERSION
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn v9_column_collision_preserves_v8_data_and_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let mut store = Storage::open(&path).unwrap();
+    store.save_source_preferences(&preferences()).unwrap();
+    drop(store);
+    let raw = Connection::open(&path).unwrap();
+    downgrade_to_v8(&raw);
+    raw.execute_batch(
+        "ALTER TABLE source_preferences ADD COLUMN popcorn_enabled TEXT;
+         UPDATE source_preferences SET popcorn_enabled = 'preserve';",
+    )
+    .unwrap();
+    drop(raw);
+    let before = std::fs::read(&path).unwrap();
+    assert!(matches!(Storage::open(&path), Err(Error::Database)));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let raw = Connection::open(&path).unwrap();
+    assert_eq!(
+        raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        8
+    );
+    assert_eq!(
+        raw.query_row(
+            "SELECT popcorn_enabled FROM source_preferences",
+            [],
+            |row| row.get::<_, String>(0)
+        )
+        .unwrap(),
+        "preserve"
+    );
 }
 
 #[test]
@@ -120,7 +373,7 @@ fn v7_upgrade_keeps_existing_preferences_settings_and_cache_without_commons_cons
             assert_eq!(
                 raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                     .unwrap(),
-                8
+                SCHEMA_VERSION
             );
             drop(raw);
             for enabled in [true, false] {
@@ -135,33 +388,35 @@ fn v7_upgrade_keeps_existing_preferences_settings_and_cache_without_commons_cons
 }
 
 #[test]
-fn commons_boolean_is_strict_and_corruption_is_not_reset() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("db");
-    let mut store = Storage::open(&path).unwrap();
-    let raw = Connection::open(&path).unwrap();
-    for value in ["2", "-1", "NULL", "'true'"] {
+fn provider_booleans_are_strict_and_corruption_is_not_reset() {
+    for column in ["commons_enabled", "popcorn_enabled"] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let mut store = Storage::open(&path).unwrap();
+        let raw = Connection::open(&path).unwrap();
+        for value in ["2", "-1", "NULL", "'true'"] {
+            assert!(
+                raw.execute_batch(&format!(
+                    "UPDATE source_preferences SET {column} = {value};"
+                ))
+                .is_err()
+            );
+        }
+        raw.execute_batch(&format!(
+            "PRAGMA ignore_check_constraints = ON;
+             UPDATE source_preferences SET {column} = 2;"
+        ))
+        .unwrap();
+        assert_eq!(
+            store.load_source_preferences(),
+            Err(Error::CorruptData("source preferences"))
+        );
         assert!(
-            raw.execute_batch(&format!(
-                "UPDATE source_preferences SET commons_enabled = {value};"
-            ))
-            .is_err()
+            store
+                .save_source_preferences(&SourcePreferences::default())
+                .is_err()
         );
     }
-    raw.execute_batch(
-        "PRAGMA ignore_check_constraints = ON;
-         UPDATE source_preferences SET commons_enabled = 2;",
-    )
-    .unwrap();
-    assert_eq!(
-        store.load_source_preferences(),
-        Err(Error::CorruptData("source preferences"))
-    );
-    assert!(
-        store
-            .save_source_preferences(&SourcePreferences::default())
-            .is_err()
-    );
 }
 
 #[test]
@@ -210,6 +465,7 @@ fn preferences_defaults_round_trip_and_do_not_change_settings() {
     );
     assert!(SourcePreferences::default().rutracker_enabled);
     assert!(SourcePreferences::default().commons_enabled);
+    assert!(!SourcePreferences::default().popcorn_enabled);
     let settings = Settings {
         catalog_enabled: false,
         ..Settings::default()
@@ -462,9 +718,9 @@ fn config_changes_clear_cache_atomically_but_identical_saves_retain_it() {
          END;",
     )
     .unwrap();
-    let err = store
-        .save_source_preferences(&SourcePreferences::default())
-        .unwrap_err();
+    let mut changed = preferences();
+    changed.popcorn_enabled = true;
+    let err = store.save_source_preferences(&changed).unwrap_err();
     assert_eq!(err, Error::Database);
     assert_eq!(store.load_source_preferences().unwrap(), preferences());
     assert!(
@@ -474,9 +730,8 @@ fn config_changes_clear_cache_atomically_but_identical_saves_retain_it() {
             .is_some()
     );
     raw.execute_batch("DROP TRIGGER fail_clear").unwrap();
-    store
-        .save_source_preferences(&SourcePreferences::default())
-        .unwrap();
+    store.save_source_preferences(&changed).unwrap();
+    assert_eq!(store.load_source_preferences().unwrap(), changed);
     assert_eq!(
         store.source_cache_get("media:1", "provider:1", 1).unwrap(),
         None
@@ -491,6 +746,9 @@ fn every_preference_field_change_invalidates_cache() {
     let mut changes = Vec::new();
     let mut changed = good.clone();
     changed.commons_enabled = true;
+    changes.push(changed);
+    let mut changed = good.clone();
+    changed.popcorn_enabled = true;
     changes.push(changed);
     let mut changed = good.clone();
     changed.rutracker_enabled = true;

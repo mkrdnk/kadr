@@ -47,7 +47,7 @@ impl TorznabOrigin {
         let origin = endpoint.trim_end_matches("/api").to_owned();
         let worker = thread::spawn(move || {
             while !done.load(Ordering::Relaxed) {
-                let (mut socket, _) = match listener.accept() {
+                let (mut socket, _) = match accept_http(&listener) {
                     Ok(connection) => connection,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(2));

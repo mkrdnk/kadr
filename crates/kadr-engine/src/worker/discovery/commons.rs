@@ -48,6 +48,7 @@ impl SourceProvider for Provider {
             client
                 .search(query, now(), cancel)
                 .await
+                .map(Into::into)
                 .map_err(|error| ProviderError::Failed(error.to_string()))
         })
     }

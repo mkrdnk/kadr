@@ -1,0 +1,51 @@
+{
+  "status": "ok",
+  "status_message": "Query was successful",
+  "data": {
+    "movie": {
+      "id": 123,
+      "url": "https://untrusted.invalid/movie?private=fixture",
+      "imdb_code": "tt0133093",
+      "title": "The Matrix",
+      "title_english": "The Matrix",
+      "title_long": "The Matrix (1999)",
+      "slug": "the-matrix-1999",
+      "year": 1999,
+      "rating": 8.7,
+      "runtime": 136,
+      "genres": ["Action", "Sci-Fi"],
+      "language": "en",
+      "torrents": [
+        {
+          "url": "http://127.0.0.1/private.torrent",
+          "hash": "ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+          "quality": "1080p",
+          "type": "bluray",
+          "is_repack": "0",
+          "video_codec": "x264",
+          "bit_depth": "8",
+          "audio_channels": "5.1",
+          "seeds": 0,
+          "peers": 13,
+          "size": "2.94 GB",
+          "size_bytes": 3156800962,
+          "date_uploaded": "2020-01-02 03:04:05",
+          "date_uploaded_unix": 1577934245
+        },
+        {
+          "url": "magnet:?xt=urn:btih:ffffffffffffffffffffffffffffffffffffffff&ws=http://localhost",
+          "hash": "0123456789012345678901234567890123456789",
+          "quality": "720p",
+          "type": "web",
+          "peers": 0
+        }
+      ]
+    }
+  },
+  "@meta": {
+    "server_time": 1577934245,
+    "server_timezone": "UTC",
+    "api_version": 2,
+    "execution_time": "0 ms"
+  }
+}

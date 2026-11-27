@@ -1,8 +1,8 @@
 //! Opt-in local desktop source discovery on the authorized RuTracker domain.
 //!
 //! Results are offers for explicit selection, not exact episode matches or rights
-//! guarantees. The original title retains pack/episode scope. Call `magnet` only
-//! after selection; login and `.torrent` download are a separate fallback.
+//! guarantees. The original title retains pack/episode scope. Looking up a
+//! topic attachment is HTTP-only; login and `.torrent` download are separate.
 //! No credentials, cookies or downloaded files are persisted by this module.
 
 use std::{collections::HashSet, fmt, future::Future, time::Duration};
@@ -10,8 +10,8 @@ use std::{collections::HashSet, fmt, future::Future, time::Duration};
 use kadr_core::{
     catalog::{Episode, Media, MediaKind},
     source::{ManualSource, SourceKind},
-    sources::{MediaQuery, movie_release_has_pack_suffix},
-    torrent::{EpisodeRecognition, recognize_episode},
+    sources::{MediaQuery, contains_movie_pack_label, movie_release_has_pack_suffix},
+    torrent::{EpisodeNumber, EpisodeRecognition, recognize_episode},
 };
 use rutracker_api as api;
 
@@ -19,6 +19,30 @@ use crate::CancellationToken;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const OFFER_LIMIT: usize = 50;
+const QUERY_LIMIT: usize = 4;
+const SEARCH_CALL_LIMIT: usize = 6;
+const SEARCH_PAGE_LIMIT: u32 = 2;
+
+/// Strength of the release's title, production-year and scope evidence.
+/// `Possible` requires explicit selection, never automatic movie playback.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReleaseMatch {
+    Exact,
+    Possible,
+}
+
+/// Distinguishes a genuinely empty catalog from topics rejected by matching.
+#[derive(Debug, Eq, PartialEq)]
+pub struct SearchOutcome {
+    pub offers: Vec<Offer>,
+    pub had_topics: bool,
+}
+
+struct SearchPage {
+    offers: Vec<Offer>,
+    had_topics: bool,
+    total_pages: u32,
+}
 
 /// Provider-reported data only. Missing metadata is not replaced with zero.
 #[derive(Clone, Eq, PartialEq)]
@@ -138,12 +162,8 @@ impl Client {
         self.authenticated.as_deref().unwrap_or(&self.anonymous)
     }
 
-    /// Search the first page of each distinct localized/original title, with a
-    /// combined limit of 50 offers. No per-topic requests, pagination or crawling.
-    ///
-    /// RuTracker may require authentication even for listing; this is returned as
-    /// `AuthenticationRequired`, not silently converted into an empty result.
-    /// Conservative title/year/scope filtering intentionally misses some releases.
+    /// Compatibility wrapper; new callers should use `search_outcome` to distinguish
+    /// no topics from topics which did not match. No per-topic requests are made.
     pub async fn search(
         &self,
         media: &Media,
@@ -154,49 +174,63 @@ impl Client {
         if media.kind == MediaKind::Movie && episode.is_some() {
             return Ok(Vec::new());
         }
-        let queries = queries(media)?;
-        let mut seen = HashSet::new();
-        let mut offers = Vec::new();
-        let mut searched = false;
-        for query in &queries {
-            let results = match request(cancel, self.session().search(query).send()).await {
-                Ok(results) => results,
-                // RuTracker's Windows-1251 forms cannot represent every original
-                // title. A usable localized/original alternative may still work.
-                Err(Error::InvalidQuery) => continue,
-                Err(error) => return Err(error),
-            };
-            searched = true;
-            for row in results.results.into_iter().take(OFFER_LIMIT) {
-                ready(cancel)?;
-                if row.id.get() == 0
-                    || row.title.chars().count() > 2_000
-                    || row.title.chars().any(char::is_control)
-                    || !matches_release(&row.title, media, episode, &queries)
-                    || !seen.insert(row.id.get())
-                {
-                    continue;
-                }
-                offers.push(Offer {
-                    topic_id: row.id.get(),
-                    quality: quality(&row.title),
-                    title: row.title,
-                    size: row.size,
-                    seeds: row.seeds.and_then(|n| u32::try_from(n).ok()),
-                });
-                if offers.len() == OFFER_LIMIT {
-                    return Ok(offers);
-                }
-            }
-        }
-        ready(cancel)?;
-        if !searched {
-            return Err(Error::InvalidQuery);
-        }
-        Ok(offers)
+        let query = MediaQuery {
+            media_id: media.id.clone(),
+            kind: media.kind,
+            title: media.title.clone(),
+            original_title: media.original_title.clone(),
+            year: media.year,
+            external: media.external.clone(),
+            episode: episode
+                .map(|e| EpisodeNumber::new(e.season, e.number).ok_or(Error::InvalidQuery))
+                .transpose()?,
+        };
+        Ok(self.search_catalog(&query, cancel).await?.offers)
     }
 
-    /// Lazy lookup for an explicitly selected topic. No authentication prompt or
+    /// Search the primary title first; only without confirmed hits try distinct
+    /// alternatives and advertised extra pages. At most six calls, four titles,
+    /// two pages per title and 50 offers. Login/cancellation are never hidden.
+    pub async fn search_outcome(
+        &self,
+        query: &MediaQuery,
+        cancel: &CancellationToken,
+    ) -> Result<SearchOutcome, Error> {
+        ready(cancel)?;
+        if (query.kind == MediaKind::Series) != query.episode.is_some() {
+            return Err(Error::InvalidQuery);
+        }
+        self.search_catalog(query, cancel).await
+    }
+
+    async fn search_catalog(
+        &self,
+        query: &MediaQuery,
+        cancel: &CancellationToken,
+    ) -> Result<SearchOutcome, Error> {
+        search_with(query, cancel, |title, page| async move {
+            let results = request(cancel, self.session().search(title).page(page).send()).await?;
+            Ok(SearchPage {
+                had_topics: results.total_count > 0 || !results.results.is_empty(),
+                total_pages: results.total_pages,
+                offers: results
+                    .results
+                    .into_iter()
+                    .take(OFFER_LIMIT)
+                    .map(|row| Offer {
+                        topic_id: row.id.get(),
+                        quality: quality(&row.title),
+                        title: row.title,
+                        size: row.size,
+                        seeds: row.seeds.and_then(|n| u32::try_from(n).ok()),
+                    })
+                    .collect(),
+            })
+        })
+        .await
+    }
+
+    /// HTTP lookup of a topic's attachment. No authentication prompt or
     /// automatic download is performed when the topic offers no magnet.
     pub async fn magnet(
         &self,
@@ -263,6 +297,84 @@ impl Client {
     }
 }
 
+async fn search_with<F, Fut>(
+    query: &MediaQuery,
+    cancel: &CancellationToken,
+    mut fetch: F,
+) -> Result<SearchOutcome, Error>
+where
+    F: FnMut(String, u32) -> Fut,
+    Fut: Future<Output = Result<SearchPage, Error>>,
+{
+    ready(cancel)?;
+    let titles = queries(query)?;
+    let mut pages = vec![1; titles.len()];
+    let mut outcome = SearchOutcome {
+        offers: Vec::new(),
+        had_topics: false,
+    };
+    let mut seen = HashSet::new();
+    let mut possible_indices = Vec::new();
+    let mut calls = 0;
+    let mut searched = false;
+    // First pages of alternative titles precede deeper pages of broad searches.
+    for page in 1..=SEARCH_PAGE_LIMIT {
+        for (index, title) in titles.iter().enumerate() {
+            if calls == SEARCH_CALL_LIMIT || page > pages[index] {
+                continue;
+            }
+            ready(cancel)?;
+            calls += 1;
+            let result = fetch(title.clone(), page).await;
+            ready(cancel)?;
+            let result = match result {
+                Ok(result) => result,
+                // Windows-1251 cannot represent every alias.
+                Err(Error::InvalidQuery) => continue,
+                // A failed optional fallback must not discard usable choices.
+                Err(Error::Network | Error::Timeout | Error::Http(500..=599))
+                    if !outcome.offers.is_empty() =>
+                {
+                    return Ok(outcome);
+                }
+                Err(error) => return Err(error),
+            };
+            searched = true;
+            pages[index] = result.total_pages.min(SEARCH_PAGE_LIMIT);
+            outcome.had_topics |= result.had_topics || !result.offers.is_empty();
+            let mut confirmed = false;
+            for offer in result.offers.into_iter().take(OFFER_LIMIT) {
+                ready(cancel)?;
+                let Some(class) = classify_topic(&offer.title, query) else {
+                    continue;
+                };
+                if offer.topic_id == 0 || !seen.insert(offer.topic_id) {
+                    continue;
+                }
+                confirmed |= class == ReleaseMatch::Exact;
+                if outcome.offers.len() < OFFER_LIMIT {
+                    if class == ReleaseMatch::Possible {
+                        possible_indices.push(outcome.offers.len());
+                    }
+                    outcome.offers.push(offer);
+                } else if class == ReleaseMatch::Exact
+                    && let Some(index) = possible_indices.pop()
+                {
+                    outcome.offers[index] = offer;
+                }
+            }
+            if confirmed {
+                return Ok(outcome);
+            }
+        }
+    }
+    ready(cancel)?;
+    if !searched {
+        return Err(Error::InvalidQuery);
+    }
+    Ok(outcome)
+}
+
 fn ready(cancel: &CancellationToken) -> Result<(), Error> {
     if cancel.is_cancelled() {
         Err(Error::Cancelled)
@@ -313,11 +425,19 @@ fn normalize(title: &str) -> String {
         .join(" ")
 }
 
-fn queries(media: &Media) -> Result<Vec<String>, Error> {
+fn queries(query: &MediaQuery) -> Result<Vec<String>, Error> {
     let mut queries: Vec<String> = Vec::new();
-    for title in [Some(media.title.as_str()), media.original_title.as_deref()]
+    for title in [Some(query.title.as_str()), query.original_title.as_deref()]
         .into_iter()
         .flatten()
+        .chain(
+            query
+                .external
+                .alternative_titles
+                .iter()
+                .take(16)
+                .map(String::as_str),
+        )
     {
         let title = title.trim();
         if title.is_empty() || title.chars().count() > 200 || title.chars().any(char::is_control) {
@@ -331,6 +451,9 @@ fn queries(media: &Media) -> Result<Vec<String>, Error> {
             .join(" ");
         if !query.is_empty() && !queries.iter().any(|q| normalize(q) == normalize(&query)) {
             queries.push(query);
+            if queries.len() == QUERY_LIMIT {
+                break;
+            }
         }
     }
     if queries.is_empty() {
@@ -340,68 +463,154 @@ fn queries(media: &Media) -> Result<Vec<String>, Error> {
     }
 }
 
-/// Revalidate film release evidence on cache reads as well as live discovery.
-/// RuTracker has no external film IDs: only a full title and an unambiguous,
-/// identical production year can establish eligibility.
+/// Exact-only compatibility rule for automatic movie playback.
 pub fn matches_movie_release(title: &str, query: &MediaQuery) -> bool {
-    if query.kind != MediaKind::Movie || query.episode.is_some() {
-        return false;
-    }
-    let titles: Vec<_> = std::iter::once(query.title.clone())
-        .chain(query.original_title.clone())
-        .collect();
-    matches_release_metadata(title, query.kind, query.year, None, &titles)
+    query.kind == MediaKind::Movie && classify_release(title, query) == Some(ReleaseMatch::Exact)
 }
 
-fn matches_release(
-    title: &str,
-    media: &Media,
-    episode: Option<&Episode>,
-    queries: &[String],
-) -> bool {
-    matches_release_metadata(title, media.kind, media.year, episode, queries)
+/// Revalidate live or cached topic titles without assuming external IDs in topics.
+/// Unknown year/format can only be possible evidence; known contradictions veto.
+pub fn classify_release(title: &str, query: &MediaQuery) -> Option<ReleaseMatch> {
+    if query.kind == MediaKind::Series && query.episode.is_none() {
+        return None;
+    }
+    classify_topic(title, query)
 }
 
-fn matches_release_metadata(
-    title: &str,
-    kind: MediaKind,
-    year: Option<u16>,
-    episode: Option<&Episode>,
-    queries: &[String],
-) -> bool {
-    if kind == MediaKind::Movie && (year.is_none() || episode.is_some()) {
-        return false;
+fn classify_topic(title: &str, query: &MediaQuery) -> Option<ReleaseMatch> {
+    if title.chars().count() > 2_000
+        || title.chars().any(char::is_control)
+        || (query.kind == MediaKind::Movie && query.episode.is_some())
+    {
+        return None;
     }
+    let titles = queries(query).ok()?;
     let heading = title.split(['[', '(']).next().unwrap_or("");
-    let title_matches = heading.split(['/', '|']).any(|part| {
+    let strict_title = heading.split(['/', '|']).any(|part| {
         let normalized = normalize(strip_scope(part));
-        queries.iter().any(|query| normalized == normalize(query))
+        titles.iter().any(|query| normalized == normalize(query))
     });
+    let title_matches = strict_title
+        || heading.split(['/', '|']).any(|part| {
+            let normalized = normalize(strip_scope(part));
+            titles.iter().any(|query| {
+                normalized
+                    .strip_prefix(&format!("{} ", normalize(query)))
+                    .is_some_and(release_tail)
+            })
+        });
     if !title_matches {
-        return false;
+        return None;
     }
-    // A number anywhere in the release title is NOT a production year: it may
-    // be the title itself, resolution, remaster year or unrelated metadata.
-    if let Some(year) = year {
-        let Some((first, last)) = production_years(title) else {
-            return false;
-        };
-        if match kind {
-            MediaKind::Movie => first != year || last != year,
-            MediaKind::Series => year < first || year > last,
-        } {
-            return false;
+    let bracket = production_years(title).ok()?;
+    let loose_years = unbracketed_years(title, &titles);
+    let scope = query.episode.map(|episode| episode_scope(title, episode));
+    if scope == Some(EpisodeScope::Conflict) {
+        return None;
+    }
+    let mut year_known = false;
+    let mut season_year = false;
+    let mut movie_year = None;
+    for (first, last) in bracket.range.into_iter().chain(loose_years) {
+        if query.kind == MediaKind::Movie {
+            if first != last || movie_year.is_some_and(|year| year != first) {
+                return None;
+            }
+            movie_year = Some(first);
+        }
+        if let Some(year) = query.year {
+            let agrees = match query.kind {
+                MediaKind::Movie => first == year,
+                MediaKind::Series => {
+                    if (first..=last).contains(&year) {
+                        true
+                    } else if first > year
+                        && query.episode.is_some_and(|e| e.season() > 1)
+                        && matches!(scope, Some(EpisodeScope::Single | EpisodeScope::Pack))
+                    {
+                        // Without a season-year field this is plausible, not
+                        // proof against a same-title series remake.
+                        season_year = true;
+                        true
+                    } else {
+                        false
+                    }
+                }
+            };
+            if !agrees {
+                return None;
+            }
+            year_known = true;
         }
     }
-    match (kind, episode) {
+    let exact_year = year_known && bracket.exact && strict_title && !season_year;
+    match (query.kind, query.episode) {
         (MediaKind::Movie, _) => {
-            !has_scope(title)
-                && !movie_release_has_pack_suffix(title)
-                && matches!(recognize_episode(title), EpisodeRecognition::Unrecognized)
+            if has_scope(title)
+                || movie_release_has_pack_suffix(title)
+                || heading
+                    .split(['/', '|'])
+                    .any(|part| contains_movie_pack_label(strip_title(part, &titles)))
+                || !matches!(recognize_episode(title), EpisodeRecognition::Unrecognized)
+            {
+                return None;
+            }
+            Some(if exact_year {
+                ReleaseMatch::Exact
+            } else {
+                ReleaseMatch::Possible
+            })
         }
-        (MediaKind::Series, Some(episode)) => episode_scope(title, episode),
-        (MediaKind::Series, None) => has_scope(title),
+        (MediaKind::Series, Some(_)) => {
+            Some(if exact_year && scope == Some(EpisodeScope::Single) {
+                ReleaseMatch::Exact
+            } else {
+                ReleaseMatch::Possible
+            })
+        }
+        // Only the legacy Media-based search supports a bare series.
+        (MediaKind::Series, None) => has_scope(title).then_some(ReleaseMatch::Possible),
     }
+}
+
+fn release_tail(tail: &str) -> bool {
+    // Only recognizable metadata may follow a full title. Never turn
+    // "The Thing Returns" into a match for "The Thing".
+    tail.split_whitespace().all(|token| {
+        token
+            .parse::<u16>()
+            .is_ok_and(|n| (1800..=2200).contains(&n))
+            || matches!(
+                token,
+                "2160p"
+                    | "1080p"
+                    | "1080i"
+                    | "720p"
+                    | "576p"
+                    | "480p"
+                    | "bdrip"
+                    | "brrip"
+                    | "bluray"
+                    | "blu"
+                    | "ray"
+                    | "web"
+                    | "dl"
+                    | "webrip"
+                    | "hdtv"
+                    | "dvdrip"
+                    | "remux"
+                    | "x264"
+                    | "x265"
+                    | "h264"
+                    | "h265"
+                    | "hevc"
+                    | "hdr"
+                    | "hdr10"
+                    | "sdr"
+                    | "remastered"
+                    | "remaster"
+            )
+    })
 }
 
 fn strip_scope(part: &str) -> &str {
@@ -422,30 +631,33 @@ fn strip_scope(part: &str) -> &str {
     part
 }
 
-fn production_years(title: &str) -> Option<(u16, u16)> {
-    let mut found = None;
+#[derive(Default)]
+struct ProductionYears {
+    range: Option<(u16, u16)>,
+    exact: bool,
+}
+
+fn production_years(title: &str) -> Result<ProductionYears, ()> {
+    let mut found = ProductionYears::default();
     for group in title.split(['[', '(']).skip(1) {
-        let group = group.split([']', ')']).next()?.trim();
+        let group = group.split([']', ')']).next().ok_or(())?.trim();
         let lower = group.to_lowercase();
-        if ["remaster", "re-release", "переиздан", "реставрац"]
+        let remaster = ["remaster", "re-release", "переиздан", "реставрац"]
             .iter()
-            .any(|label| lower.contains(label))
-        {
-            continue;
-        }
+            .any(|label| lower.contains(label));
         let bytes = group.as_bytes();
         if bytes.len() < 4 || !bytes[..4].iter().all(u8::is_ascii_digit) {
             continue;
         }
-        let first: u16 = group[..4].parse().ok()?;
+        let first: u16 = group[..4].parse().map_err(|_| ())?;
         if !(1800..=2200).contains(&first) {
             continue;
         }
         let rest = group[4..].trim_start();
         let (last, rest) = if let Some(rest) = rest.strip_prefix(['-', '–']) {
             let rest = rest.trim_start();
-            let last = rest.get(..4)?.parse::<u16>().ok()?;
-            (last, rest.get(4..)?.trim_start())
+            let last = rest.get(..4).ok_or(())?.parse::<u16>().map_err(|_| ())?;
+            (last, rest.get(4..).ok_or(())?.trim_start())
         } else {
             (first, rest)
         };
@@ -455,18 +667,130 @@ fn production_years(title: &str) -> Option<(u16, u16)> {
             continue;
         }
         if last < first || last > 2200 {
-            return None;
+            return Err(());
         }
-        if found.is_some_and(|previous| previous != (first, last)) {
-            return None;
+        if found
+            .range
+            .is_some_and(|previous| previous != (first, last))
+        {
+            return Err(());
         }
-        found = Some((first, last));
+        found.range = Some((first, last));
+        // A production-year slot remains contradiction evidence even if later
+        // fields mention remastering. Preserve the old stricter Exact rule.
+        found.exact |= !remaster;
     }
-    found
+    Ok(found)
+}
+
+fn unbracketed_years(title: &str, titles: &[String]) -> Vec<(u16, u16)> {
+    let mut outside = String::new();
+    let mut depth = 0usize;
+    for c in title.chars() {
+        match c {
+            '[' | '(' => {
+                depth += 1;
+                outside.push(' ');
+            }
+            ']' | ')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => outside.push(c),
+            _ => {}
+        }
+    }
+    let mut years = Vec::new();
+    for part in outside.split(['/', '|']) {
+        // A numeric film title (1917, 1984, ...) is not a production year.
+        let suffix = strip_title(part, titles).to_lowercase();
+        let words: Vec<_> = suffix
+            .split(|c: char| !c.is_alphanumeric() && !matches!(c, '-' | '–' | '*'))
+            .filter(|word| !word.is_empty())
+            .collect();
+        for (i, word) in words.iter().enumerate() {
+            let (first, last) = word.split_once(['-', '–']).unwrap_or((word, word));
+            let (Ok(first), Ok(last)) = (first.parse::<u16>(), last.parse::<u16>()) else {
+                continue;
+            };
+            if !(1800..=2200).contains(&first) || !(first..=2200).contains(&last) {
+                continue;
+            }
+            if words.get(i + 1).is_some_and(|word| {
+                matches!(
+                    *word,
+                    "x" | "*"
+                        | "kbps"
+                        | "mbps"
+                        | "кбит"
+                        | "мбит"
+                        | "kb"
+                        | "mb"
+                        | "gb"
+                        | "кб"
+                        | "мб"
+                        | "гб"
+                        | "mhz"
+                        | "мгц"
+                )
+            }) || i > 0 && matches!(words[i - 1], "x" | "*")
+            {
+                continue;
+            }
+            if words[..i].iter().any(|word| {
+                word.starts_with("remaster")
+                    || word.starts_with("реставрац")
+                    || word.starts_with("переиздан")
+                    || *word == "release"
+            }) || (words
+                .get(i + 1)
+                .is_some_and(|word| word.starts_with("remaster"))
+                && words
+                    .get(i + 2)
+                    .is_none_or(|word| word.parse::<u16>().is_err()))
+            {
+                continue;
+            }
+            years.push((first, last));
+        }
+    }
+    years
+}
+
+fn strip_title<'a>(part: &'a str, titles: &[String]) -> &'a str {
+    let normalized = normalize(part);
+    let count = titles
+        .iter()
+        .map(|title| normalize(title))
+        .filter(|title| normalized == *title || normalized.starts_with(&format!("{title} ")))
+        .map(|title| title.split_whitespace().count())
+        .max();
+    let Some(count) = count else {
+        return part;
+    };
+    let mut words = 0;
+    let mut in_word = false;
+    for (index, c) in part.char_indices() {
+        if c.is_alphanumeric() {
+            if !in_word {
+                words += 1;
+            }
+            in_word = true;
+        } else {
+            if in_word && words == count {
+                return &part[index..];
+            }
+            in_word = false;
+        }
+    }
+    ""
 }
 
 /// (season, optional first/last episode), recognized explicit source labels.
 fn compact_scope(token: &str) -> Option<(u16, Option<(u16, u16)>)> {
+    if let Some((season, episode)) = token.split_once('x')
+        && season.len() <= 2
+    {
+        let episode = episode.parse().ok()?;
+        return Some((season.parse().ok()?, Some((episode, episode))));
+    }
     let rest = token.strip_prefix('s')?;
     let season_end = rest
         .find(|c: char| !c.is_ascii_digit())
@@ -488,22 +812,29 @@ fn compact_scope(token: &str) -> Option<(u16, Option<(u16, u16)>)> {
 }
 
 fn labeled_range(title: &str, labels: &[&str]) -> Option<(u16, u16)> {
+    labeled_ranges(title, labels).into_iter().next()
+}
+
+fn labeled_ranges(title: &str, labels: &[&str]) -> Vec<(u16, u16)> {
     let words: Vec<_> = title
         .split(|c: char| !c.is_alphanumeric() && c != '-' && c != '–')
         .filter(|s| !s.is_empty())
         .collect();
-    words.windows(2).find_map(|pair| {
-        if !labels.contains(&pair[0]) {
-            return None;
-        }
-        let (first, last) = pair[1].split_once(['-', '–']).unwrap_or((pair[1], pair[1]));
-        let (first, last) = (first.parse().ok()?, last.parse().ok()?);
-        if first > last {
-            None
-        } else {
-            Some((first, last))
-        }
-    })
+    words
+        .windows(2)
+        .filter_map(|pair| {
+            if !labels.contains(&pair[0]) {
+                return None;
+            }
+            let (first, last) = pair[1].split_once(['-', '–']).unwrap_or((pair[1], pair[1]));
+            let (first, last) = (first.parse().ok()?, last.parse().ok()?);
+            if first > last {
+                None
+            } else {
+                Some((first, last))
+            }
+        })
+        .collect()
 }
 
 fn scope_tokens(title: &str) -> impl Iterator<Item = &str> {
@@ -518,24 +849,76 @@ fn has_scope(title: &str) -> bool {
         || labeled_range(&title, &["сезон", "сезоны", "season", "seasons"]).is_some()
 }
 
-fn episode_scope(title: &str, episode: &Episode) -> bool {
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum EpisodeScope {
+    Unknown,
+    Conflict,
+    Pack,
+    Single,
+}
+
+fn episode_scope(title: &str, episode: EpisodeNumber) -> EpisodeScope {
     let title = title.to_lowercase();
-    let seasons = labeled_range(&title, &["сезон", "сезоны", "season", "seasons"]);
-    let episodes = labeled_range(&title, &["серия", "серии", "episode", "episodes"]);
-    if seasons.is_some_and(|(first, last)| !(first..=last).contains(&episode.season))
-        || episodes.is_some_and(|(first, last)| !(first..=last).contains(&episode.number))
+    let seasons = labeled_ranges(&title, &["сезон", "сезоны", "season", "seasons"]);
+    let episodes = labeled_ranges(&title, &["серия", "серии", "episode", "episodes"]);
+    if seasons
+        .iter()
+        .any(|&(first, last)| !(first..=last).contains(&episode.season()))
+        || episodes
+            .iter()
+            .any(|&(first, last)| !(first..=last).contains(&episode.episode()))
     {
-        return false;
+        return EpisodeScope::Conflict;
     }
     let compact: Vec<_> = scope_tokens(&title).filter_map(compact_scope).collect();
-    if !compact.is_empty() {
-        return compact.into_iter().any(|(season, episodes)| {
-            season == episode.season
-                && episodes.is_none_or(|(first, last)| (first..=last).contains(&episode.number))
-        });
+    if compact.iter().any(|&(season, episodes)| {
+        season != episode.season()
+            || episodes.is_some_and(|(first, last)| !(first..=last).contains(&episode.episode()))
+    }) {
+        return EpisodeScope::Conflict;
     }
-    // Multi-season and season-only packs are candidates, not exact episodes.
-    seasons.is_some()
+    let recognized = recognize_episode(&title);
+    match &recognized {
+        EpisodeRecognition::Recognized(number) if *number != episode => {
+            return EpisodeScope::Conflict;
+        }
+        EpisodeRecognition::Ambiguous(numbers)
+            if numbers.iter().any(|number| {
+                number.season() != episode.season()
+                    || (*number != episode
+                        && !compact.iter().any(|&(season, range)| {
+                            season == number.season()
+                                && range.is_some_and(|(first, last)| {
+                                    (first..=last).contains(&number.episode())
+                                })
+                        }))
+            }) =>
+        {
+            return EpisodeScope::Conflict;
+        }
+        _ => {}
+    }
+    // Even a matching single marker does not make an expressly labeled pack
+    // an exact episode: the user still has to choose the file.
+    if seasons
+        .iter()
+        .chain(&episodes)
+        .any(|(first, last)| first != last)
+        || compact
+            .iter()
+            .any(|(_, range)| range.is_some_and(|(first, last)| first != last))
+    {
+        return EpisodeScope::Pack;
+    }
+    if matches!(recognized, EpisodeRecognition::Recognized(_))
+        || (!seasons.is_empty() && !episodes.is_empty())
+    {
+        EpisodeScope::Single
+    } else if !seasons.is_empty() || !compact.is_empty() {
+        EpisodeScope::Pack
+    } else {
+        EpisodeScope::Unknown
+    }
 }
 
 fn quality(title: &str) -> Option<String> {

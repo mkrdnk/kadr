@@ -1,0 +1,24 @@
+[
+  {
+    "url": "magnet:?xt=urn:btih:0123456789012345678901234567890123456789&amp;amp;dn=The%20Matrix&amp;amp;tr=http%3A%2F%2Fbt.t-ru.org%2Fann%3Fmagnet&amp;amp;tr=http%3A%2F%2Fretracker.local%2Fannounce",
+    "title": "Матрица / The Matrix (Director / Director) [1999, США, фантастика, BDRemux 1080p] [Remastered] Dub + Original (Eng)",
+    "quality": "1080p",
+    "seed": 0,
+    "peer": 13,
+    "size": "1234567890",
+    "filesize": "1.15 GB",
+    "provider": "Rutracker",
+    "source": "https://upstream.invalid/topic?id=fixture"
+  },
+  {
+    "url": "magnet:?xt=urn:btih:1123456789012345678901234567890123456789",
+    "title": "The.Matrix.1999.720p",
+    "quality": "",
+    "seed": null,
+    "peer": 0,
+    "size": "0",
+    "filesize": "0 B",
+    "provider": "NnmClub",
+    "source": "https://upstream.invalid/topic/fixture"
+  }
+]

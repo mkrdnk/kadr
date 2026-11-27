@@ -27,6 +27,8 @@ use sha1::{Digest, Sha1};
 
 mod commons;
 mod episodes;
+mod popcorn;
+mod rutracker_prefetch;
 mod torznab;
 
 const WAIT: Duration = Duration::from_secs(8);
@@ -236,10 +238,12 @@ fn browse_cancellation_is_independent_from_search_and_source_discovery() {
     // Inspect queue tokens without running requests or contacting providers.
     let (commands, mut receiver) = mpsc::channel(32);
     let shutdown = CancellationToken::new();
+    let catalog_stop = shutdown.child_token();
     let mut engine = Engine {
         commands,
         browse_stop: shutdown.child_token(),
-        catalog_stop: shutdown.child_token(),
+        movie_prefetch_stop: catalog_stop.child_token(),
+        catalog_stop,
         source_stop: shutdown.child_token(),
         playback_stop: shutdown.child_token(),
         save_stop: shutdown.child_token(),
@@ -248,6 +252,21 @@ fn browse_cancellation_is_independent_from_search_and_source_discovery() {
     };
     assert!(engine.dispatch(Command::Browse));
     let first_browse = receiver.try_recv().unwrap().cancel;
+    assert!(engine.dispatch(Command::PrefetchMovieSources("trakt:movie:1".into())));
+    let speculative = receiver.try_recv().unwrap().cancel;
+    assert!(engine.dispatch(Command::FindSources));
+    let explicit = receiver.try_recv().unwrap().cancel;
+    assert!(
+        !speculative.is_cancelled(),
+        "explicit discovery joins card work"
+    );
+    assert!(engine.dispatch(Command::CancelMoviePrefetch));
+    assert!(
+        speculative.is_cancelled(),
+        "no wait for the worker to drain its queue"
+    );
+    assert!(!explicit.is_cancelled());
+    receiver.try_recv().unwrap();
     let mut current_browse = first_browse.clone();
     for command in [Command::Search("query".into()), Command::FindSources] {
         assert!(engine.dispatch(command));
@@ -1262,6 +1281,14 @@ enum HttpBehavior {
     StallHead,
 }
 
+// macOS can inherit O_NONBLOCK on accepted streams. Keep accept pollable,
+// but always read/write HTTP headers using the fixture's socket timeouts.
+fn accept_http(listener: &TcpListener) -> std::io::Result<(TcpStream, SocketAddr)> {
+    let connection = listener.accept()?;
+    connection.0.set_nonblocking(false)?;
+    Ok(connection)
+}
+
 /// Minimal owned origin, not kadr-media::Server: independently implements strong
 /// ETag + conditional ranges, so the HTTP -> RemoteSource boundary is exercised.
 struct HttpOrigin {
@@ -1297,7 +1324,7 @@ impl HttpOrigin {
                         connections.swap_remove(index).join().unwrap();
                     }
                 }
-                match listener.accept() {
+                match accept_http(&listener) {
                     Ok((mut socket, _)) => {
                         if connections.len() == 16 {
                             continue;

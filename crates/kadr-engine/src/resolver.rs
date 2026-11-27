@@ -23,7 +23,30 @@ impl ProviderError {
     }
 }
 
-type Offers = Result<Vec<MediaSource>, ProviderError>;
+/// `had_results` survives filtering: an index with hits but no eligible
+/// sources did not return an authoritative empty result.
+#[derive(Clone, Default)]
+pub(crate) struct ProviderBatch {
+    pub rows: Vec<MediaSource>,
+    pub had_results: bool,
+    /// Ephemeral handoff only. Topic magnets can contain private tracker parameters.
+    /// Never serialize these alongside the cacheable source descriptors.
+    pub tracker_magnets: std::collections::BTreeMap<u64, String>,
+    pub notice: Option<String>,
+    pub from_cache: bool,
+}
+
+impl From<Vec<MediaSource>> for ProviderBatch {
+    fn from(rows: Vec<MediaSource>) -> Self {
+        Self {
+            had_results: !rows.is_empty(),
+            rows,
+            ..Default::default()
+        }
+    }
+}
+
+type Offers = Result<ProviderBatch, ProviderError>;
 pub(crate) type Search<'a> = Pin<Box<dyn Future<Output = Offers> + Send + 'a>>;
 
 pub(crate) trait SourceProvider: Send + Sync {
@@ -98,11 +121,9 @@ async fn run_provider(
         Ok(()) => tokio::time::timeout(provider.timeout(), provider.search(query, cancel))
             .await
             .unwrap_or(Err(ProviderError::Timeout))
-            .map(|offers| {
-                offers
-                    .into_iter()
-                    .filter(|offer| provider.accepts(offer))
-                    .collect()
+            .map(|mut batch| {
+                batch.rows.retain(|offer| provider.accepts(offer));
+                batch
             }),
         Err(error) => Err(error),
     };
@@ -146,7 +167,7 @@ mod tests {
             Box::pin(async {
                 self.started.send(self.id).unwrap();
                 match self.returns {
-                    Some(true) => Ok(Vec::new()),
+                    Some(true) => Ok(Vec::new().into()),
                     Some(false) => Err(ProviderError::Failed("offline".into())),
                     None => std::future::pending().await,
                 }

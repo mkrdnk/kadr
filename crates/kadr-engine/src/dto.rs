@@ -172,6 +172,8 @@ pub struct SourceCandidate {
     pub seeds: Option<u32>,
     pub peers: Option<u32>,
     pub rutracker: bool,
+    /// Inconclusive release metadata; the user must select it explicitly.
+    pub possible_match: bool,
     /// Completed discovery's best suitable film torrent with known seeds > 0.
     /// Never a provisional result, HTTP resource or explicit manual attachment.
     pub recommended: bool,
@@ -213,6 +215,7 @@ impl SourceCandidate {
             seeds: value.seeds,
             peers: value.peers,
             rutracker: matches!(value.locator, Locator::RuTracker(_)),
+            possible_match: value.possible_match,
             recommended: false,
         }
     }
@@ -459,6 +462,7 @@ mod tests {
             seeds,
             peers,
             rutracker,
+            possible_match,
             recommended,
         } = candidate;
         assert_eq!(index, 9);
@@ -470,7 +474,7 @@ mod tests {
         assert!(license.is_empty());
         assert_eq!(origin, "RuTracker");
         assert_eq!((size, seeds, rutracker), (Some(1024), Some(20), true));
-        assert!(!recommended);
+        assert!(!possible_match && !recommended);
     }
 
     fn stored_library_item() -> kadr_storage::LibraryItem {

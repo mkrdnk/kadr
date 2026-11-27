@@ -55,6 +55,7 @@ enum Origin {
     /// or invent a magnet; reopening requires explicit discovery and selection.
     RemoteTorrent {
         prepared: PreparedTorrent,
+        kind: SourceKind,
     },
     Saved {
         path: PathBuf,
@@ -66,7 +67,9 @@ impl Origin {
     fn prepared(&self) -> Option<&PreparedTorrent> {
         match self {
             Self::Manual { prepared, .. } => prepared.as_ref(),
-            Self::RuTracker { prepared, .. } | Self::RemoteTorrent { prepared } => Some(prepared),
+            Self::RuTracker { prepared, .. } | Self::RemoteTorrent { prepared, .. } => {
+                Some(prepared)
+            }
             Self::Saved { .. } => None,
         }
     }
@@ -118,7 +121,7 @@ impl Selection {
                 .expect("RuTracker always has a descriptor")
                 .source_id()
                 .map_err(storage_error),
-            Origin::RemoteTorrent { prepared } => SourceId::new(format!(
+            Origin::RemoteTorrent { prepared, .. } => SourceId::new(format!(
                 "remote-torrent:v1:{}{}",
                 prepared.info_hash,
                 self.file_id
@@ -435,6 +438,13 @@ impl Worker {
                     });
                 });
             }
+            #[cfg(test)]
+            Command::OpenFixtureMovie(media) => {
+                self.catalog_answer(CatalogResult {
+                    cancel,
+                    answer: CatalogAnswer::Details(Ok(media)),
+                });
+            }
             Command::OpenMedia(id) => {
                 if !self.idle() {
                     return;
@@ -460,6 +470,8 @@ impl Worker {
                     });
                 });
             }
+            Command::PrefetchMovieSources(id) => self.prefetch_movie(&id, cancel),
+            Command::CancelMoviePrefetch => self.discovery.cancel_movie_prefetch(),
             Command::FindSources => {
                 if self.idle() {
                     self.reset_tracker_prompt();
@@ -1004,7 +1016,7 @@ impl Worker {
         let kind = match &selection.origin {
             Origin::Manual { source, .. } => Some(source.kind()),
             Origin::RuTracker { kind, .. } => Some(*kind),
-            Origin::RemoteTorrent { .. } => Some(SourceKind::TorrentFile),
+            Origin::RemoteTorrent { kind, .. } => Some(*kind),
             Origin::Saved { .. } => None,
         };
         let playable = selection.is_playable(self.settings.network.torrents_enabled);
@@ -1890,6 +1902,9 @@ impl Worker {
             // A fresh account must never reuse a client or cookie jar on the old route.
             self.tracker_search.cancel();
             self.tracker = tracker::Account::new(settings.catalog_proxy.clone());
+        }
+        if tracker_disabled || proxy_changed {
+            self.discovery.cancel_movie_prefetch();
         }
         if proxy_changed && self.discovery.active() {
             self.reset_tracker_prompt();

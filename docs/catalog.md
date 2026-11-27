@@ -101,6 +101,50 @@ including when no provider returned anything.
   anything. HTTP results and torrents with zero or unknown seeds remain available
   for explicit selection. Episode playback retains its explicit source/file flow.
 
+### Optional indexes: Popcorn and YTS
+
+The shared opt-in is off on new and upgraded installations. With the catalog
+and BitTorrent enabled, a movie lookup sends its IMDb ID to two independent
+indexes; an episode lookup contacts Popcorn only. Anime films and numbered
+anime episodes follow the same movie/series division, not a third hostname.
+No shelf crawl, automatic card-open request or lookup without an IMDb ID.
+
+| Index | Mirrors, in order | Request |
+|---|---|---|
+| Popcorn | `fusme.link`, `jfper.link`, `uxert.link`, `yrkde.link` | `/movie/{imdb_id}/torrents` or `/show/{imdb_id}`, with `contentLocale=ru&locale=ru`. Match the selected season and episode in the latter response. |
+| YTS (movies only) | `yts.lt`, `yts.gg` | `/api/v2/movie_details.json?imdb_id=…`. Only a matching movie record with a valid BTIH is usable. A YTS mirror may redirect once to the identical HTTPS path/query on `yts.pw`. No generic redirects. |
+
+Each index tries its next mirror only for network errors, timeouts or HTTP
+5xx, under one overall deadline. A valid empty list or 404, access denial,
+rate limit, or invalid data do not trigger mirror hopping. Failure of one
+index does not discard the other's rows. For a season pack a provider filename
+must identify one video in the actual torrent before selection.
+These third-party indexes have no availability or freshness guarantee; their
+results are not necessarily from RuTracker. A valid response is not evidence of
+distribution rights, working peers or independently verified seed counts.
+
+Popcorn supplies magnet links; YTS supplies hashes, not trusted download URLs.
+The client does not open the upstream topic or follow the `source` URL.
+Results from both indexes and full magnet URIs
+are not persisted in the resolver cache or library. On selection the existing
+torrent engine asks peers for metadata, validates it and supplies the normal
+file chooser. A metadata timeout is distinct from a failed API search. After
+a restart, rediscover the release unless you saved a permanent copy. The
+catalog proxy applies to the API request, not to BitTorrent.
+
+The explicit command-boundary acceptance uses an isolated *Big Buck Bunny*
+card with the film's real IMDb ID, the public API and metadata-only peer
+discovery. It does not start a player or request the film payload:
+
+```sh
+cargo test --locked -p kadr-catalog --test indexes_live -- --ignored --nocapture --test-threads=1
+cargo test --locked -p kadr-engine tests::popcorn::live_engine_bbb_metadata_only -- --ignored --exact --nocapture --test-threads=1
+```
+
+The first command checks movie results from YTS and numbered live-action and
+anime episodes from Popcorn without requesting peer metadata. The second also
+checks the selected movie's torrent metadata.
+
 ### Optional Torznab
 
 The [Torznab specification](https://torznab.github.io/spec-1.3-draft/torznab/Specification-v1.3.html)
@@ -187,26 +231,55 @@ video. They are not implicit fallbacks. Trakt remains the metadata catalog.
 ## RuTracker release discovery
 
 RuTracker is a separate source provider, not a metadata catalog or a rights
-authority. When the catalog and BitTorrent are enabled, **Find sources** sends
-the selected title to `rutracker.org`; result metadata is parsed on the device.
-No periodic indexing or requests go through a kadr server. Titles can be
-ambiguous and season packs may contain multiple episodes; verify the release
-and the selected video file. Quality, size and seeds reflect available source
+authority. When the catalog, BitTorrent and RuTracker are enabled, explicitly
+opening a movie card can send its title to `rutracker.org` before **Find sources**.
+Shelves and series cards do not trigger this lookup. Other providers are not
+contacted by this prefetch; result metadata is parsed on the device.
+No periodic indexing or requests go through a kadr server. If the initial
+search does not confirm the target, the adapter can try alternative titles
+already on the card and additional result pages (at most four distinct titles,
+two pages per title and six search requests overall per search pass).
+It does not open each topic to check it. **Sources** separates plausible
+manual choices (for example, a matching name without a confirmed production
+year) from suitable sources. A possible match is never an automatic **Watch**
+recommendation, regardless of its seeds. Known conflicting movie years or
+episode scopes are excluded. A season pack still requires checking the video file.
+
+An explicit zero from the tracker can be cached. Topics that were found but
+all filtered are reported separately and do not create a negative cache entry.
+An unreadable page or login prompt is not treated as a successful empty search.
+Quality, size and seeds reflect available source
 data, not independent verification. Use only content you have rights to.
 
-The engine requests the selected topic's magnet, if present. If none is
-available, it downloads and validates the actual `.torrent`, using a local
-RuTracker account. It also offers sign-in if the tracker requires it for search.
+The card prefetch reads at most three topic pages, prioritizing confirmed matches
+and then seed counts, with a shared time limit. Only the original post's torrent
+attachment can supply a magnet. The URI is kept in memory, not in SQLite, UI
+events or logs. Watch/Sources can join pending work instead of searching again.
+The speculative job cannot access the credential vault, prompt for login, download
+metainfo or contact peers. Leaving the card cancels it. After explicit selection,
+kadr uses the prefetched URI, or checks the selected topic if needed. A readable
+topic with no magnet can fall back to an authenticated `.torrent` download.
+Forbidden/unreadable pages are not evidence of a missing magnet. An actual login
+requirement can prompt on explicit search or selection.
 Login goes only to RuTracker, not to Trakt or any kadr service.
 Passwords are stored in the system vault, not in SQLite.
 The login session and authenticated metainfo are in memory; reopening an entry
 resolves the topic again and verifies its info hash before reusing the saved
 file selection. The app does not attempt to bypass CAPTCHA.
 
+To probe the public search page without credentials, use
+`cargo test --locked -p kadr-catalog --test rutracker_live anonymous_search -- --ignored --nocapture`.
+This reports whether the tracker returned offers for *Big Buck Bunny* or a
+login prompt; the latter does not verify authenticated search or playback.
+To check an explicitly chosen topic separately, set `KADR_RUTRACKER_TEST_TOPIC`
+to its numeric ID and run `cargo test --locked -p kadr-catalog --test rutracker_live topic_attachment_status -- --ignored --nocapture`.
+This probe reports whether the topic was accessible; it does not print the URI,
+download a torrent or start a peer session.
+
 ### Catalog proxy
 
 The optional **Network → Proxy** setting covers HTTP(S) requests to RuTracker
-(search, sign-in, magnet lookup and `.torrent` download), Wikimedia Commons metadata, Torznab APIs, Trakt and allowed
+(search, sign-in, magnet lookup and `.torrent` download), Wikimedia Commons metadata, Popcorn API, Torznab APIs, Trakt and allowed
 poster hosts. Enter an `http://`, `https://`, `socks5://` (local DNS) or
 `socks5h://` (proxy DNS) endpoint without credentials. Saving applies it to
 new operations and discards the previous RuTracker session. A configured

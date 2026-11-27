@@ -1,3 +1,4 @@
+use security_framework::base::Error as KeychainError;
 use security_framework::passwords::{
     PasswordOptions, delete_generic_password_options, generic_password,
     set_generic_password_options,
@@ -39,7 +40,7 @@ fn options() -> PasswordOptions {
     options
 }
 
-fn map_error(error: security_framework::Error) -> Error {
+fn map_error(error: KeychainError) -> Error {
     match error.code() {
         -25291 => Error::CredentialStoreUnavailable, // errSecNotAvailable
         -25308 => Error::CredentialStoreLocked,      // errSecInteractionNotAllowed
@@ -61,7 +62,7 @@ mod tests {
             (-128, Error::CredentialStoreDenied),
             (-50, Error::CredentialStore),
         ] {
-            let error = map_error(security_framework::Error::from_code(code));
+            let error = map_error(KeychainError::from_code(code));
             assert_eq!(error, expected);
             assert!(std::error::Error::source(&error).is_none());
         }

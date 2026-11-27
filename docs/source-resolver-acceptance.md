@@ -135,6 +135,30 @@ not the mere presence of a button in a screenshot.
 
 ## Reproduce
 
+### Popcorn movie index
+
+With the six-domain provider configuration, `indexes_live` returned three YTS
+releases for *The Matrix* (1999), two Popcorn releases for *The Simpsons*
+S01E01, and one for *Cowboy Bebop* S01E01. All three episode offers included
+a mapped video filename. This checked live index responses, not playback of
+those titles. The separate engine acceptance below also passed with the two
+independent movie indexes registered.
+
+The opt-in `tests::popcorn::live_engine_bbb_metadata_only` was run with a local
+*Big Buck Bunny* (2008) card containing IMDb `tt1254207`, only Popcorn enabled,
+and public BitTorrent metadata discovery. The real `/movie/tt1254207/torrents`
+lookup yielded five candidate rows. Choosing a 1080p row returned one selectable
+MKV (648,602,823 bytes in metainfo). No film payload was downloaded and no
+player was started. This verifies discovery through file selection at the
+engine command/event boundary, not a live Trakt login, GUI run, or continuous
+availability of the third-party endpoint or peers.
+
+```sh
+cargo test --locked -p kadr-engine tests::popcorn::live_engine_bbb_metadata_only -- --ignored --exact --nocapture --test-threads=1
+```
+
+### Original resolver checks
+
 **Linux run, 2026-11-27:** formatting, all-features Clippy with warnings denied,
 all-targets build, architecture checks and the ordinary **parallel** workspace
 suite passed. Summing Rust's printed summaries including the explicitly

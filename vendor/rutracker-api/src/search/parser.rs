@@ -10,44 +10,58 @@ use url::Url;
 
 use crate::error::{Error, Result};
 use crate::models::{TopicId, TopicState};
-use crate::parse_util::{element_text, selector};
+use crate::parse_util::{element_text, has_challenge, has_login_form, selector};
 use crate::search::{PAGE_SIZE, SearchResults, TorrentSummary};
 
 pub(crate) fn parse(html: &str, page: u32, base_url: &Url) -> Result<SearchResults> {
     let doc = Html::parse_document(html);
+    if has_challenge(&doc) {
+        return Err(Error::parse("search", "unsupported challenge"));
+    }
 
-    // rutracker.org currently rejects anonymous search and returns the login
-    // form (`<form id="login-form-full" action="login.php">`) instead of the
-    // results table. Without this check, the parser would silently report
-    // `total_count = 0` and an empty result list, which is hard to debug.
-    if doc
-        .select(selector!("form#login-form-full"))
-        .next()
-        .is_some()
-    {
+    // Anonymous search can return the credential form instead of results.
+    if has_login_form(&doc) {
         return Err(Error::NotAuthenticated);
     }
 
     let total_count = parse_total_count(&doc);
-    if doc.select(selector!("#tor-tbl")).next().is_none() && total_count.is_none() {
-        return Err(Error::parse("search", "unrecognized response"));
-    }
-    let total_count = total_count.unwrap_or(0);
-    let total_pages = if total_count == 0 {
-        0
-    } else {
-        total_count.div_ceil(PAGE_SIZE)
-    };
-
+    let table = doc.select(selector!("table#tor-tbl")).next();
     let mut results = Vec::new();
-    for (i, row) in doc.select(selector!("#tor-tbl tbody tr")).enumerate() {
-        match parse_row(row, base_url, i) {
-            Ok(Some(t)) => results.push(t),
-            Ok(None) => {} // intentional skip: empty/placeholder row
-            Err(_) => {}
+    let mut malformed_rows = false;
+    let mut empty_marker = false;
+    if let Some(table) = table {
+        for (i, row) in table.select(selector!("tbody tr")).enumerate() {
+            match parse_row(row, base_url, i) {
+                Ok(Some(t)) => results.push(t),
+                Ok(None) => {
+                    empty_marker |= row.select(selector!("td")).any(|cell| {
+                        matches!(
+                            element_text(cell).to_lowercase().trim_end_matches('.'),
+                            "ничего не найдено" | "по вашему запросу ничего не найдено"
+                        )
+                    });
+                }
+                Err(_) => malformed_rows = true,
+            }
         }
     }
 
+    // Keep usable partial results, but never turn an unreadable response into a
+    // successful empty search (which callers may cache). An empty table alone
+    // is not evidence that the query matched nothing.
+    if results.is_empty()
+        && (malformed_rows
+            || total_count.is_some_and(|count| count > 0)
+            || !(empty_marker || (table.is_some() && total_count == Some(0))))
+    {
+        return Err(Error::parse(
+            "search",
+            "no usable results or reliable empty marker",
+        ));
+    }
+
+    let total_count = total_count.unwrap_or(0);
+    let total_pages = total_count.div_ceil(PAGE_SIZE);
     Ok(SearchResults {
         total_count,
         page,
@@ -59,13 +73,11 @@ pub(crate) fn parse(html: &str, page: u32, base_url: &Url) -> Result<SearchResul
 fn parse_total_count(doc: &Html) -> Option<u32> {
     // The "Результатов поиска: 1234" string (literal HTML marker on
     // rutracker's results page) — extract the trailing integer.
-    let text = element_text(
-        doc.select(selector!("#main_content_wrap p.med.bold, p.med.bold"))
-            .next()?,
-    );
-    text.split_whitespace()
-        .filter_map(|w| w.replace(',', "").parse::<u32>().ok())
-        .next_back()
+    doc.select(selector!("p.med.bold")).find_map(|counter| {
+        let text = element_text(counter);
+        let count = text.strip_prefix("Результатов поиска:")?.trim();
+        count.replace([',', ' ', '\u{a0}'], "").parse().ok()
+    })
 }
 
 fn parse_row(
@@ -73,15 +85,34 @@ fn parse_row(
     base_url: &Url,
     row_index: usize,
 ) -> Result<Option<TorrentSummary>> {
-    // Empty / placeholder rows ("ничего не найдено") have no data-topic_id link.
     let Some(title_link) = row
         .select(selector!("a.tLink, a.med.tLink, a[data-topic_id]"))
         .next()
     else {
+        // A recognized result row with a missing title is malformed, not a
+        // placeholder. Header and genuine no-results rows may be skipped.
+        if row.value().classes().any(|class| class == "hl-tr")
+            || row.value().id().is_some_and(|id| id.starts_with("tr-"))
+            || row
+                .select(selector!("td.t-title, td.t-title-col, td.tor-size"))
+                .next()
+                .is_some()
+        {
+            return Err(Error::parse(
+                "search/parser::title",
+                "result row without title link",
+            ));
+        }
         return Ok(None);
     };
     let id = extract_topic_id(title_link, row_index)?;
     let title = element_text(title_link);
+    if id.get() == 0 || title.is_empty() {
+        return Err(Error::parse(
+            "search/parser::title",
+            "result row without usable id or title",
+        ));
+    }
 
     Ok(Some(TorrentSummary {
         id,

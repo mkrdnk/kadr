@@ -810,11 +810,15 @@ fn movie_release_is_suitable(source: &MediaSource) -> bool {
         return true;
     }
     source.release_title.as_deref().is_none_or(|raw| {
-        let parsed = release_title(raw);
-        !parsed.scoped
-            && !movie_release_has_pack_suffix(raw)
-            && !parsed.year.zip(source.year).is_some_and(|(a, b)| a != b)
+        movie_release_metadata(raw)
+            .is_some_and(|(_, year)| !year.zip(source.year).is_some_and(|(a, b)| a != b))
     })
+}
+
+/// Shared single-movie evidence; an endpoint ID cannot override raw scope.
+pub(super) fn movie_release_metadata(raw: &str) -> Option<(String, Option<u16>)> {
+    let parsed = release_title(raw);
+    (!parsed.scoped && !movie_release_has_pack_suffix(raw)).then_some((parsed.title, parsed.year))
 }
 
 fn release_title(raw: &str) -> ReleaseTitle {
@@ -827,7 +831,7 @@ fn release_title(raw: &str) -> ReleaseTitle {
     // Recognize only explicit year/episode boundaries. No prefix matching
     // against the request and no inference from arbitrary release numbers.
     let tokens: Vec<_> = raw
-        .split(|c: char| c.is_whitespace() || matches!(c, '.' | '_' | '[' | ']' | '(' | ')'))
+        .split(|c: char| c.is_whitespace() || matches!(c, '.' | '_' | '[' | ']' | '(' | ')' | ','))
         .filter(|s| !s.is_empty())
         .collect();
     let mut boundary = None;

@@ -11,12 +11,16 @@ use crate::client::builder::{authorized_url, check_url};
 use crate::{Error, TopicId, http, search, topic};
 
 const READ_DEADLINE: Duration = Duration::from_secs(1);
-const LOGIN_FORM: &str = r#"
-    <form id="login-form-full" action="login.php" method="post">
-        <input name="login_username">
-        <input name="login_password" type="password">
-    </form>
-"#;
+const LOGIN_FORM: &str = include_str!("fixtures/search/login.html");
+const EMPTY_SEARCH: &str = include_str!("fixtures/search/empty.html");
+const CHANGED_SEARCH: &str = include_str!("fixtures/search/changed-layout.html");
+const MALFORMED_SEARCH: &str = include_str!("fixtures/search/malformed-rows.html");
+const MIXED_SEARCH: &str = include_str!("fixtures/search/mixed.html");
+const FIELDSET_TOPIC: &str = include_str!("fixtures/topic/fieldset.html");
+const TABLE_TOPIC: &str = include_str!("fixtures/topic/table.html");
+const TOPIC_URL: &str = "https://rutracker.org/forum/viewtopic.php?t=42";
+const MAGNET: &str = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
+const MAGNET_ANCHOR: &str = r#"<a class="magnet-link" href="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&amp;dn=Fixture">Magnet</a>"#;
 
 #[test]
 fn parser_debug_and_trace_logging_is_disabled_at_compile_time() {
@@ -26,7 +30,7 @@ fn parser_debug_and_trace_logging_is_disabled_at_compile_time() {
 // The server deliberately leaves the connection open after writing its fixture.
 // Dropping the channel sender releases it; no EOF or terminating chunk is sent
 // unless explicitly present in the fixture.
-struct LoopbackServer {
+pub(crate) struct LoopbackServer {
     release: Option<mpsc::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -38,7 +42,7 @@ impl Drop for LoopbackServer {
     }
 }
 
-async fn loopback_response(wire: &[u8]) -> (reqwest::Response, LoopbackServer) {
+pub(crate) async fn loopback_response(wire: &[u8]) -> (reqwest::Response, LoopbackServer) {
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -178,7 +182,8 @@ async fn status_codes_map_to_domain_errors() {
         drop(server);
         match status {
             200 | 204 => assert_eq!(result.unwrap().status().as_u16(), status),
-            401 | 403 => assert!(matches!(result, Err(Error::NotAuthenticated))),
+            401 => assert!(matches!(result, Err(Error::NotAuthenticated))),
+            403 => assert!(matches!(result, Err(Error::Server(403)))),
             429 => assert!(matches!(result, Err(Error::RateLimited))),
             500 => assert!(matches!(result, Err(Error::Server(500)))),
             _ => unreachable!(),
@@ -218,6 +223,9 @@ fn search_login_form_is_not_an_empty_result() {
     for html in [
         LOGIN_FORM.to_owned(),
         format!("{LOGIN_FORM}<table id=\"tor-tbl\"></table>"),
+        format!("{LOGIN_FORM}{EMPTY_SEARCH}"),
+        format!("{LOGIN_FORM}{CHANGED_SEARCH}"),
+        format!("{LOGIN_FORM}{MIXED_SEARCH}"),
     ] {
         assert!(matches!(
             search::parser::parse(&html, 1, &base),
@@ -228,13 +236,8 @@ fn search_login_form_is_not_an_empty_result() {
 
 #[test]
 fn search_accepts_a_legitimate_empty_table() {
-    let html = r#"
-        <table id="tor-tbl"><tbody>
-            <tr><td colspan="10">Ничего не найдено</td></tr>
-        </tbody></table>
-    "#;
     let base = Url::parse("https://rutracker.org").unwrap();
-    let parsed = search::parser::parse(html, 1, &base).unwrap();
+    let parsed = search::parser::parse(EMPTY_SEARCH, 1, &base).unwrap();
     assert!(parsed.results.is_empty());
     assert_eq!(parsed.total_count, 0);
     assert_eq!(parsed.total_pages, 0);
@@ -244,11 +247,114 @@ fn search_accepts_a_legitimate_empty_table() {
 #[test]
 fn search_rejects_unknown_html_instead_of_reporting_no_results() {
     let base = Url::parse("https://rutracker.org").unwrap();
-    for html in ["", "<html><body>Temporary maintenance</body></html>"] {
+    for html in [
+        "",
+        "<html><body>Temporary maintenance</body></html>",
+        "<table id='tor-tbl'></table>",
+        "<table id='tor-tbl'><tr><th>Title</th></tr></table>",
+        "<table id='tor-tbl'><tr><td>Unreadable results</td></tr></table>",
+        "<p class='med bold'>Unrelated number: 0</p><table id='tor-tbl'></table>",
+        "<p class='med bold'>Результатов поиска: unreadable</p><table id='tor-tbl'></table>",
+        "<p>Ничего не найдено</p>",
+    ] {
+        assert!(
+            matches!(
+                search::parser::parse(html, 1, &base),
+                Err(Error::Parse { .. })
+            ),
+            "{html}"
+        );
+    }
+}
+
+#[test]
+fn search_rejects_positive_totals_without_usable_rows() {
+    let base = Url::parse("https://rutracker.org").unwrap();
+    for html in [
+        CHANGED_SEARCH.to_owned(),
+        CHANGED_SEARCH.replace("tor-tbl", "new-table"),
+        "<p class='med bold'>Результатов поиска: 51</p>".to_owned(),
+        format!("<p class='med bold'>Результатов поиска: 51</p>{EMPTY_SEARCH}"),
+    ] {
+        // Even an out-of-range page must not turn an unreadable response into
+        // a cacheable empty success when the server advertises matches.
+        for page in [1, 3] {
+            assert!(matches!(
+                search::parser::parse(&html, page, &base),
+                Err(Error::Parse { .. })
+            ));
+        }
+    }
+}
+
+#[test]
+fn search_rejects_malformed_result_rows_even_without_a_counter() {
+    let base = Url::parse("https://rutracker.org").unwrap();
+    for html in [
+        MALFORMED_SEARCH.to_owned(),
+        MALFORMED_SEARCH.replace("</tbody>", "<tr><td>Ничего не найдено</td></tr></tbody>"),
+        format!("<p class='med bold'>Результатов поиска: 0</p>{MALFORMED_SEARCH}"),
+    ] {
         assert!(matches!(
-            search::parser::parse(html, 1, &base),
+            search::parser::parse(&html, 1, &base),
             Err(Error::Parse { .. })
         ));
+    }
+}
+
+#[test]
+fn search_malformed_row_cannot_be_hidden_by_an_empty_marker() {
+    let base = Url::parse("https://rutracker.org").unwrap();
+    for row in [
+        "<tr class='hl-tr'><td>Missing link</td></tr>",
+        "<tr id='tr-42'><td>Missing link</td></tr>",
+        "<tr><td class='t-title-col'>Missing link</td></tr>",
+        "<tr><td class='tor-size'>700 MiB</td></tr>",
+        "<tr><td><a class='tLink'>Missing id</a></td></tr>",
+        "<tr><td><a class='tLink' data-topic_id='invalid'>Bad id</a></td></tr>",
+        "<tr><td><a class='tLink' data-topic_id='0'>Zero id</a></td></tr>",
+        "<tr><td><a class='tLink' data-topic_id='42'> </a></td></tr>",
+    ] {
+        let html = EMPTY_SEARCH.replace("</tbody>", &format!("{row}</tbody>"));
+        assert!(
+            matches!(
+                search::parser::parse(&html, 1, &base),
+                Err(Error::Parse { .. })
+            ),
+            "{row}"
+        );
+    }
+}
+
+#[test]
+fn search_accepts_an_explicit_zero_counter_with_a_results_table() {
+    let base = Url::parse("https://rutracker.org").unwrap();
+    let html = "<p class='med bold'>Результатов поиска: 0</p><table id='tor-tbl'></table>";
+    let parsed = search::parser::parse(html, 1, &base).unwrap();
+    assert!(parsed.results.is_empty());
+    assert_eq!(parsed.total_count, 0);
+    assert_eq!(parsed.total_pages, 0);
+}
+
+#[test]
+fn search_keeps_usable_partial_results_without_inventing_metadata() {
+    let base = Url::parse("https://rutracker.org").unwrap();
+    for html in [
+        MIXED_SEARCH.to_owned(),
+        MIXED_SEARCH.replace("<p class=\"med bold\">Результатов поиска: 51</p>", ""),
+    ] {
+        let parsed = search::parser::parse(&html, 1, &base).unwrap();
+        assert_eq!(parsed.results.len(), 2);
+        assert_eq!(parsed.results[0].id, TopicId::new(42));
+        assert_eq!(parsed.results[0].title, "Фильм & «Тест» — HD");
+        assert_eq!(parsed.results[0].author.as_deref(), Some("Fixture author"));
+        assert_eq!(parsed.results[0].category, "Фильмы");
+        assert_eq!(parsed.results[0].size, Some(734_003_200));
+        assert_eq!(parsed.results[0].seeds, Some(12));
+        assert_eq!(parsed.results[1].id, TopicId::new(45));
+        assert_eq!(parsed.results[1].size, None);
+        assert_eq!(parsed.results[1].seeds, None);
+        assert_eq!(parsed.results[1].registered.timestamp(), 1_700_000_001);
     }
 }
 
@@ -314,21 +420,15 @@ fn search_distinguishes_zero_metadata_from_unknown_metadata() {
 
 #[test]
 fn topic_extracts_magnet_and_decodes_html_entities() {
-    let html = r#"
-        <h1 id="topic-title">Тема &amp; &#171;Тест&#187;</h1>
-        <div class="post_body">
-            <span id="tor-hash">0123456789ABCDEF0123456789ABCDEF01234567</span>
-            <a class="magnet-link" href="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&amp;dn=Fixture">Magnet</a>
-            <span id="tor-size-humn" title="4096">4 KiB</span>
-        </div>
-    "#;
     let id = TopicId::new(42);
-    let url = "https://rutracker.org/forum/viewtopic.php?t=42";
-    let parsed = topic::parser::parse(html, id, url).unwrap();
+    let parsed = topic::parser::parse(FIELDSET_TOPIC, id, TOPIC_URL).unwrap();
     assert_eq!(parsed.id, id);
-    assert_eq!(parsed.url, url);
+    assert_eq!(parsed.url, TOPIC_URL);
     assert_eq!(parsed.title, "Тема & «Тест»");
+    assert_eq!(parsed.author.as_deref(), Some("Original author"));
     assert_eq!(parsed.size, 4096);
+    assert!(parsed.description_html.contains("Original description"));
+    assert!(!parsed.description_html.contains("Reply"));
     assert_eq!(
         parsed.info_hash.unwrap().to_hex(),
         "0123456789abcdef0123456789abcdef01234567"
@@ -340,10 +440,151 @@ fn topic_extracts_magnet_and_decodes_html_entities() {
 }
 
 #[test]
+fn topic_accepts_table_attachment_and_preserves_dom_attribute_value() {
+    let parsed = topic::parser::parse(TABLE_TOPIC, TopicId::new(42), TOPIC_URL).unwrap();
+    assert_eq!(
+        parsed.magnet.as_deref(),
+        Some(
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Table&tr=https%3A%2F%2Ftracker.example%2Fannounce"
+        )
+    );
+    let html = FIELDSET_TOPIC.replace("&amp;dn=Fixture", "&amp;dn=One%26Two&amp;amp;literal=1");
+    let parsed = topic::parser::parse(&html, TopicId::new(42), TOPIC_URL).unwrap();
+    assert_eq!(
+        parsed.magnet,
+        Some(format!("{MAGNET}&dn=One%26Two&amp;literal=1"))
+    );
+}
+
+#[test]
+fn topic_missing_magnet_never_uses_body_sidebar_reply_or_synthetic_hash() {
+    let html = FIELDSET_TOPIC.replace(MAGNET_ANCHOR, "<a href='dl.php?t=42'>Torrent</a>");
+    let parsed = topic::parser::parse(&html, TopicId::new(42), TOPIC_URL).unwrap();
+    assert!(parsed.magnet.is_none());
+    // A visible hash is metadata, not permission to synthesize a magnet.
+    assert!(parsed.info_hash.is_some());
+
+    let html = TABLE_TOPIC.replace(
+        r#"<a class="magnet-link" href="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&amp;dn=Table&#x26;tr=https%3A%2F%2Ftracker.example%2Fannounce">Magnet</a>"#,
+        "",
+    );
+    assert!(
+        topic::parser::parse(&html, TopicId::new(42), TOPIC_URL)
+            .unwrap()
+            .magnet
+            .is_none()
+    );
+}
+
+#[test]
+fn topic_does_not_search_poster_sidebar_or_later_post_for_an_attachment() {
+    let sidebar = r#"<table><tr><td class="message"><div class="post_body">Sidebar description</div><fieldset class="attach"><a class="magnet-link" href="magnet:?xt=urn:btih:dddddddddddddddddddddddddddddddddddddddd">Sidebar magnet</a></fieldset></td></tr></table>"#;
+    let html = FIELDSET_TOPIC.replace(
+        "<span class=\"nick nick-author\">Original author</span>",
+        sidebar,
+    );
+    assert_eq!(
+        topic::parser::parse(&html, TopicId::new(42), TOPIC_URL)
+            .unwrap()
+            .magnet,
+        Some(format!("{MAGNET}&dn=Fixture"))
+    );
+    // A reply's attachment cannot make an unsupported original post usable.
+    let html = FIELDSET_TOPIC.replacen("class=\"attach\"", "class=\"unknown\"", 1);
+    assert!(matches!(
+        topic::parser::parse(&html, TopicId::new(42), TOPIC_URL),
+        Err(Error::Parse { .. })
+    ));
+}
+
+#[test]
+fn topic_accepts_supported_magnet_forms_without_rewriting_attributes() {
+    for magnet in [
+        MAGNET.to_owned(),
+        format!("MAGNET:?xt=urn:btih:{}&dn=Case", "A".repeat(40)),
+        format!("magnet:?xt=urn:btih:{}", "A".repeat(32)),
+        format!("magnet:?xt=urn:btmh:1220{}", "ab".repeat(32)),
+        format!("magnet:?xt=urn%3Abtih%3A{}&dn=Encoded", "a".repeat(40)),
+    ] {
+        // A valid href is sufficient; a CSS class is not the URI's source.
+        let html = FIELDSET_TOPIC.replace(MAGNET_ANCHOR, &format!("<a href='{magnet}'>Magnet</a>"));
+        let parsed = topic::parser::parse(&html, TopicId::new(42), TOPIC_URL).unwrap();
+        assert_eq!(parsed.magnet, Some(magnet));
+    }
+}
+
+#[test]
+fn topic_invalid_advertised_magnet_is_not_missing_and_never_uses_reply() {
+    for anchor in [
+        "<a class='magnet-link'>No href</a>",
+        "<a class='magnet-link' href=''>Empty href</a>",
+        "<a class='magnet-link' href='https://example.org'>Wrong scheme</a>",
+        "<a class='magnet-link' href='javascript:alert(1)'>Wrong scheme</a>",
+        "<a href='magnet:'>No query</a>",
+        "<a href='magnet:?dn=OnlyName'>No hash</a>",
+        "<a href='magnet:?xt=urn:btih:not-a-hash'>Bad hash</a>",
+        "<a href='magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567#fragment'>Fragment</a>",
+        "<a href='magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&#10;'>Control</a>",
+    ] {
+        let html = FIELDSET_TOPIC.replace(MAGNET_ANCHOR, anchor);
+        assert!(
+            matches!(
+                topic::parser::parse(&html, TopicId::new(42), TOPIC_URL),
+                Err(Error::Parse { .. })
+            ),
+            "{anchor}"
+        );
+    }
+}
+
+#[test]
+fn topic_uses_only_first_unquoted_attachment_in_original_message() {
+    let quoted = r#"<blockquote><fieldset class="attach"><a class="magnet-link" href="magnet:?xt=urn:btih:dddddddddddddddddddddddddddddddddddddddd">Quoted</a></fieldset></blockquote>"#;
+    let html = FIELDSET_TOPIC.replace(
+        "Original description",
+        &format!("{quoted}Original description"),
+    );
+    assert_eq!(
+        topic::parser::parse(&html, TopicId::new(42), TOPIC_URL)
+            .unwrap()
+            .magnet,
+        Some(format!("{MAGNET}&dn=Fixture"))
+    );
+    let html = FIELDSET_TOPIC.replace(MAGNET_ANCHOR, "").replace(
+        "</fieldset>",
+        &format!("</fieldset><fieldset class='attach'>{MAGNET_ANCHOR}</fieldset>"),
+    );
+    assert!(
+        topic::parser::parse(&html, TopicId::new(42), TOPIC_URL)
+            .unwrap()
+            .magnet
+            .is_none()
+    );
+}
+
+#[test]
+fn quoted_original_permalink_cannot_turn_a_reply_into_the_original_post() {
+    let html = FIELDSET_TOPIC.replacen(
+        "class=\"p-link small\" href=\"viewtopic.php?t=42\"",
+        "class=\"p-link small\" href=\"viewtopic.php?p=100#100\"",
+        1,
+    );
+    let html = html.replace(
+        "Original description",
+        r#"<blockquote><div class="post_head"><a class="p-link" href="viewtopic.php?t=42">Quoted original</a></div></blockquote>Reply description"#,
+    );
+    assert!(matches!(
+        topic::parser::parse(&html, TopicId::new(42), TOPIC_URL),
+        Err(Error::Parse { .. })
+    ));
+}
+
+#[test]
 fn topic_login_form_is_not_a_successful_topic() {
     for html in [
         LOGIN_FORM.to_owned(),
         format!("{LOGIN_FORM}<h1 id=\"topic-title\">Login required</h1>"),
+        format!("{LOGIN_FORM}{FIELDSET_TOPIC}"),
     ] {
         assert!(matches!(
             topic::parser::parse(
@@ -357,22 +598,84 @@ fn topic_login_form_is_not_a_successful_topic() {
 }
 
 #[test]
-fn only_a_recognized_topic_can_report_missing_magnet() {
-    for html in [
-        "",
-        "<title>Maintenance</title>",
-        "<h1 class='maintitle'>Maintenance</h1>",
+fn quick_login_widget_is_not_an_authentication_failure() {
+    let widget = "<form id='login-form-quick'><input name='login_username'><input type='password' name='login_password'></form>";
+    let html = format!("{widget}{FIELDSET_TOPIC}");
+    assert_eq!(
+        topic::parser::parse(&html, TopicId::new(42), TOPIC_URL)
+            .unwrap()
+            .magnet,
+        Some(format!("{MAGNET}&dn=Fixture"))
+    );
+    let base = Url::parse("https://rutracker.org").unwrap();
+    assert!(
+        search::parser::parse(&format!("{widget}{EMPTY_SEARCH}"), 1, &base)
+            .unwrap()
+            .results
+            .is_empty()
+    );
+}
+
+#[test]
+fn challenge_cannot_masquerade_as_an_empty_search_or_missing_magnet() {
+    for challenge in [
+        include_str!("fixtures/topic/challenge.html"),
+        "<form id='challenge-form'></form>",
+        "<div class='g-recaptcha'></div>",
     ] {
+        let html = format!("{challenge}{}", FIELDSET_TOPIC.replace(MAGNET_ANCHOR, ""));
         assert!(matches!(
-            topic::parser::parse(html, TopicId::new(1), "https://rutracker.org"),
+            topic::parser::parse(&html, TopicId::new(42), TOPIC_URL),
+            Err(Error::Parse { .. })
+        ));
+        let base = Url::parse("https://rutracker.org").unwrap();
+        assert!(matches!(
+            search::parser::parse(&format!("{challenge}{EMPTY_SEARCH}"), 1, &base),
             Err(Error::Parse { .. })
         ));
     }
-    let topic = topic::parser::parse(
-        "<h1 class='maintitle'>Fixture</h1><div class='post_body'>No public magnet</div>",
-        TopicId::new(1),
-        "https://rutracker.org",
-    )
-    .unwrap();
-    assert!(topic.magnet.is_none());
+}
+
+#[test]
+fn only_a_recognized_topic_can_report_missing_magnet() {
+    for html in [
+        "".to_owned(),
+        "<title>Maintenance</title>".to_owned(),
+        "<h1 class='maintitle'>Maintenance</h1>".to_owned(),
+        // The old synthetic fixtures were too weak to prove a topic layout.
+        "<h1 class='maintitle'>Fixture</h1><div class='post_body'>No public magnet</div>"
+            .to_owned(),
+        include_str!("fixtures/topic/challenge.html").to_owned(),
+        include_str!("fixtures/topic/malformed.html").to_owned(),
+        FIELDSET_TOPIC.replace("id=\"topic_main\"", "id=\"changed-layout\""),
+        format!("<table id='topic_main'></table>{FIELDSET_TOPIC}"),
+        format!("<h1 class='maintitle'>Duplicate heading</h1>{FIELDSET_TOPIC}"),
+        FIELDSET_TOPIC.replace("id=\"post_100\"", "id=\"post_invalid\""),
+        FIELDSET_TOPIC.replace("id=\"post_100\"", "id=\"changed-post\""),
+        FIELDSET_TOPIC.replace("id=\"post_100\"", ""),
+        FIELDSET_TOPIC.replacen(
+            "class=\"p-link small\" href=\"viewtopic.php?t=42\"",
+            "class=\"p-link small\" href=\"viewtopic.php?p=101#101\"",
+            1,
+        ),
+        FIELDSET_TOPIC.replace("class=\"post_head\"", "class=\"unknown\""),
+        FIELDSET_TOPIC.replace("class=\"message\"", "class=\"changed-message\""),
+        FIELDSET_TOPIC.replace("class=\"post_body\"", "class=\"changed-body\""),
+        FIELDSET_TOPIC.replace("class=\"attach\"", "class=\"changed-attachment\""),
+        FIELDSET_TOPIC.replace("viewtopic.php?t=42", "viewtopic.php?t=43"),
+        FIELDSET_TOPIC.replace("viewtopic.php?t=42", "viewtopic.php?t=42&amp;start=30"),
+        FIELDSET_TOPIC.replace("viewtopic.php?t=42", "viewtopic.php?t=42&amp;t=43"),
+        FIELDSET_TOPIC.replace(
+            "viewtopic.php?t=42",
+            "https://example.org/forum/viewtopic.php?t=42",
+        ),
+    ] {
+        assert!(
+            matches!(
+                topic::parser::parse(&html, TopicId::new(42), TOPIC_URL),
+                Err(Error::Parse { .. })
+            ),
+            "{html}"
+        );
+    }
 }

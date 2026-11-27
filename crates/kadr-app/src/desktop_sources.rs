@@ -1,5 +1,21 @@
 //! Pure request bookkeeping; no engine, GPUI or IO dependencies.
 
+pub(super) struct CardOpenRequest {
+    pub(super) media_id: String,
+    pub(super) navigation: u64,
+}
+
+impl CardOpenRequest {
+    pub(super) fn should_prefetch(
+        &self,
+        media_id: Option<&str>,
+        movie: bool,
+        navigation: u64,
+    ) -> bool {
+        movie && media_id == Some(self.media_id.as_str()) && navigation == self.navigation
+    }
+}
+
 #[derive(Default)]
 pub(super) struct SourceRequests(u64);
 
@@ -107,6 +123,19 @@ impl SourcePresentation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_current_movie_card_open_can_start_prefetch() {
+        let request = CardOpenRequest {
+            media_id: "movie".into(),
+            navigation: 4,
+        };
+        assert!(request.should_prefetch(Some("movie"), true, 4));
+        assert!(!request.should_prefetch(Some("movie"), false, 4));
+        assert!(!request.should_prefetch(Some("other"), true, 4));
+        assert!(!request.should_prefetch(None, true, 4));
+        assert!(!request.should_prefetch(Some("movie"), true, 5));
+    }
 
     #[test]
     fn discovery_identity_includes_episode_not_only_show() {

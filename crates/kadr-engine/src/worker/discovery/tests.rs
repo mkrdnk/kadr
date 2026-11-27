@@ -29,16 +29,19 @@ fn source(id: u64, seeds: Option<u32>) -> MediaSource {
 fn discovery(query: MediaQuery, sources: Vec<MediaSource>, pending: usize) -> Discovery {
     let mut discovery = Discovery {
         next_handle: 0,
+        movie_prefetch: None,
         current: Some(SearchState {
             query,
             key: "fixture".into(),
             pending,
             succeeded: 1,
             failures: BTreeMap::new(),
+            notices: Vec::new(),
             batches: sources,
             handles: BTreeMap::new(),
             ranked: Vec::new(),
             names: BTreeMap::new(),
+            tracker_magnets: BTreeMap::new(),
         }),
     };
     discovery.rank(&crate::SourcePreferences::default());
@@ -118,7 +121,7 @@ fn cached_rutracker_movie_scores_cannot_bypass_title_year_or_scope_evidence() {
         "The Thing [1982] Collection",
         "The Thing [1982] 1x01",
         "The Thing Returns [1982]",
-        "The Thing 1982 1080p",
+        "The Thing 2011 1080p",
     ] {
         let mut offer =
             MediaSource::new("rutracker", Locator::RuTracker(42), title, MediaKind::Movie).unwrap();
@@ -144,7 +147,155 @@ fn cached_rutracker_movie_scores_cannot_bypass_title_year_or_scope_evidence() {
     assert_eq!(rows[0].match_score, 80);
     let mut unknown_year = query;
     unknown_year.year = None;
-    assert!(matched(&unknown_year, "rutracker", vec![offer]).is_empty());
+    let possible = matched(&unknown_year, "rutracker", vec![offer]);
+    assert_eq!(possible.len(), 1);
+    assert!(possible[0].possible_match);
+}
+
+#[test]
+fn possible_rutracker_release_is_selectable_but_never_the_watch_recommendation() {
+    let query = query();
+    let mut possible = MediaSource::new(
+        "rutracker",
+        Locator::RuTracker(42),
+        "The Thing 1982 1080p",
+        MediaKind::Movie,
+    )
+    .unwrap();
+    possible.match_score = 100;
+    possible.seeds = Some(999);
+    let rows = matched(&query, "rutracker", vec![possible]);
+    let mut results = discovery(query, rows, 0);
+    let possible = &results.rows()[0];
+    assert!(possible.possible_match && !possible.recommended);
+    assert_eq!(results.recommended_handle(), None);
+    let possible_handle = possible.index;
+    results
+        .current
+        .as_mut()
+        .unwrap()
+        .batches
+        .push(source(1, Some(1)));
+    results.rank(&crate::SourcePreferences::default());
+    let rows = results.rows();
+    assert!(rows[0].recommended && !rows[0].possible_match);
+    assert_eq!(rows[1].index, possible_handle);
+    assert!(!rows[1].recommended);
+}
+
+#[test]
+fn filtered_rutracker_search_supersedes_a_cached_zero_without_storing_another() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut storage = Storage::open(&temp.path().join("library.db")).unwrap();
+    let mut state = discovery(query(), vec![], 0).current.unwrap();
+    let key = state.cache_key("rutracker").into_owned();
+    let empty = |had_results| ProviderBatch {
+        rows: vec![],
+        had_results,
+        ..Default::default()
+    };
+    state
+        .accept_live_batch("rutracker", empty(false), &mut storage)
+        .unwrap();
+    let no_topics = state.notices.pop().unwrap();
+    assert_eq!(
+        storage
+            .source_cache_get(&key, "rutracker", now())
+            .unwrap()
+            .unwrap(),
+        b"[]"
+    );
+    state
+        .accept_live_batch("rutracker", empty(true), &mut storage)
+        .unwrap();
+    assert_ne!(state.notices.pop().unwrap(), no_topics);
+    assert!(
+        storage
+            .source_cache_get(&key, "rutracker", now())
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn foreground_joins_card_lookup_and_persists_only_topic_descriptors() {
+    use futures_util::FutureExt;
+    let query = query();
+    let mut row = MediaSource::new(
+        "rutracker",
+        Locator::RuTracker(42),
+        "The Thing [1982]",
+        MediaKind::Movie,
+    )
+    .unwrap();
+    row.seeds = Some(5);
+    let (started, wait) = tokio::sync::oneshot::channel();
+    let warm = async move {
+        wait.await.unwrap();
+        Ok(Arc::new(ProviderBatch {
+            tracker_magnets: BTreeMap::from([(42, "test-only:private-tracker-data".into())]),
+            ..vec![row].into()
+        }))
+    }
+    .boxed()
+    .shared();
+    let opened = tokio::spawn(warm.clone());
+    let provider = RuTrackerProvider {
+        account: tracker::Account::new(None),
+        vault: Default::default(),
+        preferences: RankPreferences::default(),
+        warm: Some(warm),
+    };
+    let cancel = CancellationToken::new();
+    let search = provider.search(&query, &cancel);
+    started.send(()).unwrap();
+    let batch = search.await.unwrap_or_else(|_| panic!("joined prefetch"));
+    assert!(opened.await.unwrap().is_ok());
+    let mut state = discovery(query, vec![], 0).current.unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let mut storage = Storage::open(&temp.path().join("fixture.db")).unwrap();
+    state
+        .accept_live_batch("rutracker", batch, &mut storage)
+        .unwrap();
+    assert!(state.tracker_magnets.contains_key(&42));
+    let stored = storage
+        .source_cache_get(&state.cache_key("rutracker"), "rutracker", now())
+        .unwrap()
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&stored).contains("private-tracker-data"));
+    assert!(matches!(
+        serde_json::from_slice::<Vec<MediaSource>>(&stored).unwrap()[0].locator,
+        Locator::RuTracker(42)
+    ));
+}
+
+#[test]
+fn cached_rutracker_episode_pack_requires_manual_selection_and_correct_scope() {
+    let mut query = query();
+    query.kind = MediaKind::Series;
+    query.episode = kadr_core::torrent::EpisodeNumber::new(2, 3);
+    let offer = |id, title| {
+        let mut row =
+            MediaSource::new("rutracker", Locator::RuTracker(id), title, query.kind).unwrap();
+        row.match_score = 100;
+        row
+    };
+    let cached = serde_json::to_vec(&[
+        offer(1, "The Thing S01 [1982]"),
+        offer(2, "The Thing S02 [1982]"),
+        offer(3, "The Thing S02E03 [1982]"),
+    ])
+    .unwrap();
+    let rows = matched(
+        &query,
+        "rutracker",
+        serde_json::from_slice(&cached).unwrap(),
+    );
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].locator, Locator::RuTracker(2));
+    assert!(rows[0].possible_match);
+    assert_eq!(rows[1].locator, Locator::RuTracker(3));
+    assert!(!rows[1].possible_match);
 }
 
 #[test]
@@ -155,6 +306,51 @@ fn cached_generic_movie_with_matching_id_and_conflicting_year_is_excluded() {
     offer.external = query.external.clone();
     offer.year = Some(2011);
     assert!(matched(&query, "torznab:fixture", vec![offer]).is_empty());
+}
+
+#[test]
+fn popcorn_rows_keep_upstream_and_keep_magnets_out_of_storage_and_ui() {
+    use kadr_catalog::popcorn::ID;
+    let mut movie = query();
+    movie.external.imdb_id = Some("tt0084787".into());
+    let mut row = MediaSource::new(
+        ID,
+        Locator::Magnet(format!(
+            "magnet:?xt=urn:btih:{}&dn=never-display-or-persist",
+            "a".repeat(40)
+        )),
+        movie.title.clone(),
+        MediaKind::Movie,
+    )
+    .unwrap();
+    row.release_title = Some("The Thing [1982] 720p".into());
+    row.external.imdb_id = movie.external.imdb_id.clone();
+    row.year = movie.year;
+    row.origins
+        .extend(["popcorn:Yts".into(), "rutracker".into()]);
+    let mut discovery = discovery(movie, vec![], 0);
+    let temp = tempfile::tempdir().unwrap();
+    let mut storage = Storage::open(&temp.path().join("fixture.db")).unwrap();
+    let state = discovery.current.as_mut().unwrap();
+    state.names.insert(ID.into(), "Popcorn API".into());
+    state.names.insert("rutracker".into(), "RuTracker".into());
+    state
+        .accept_live_batch(ID, vec![row].into(), &mut storage)
+        .unwrap();
+    assert!(!allows_disk_cache(ID));
+    assert!(
+        storage
+            .source_cache_get(&state.cache_key(ID), ID, now())
+            .unwrap()
+            .is_none()
+    );
+    discovery.rank(&crate::SourcePreferences::default());
+    let rows = discovery.rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].kind, SourceKind::Magnet);
+    assert_eq!(rows[0].origin, "Popcorn API · Yts");
+    assert!(!rows[0].rutracker);
+    assert_eq!(rows[0].title, "The Thing [1982] 720p");
 }
 
 #[test]

@@ -170,6 +170,18 @@ The public connection is opaque; callers cannot bypass validation via it.
    existing databases migrate with it disabled, so an upgrade never expands
    the user's previous network permissions. The global catalog switch still
    gates all network discovery. No source files or video bytes are migrated.
+9. Independent `popcorn_enabled` preference, off on both new and upgraded
+   databases. Popcorn API results are held only in memory; the migration does
+   not add a release index or store magnet links.
+10. Reset `popcorn_enabled` to false on upgrade. The v9 opt-in authorized only
+    movie lookups by IMDb ID through `fusme.link`, not additional mirrors or
+    numbered episodes. Keep a single switch, default off, with no new fields;
+    a fresh opt-in is required for the expanded provider. Reopening a v10
+    database preserves any newly enabled choice. All other source preferences,
+    ordered Torznab configurations, settings and library/playback data remain
+    unchanged. Resolver cache is retained: Popcorn results are memory-only, so
+    no persistent Popcorn results need invalidation. A subsequent explicit
+    preference change still clears resolver cache through the normal save path.
 
 Opening uses `BEGIN IMMEDIATE`, checks the version, applies the entire missing
 migration chain and updates `user_version` in **one transaction**. Any failure

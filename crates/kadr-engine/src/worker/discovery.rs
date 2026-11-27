@@ -2,19 +2,29 @@ use std::collections::BTreeMap;
 
 use super::*;
 use crate::resolver::{
-    ProviderError, ProviderRegistry, ProviderResult, Search, SourceProvider, SourceResolver,
+    ProviderBatch, ProviderError, ProviderRegistry, ProviderResult, Search, SourceProvider,
+    SourceResolver,
 };
 use kadr_core::sources::{SourcePreferences as RankPreferences, match_source, rank_and_dedup};
 
 mod commons;
 mod manual;
+mod movie_prefetch;
+mod popcorn;
 mod torznab;
 
 #[cfg(test)]
 mod tests;
 
-fn is_local(id: &str) -> bool {
-    matches!(id, "manual-http" | "manual-torrent")
+fn allows_disk_cache(id: &str) -> bool {
+    // Popcorn supplies complete magnet URIs, potentially with private parameters.
+    !matches!(
+        id,
+        "manual-http"
+            | "manual-torrent"
+            | kadr_catalog::popcorn::ID
+            | kadr_catalog::popcorn::YTS_ID
+    )
 }
 
 /// The current target owns the provider batches and the selectable rows.
@@ -23,6 +33,7 @@ fn is_local(id: &str) -> bool {
 pub(super) struct Discovery {
     next_handle: usize,
     current: Option<SearchState>,
+    movie_prefetch: Option<movie_prefetch::MoviePrefetch>,
 }
 
 struct SearchState {
@@ -31,35 +42,93 @@ struct SearchState {
     pending: usize,
     succeeded: usize,
     failures: BTreeMap<String, String>,
+    notices: Vec<String>,
     batches: Vec<MediaSource>,
     handles: BTreeMap<(String, String), usize>,
     ranked: Vec<(usize, MediaSource)>,
     names: BTreeMap<String, String>,
+    tracker_magnets: BTreeMap<u64, String>,
+}
+
+impl SearchState {
+    fn cache_key(&self, provider: &str) -> std::borrow::Cow<'_, str> {
+        // Older RuTracker batches conflated empty, unreadable and filtered
+        // results. Do not invalidate unrelated providers' successful batches.
+        if provider == "rutracker" {
+            tracker_cache_key(&self.key).into()
+        } else {
+            self.key.as_str().into()
+        }
+    }
+
+    fn record_tracker_empty(&mut self, had_topics: bool) {
+        self.notices.push(
+            if had_topics {
+                "RuTracker нашёл темы, но они не подходят для выбранного фильма или эпизода."
+            } else {
+                "RuTracker не нашёл тем по запрошенным названиям."
+            }
+            .into(),
+        );
+    }
+
+    fn accept_live_batch(
+        &mut self,
+        provider: &str,
+        batch: ProviderBatch,
+        storage: &mut Storage,
+    ) -> kadr_storage::Result<()> {
+        let rows = matched(&self.query, provider, batch.rows);
+        let tracker_empty = provider == "rutracker" && rows.is_empty();
+        if tracker_empty {
+            self.record_tracker_empty(batch.had_results);
+        }
+        let key = self.cache_key(provider);
+        let cached = if !allows_disk_cache(provider) || batch.from_cache {
+            Ok(())
+        } else if tracker_empty && batch.had_results {
+            // A refresh supersedes an old cached result, but filtered topics
+            // must not become a cached 'no results'.
+            storage.source_cache_remove(&key, provider)
+        } else {
+            serde_json::to_vec(&rows)
+                .map_err(|_| kadr_storage::Error::InvalidInput("source cache payload"))
+                .and_then(|data| {
+                    storage.source_cache_put(&key, provider, now(), rows.is_empty(), &data)
+                })
+        };
+        self.succeeded += 1;
+        if provider == "rutracker" {
+            self.tracker_magnets = batch.tracker_magnets;
+        }
+        self.notices.extend(batch.notice);
+        self.batches.extend(rows);
+        cached
+    }
 }
 
 impl Discovery {
+    pub(super) fn cancel_movie_prefetch(&mut self) {
+        self.movie_prefetch = None;
+        if let Some(state) = &mut self.current {
+            state.tracker_magnets.clear();
+        }
+    }
+
     pub(super) fn active(&self) -> bool {
         self.current.is_some()
     }
 
     pub(super) fn clear(&mut self) {
         self.current = None;
+        self.cancel_movie_prefetch();
     }
 
     fn rank(&mut self, prefs: &super::super::SourcePreferences) {
         let Some(state) = &mut self.current else {
             return;
         };
-        let rank = RankPreferences {
-            resolutions: prefs
-                .preferred_resolution
-                .as_deref()
-                .and_then(|s| s.trim_end_matches('p').parse().ok())
-                .into_iter()
-                .collect(),
-            languages: prefs.preferred_language.iter().cloned().collect(),
-        };
-        state.ranked = rank_and_dedup(state.batches.clone(), &rank)
+        state.ranked = rank_and_dedup(state.batches.clone(), &rank_preferences(prefs))
             .into_iter()
             .map(|source| {
                 let key = (source.provider.clone(), source.id.clone());
@@ -87,8 +156,20 @@ impl Discovery {
                 let origin = source
                     .origins
                     .iter()
-                    .filter_map(|id| state.names.get(id))
-                    .cloned()
+                    .filter_map(|id| {
+                        let name = state.names.get(id)?;
+                        if id == kadr_catalog::popcorn::ID {
+                            let labels = source
+                                .origins
+                                .iter()
+                                .filter_map(|origin| kadr_catalog::popcorn::upstream_label(origin))
+                                .collect::<Vec<_>>();
+                            if !labels.is_empty() {
+                                return Some(format!("{name} · {}", labels.join(", ")));
+                            }
+                        }
+                        Some(name.clone())
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 let mut row = crate::SourceCandidate::from_source(*handle, source, origin);
@@ -107,7 +188,9 @@ impl Discovery {
             .ranked
             .iter()
             .find(|(_, source)| {
-                source.is_discovered_movie_torrent() && source.seeds.is_some_and(|seeds| seeds > 0)
+                !source.possible_match
+                    && source.is_discovered_movie_torrent()
+                    && source.seeds.is_some_and(|seeds| seeds > 0)
             })
             .map(|(handle, _)| *handle)
     }
@@ -122,6 +205,7 @@ impl Discovery {
             pending: state.pending,
             succeeded: state.succeeded,
             failures: state.failures.values().cloned().collect(),
+            notices: state.notices.clone(),
         })
     }
 }
@@ -129,8 +213,8 @@ impl Discovery {
 struct RuTrackerProvider {
     account: tracker::Account,
     vault: tracker::Vault,
-    media: Media,
-    episode: Option<Episode>,
+    warm: Option<movie_prefetch::WarmResult>,
+    preferences: RankPreferences,
 }
 
 impl SourceProvider for RuTrackerProvider {
@@ -149,41 +233,90 @@ impl SourceProvider for RuTrackerProvider {
     fn timeout(&self) -> Duration {
         Duration::from_secs(45)
     }
-    fn search<'a>(&'a self, _: &'a MediaQuery, cancel: &'a CancellationToken) -> Search<'a> {
+    fn search<'a>(&'a self, query: &'a MediaQuery, cancel: &'a CancellationToken) -> Search<'a> {
         Box::pin(async move {
-            let offers = self
-                .account
-                .search(&self.vault, &self.media, self.episode.as_ref(), cancel)
-                .await
-                .map_err(|error| match error {
-                    tracker::PrepareError::Login(message) => ProviderError::Login(message),
-                    tracker::PrepareError::Failed(message) => ProviderError::Failed(message),
-                })?;
-            Ok(offers
-                .into_iter()
-                .filter_map(|o| {
-                    let mut source = MediaSource::new(
-                        self.id(),
-                        Locator::RuTracker(o.topic_id),
-                        o.title,
-                        self.media.kind,
-                    )
-                    .ok()?;
-                    source.resolution = o
-                        .quality
-                        .as_deref()
-                        .and_then(|q| q.trim_end_matches(['p', 'i']).parse().ok());
-                    source.quality = o.quality;
-                    source.size = o.size;
-                    source.seeds = o.seeds;
-                    source.fetched_at = now();
-                    // This adapter already matched title, production year and scope.
-                    // A pack that contains the episode is not an exact episode hit.
-                    source.match_score = if self.episode.is_some() { 65 } else { 80 };
-                    Some(source)
-                })
-                .collect())
+            let search = if let Some(warm) = self.warm.clone() {
+                match warm.await {
+                    Ok(batch) => return Ok((*batch).clone()),
+                    Err(error) => Err(error),
+                }
+            } else {
+                self.account.search_quiet(query, cancel).await
+            };
+            let outcome = match search {
+                // Only foreground searches may consult the credential vault.
+                Err(rutracker::Error::AuthenticationRequired) => self
+                    .account
+                    .search_after_login_required(&self.vault, query, cancel)
+                    .await
+                    .map_err(tracker_error)?,
+                other => other.map_err(|err| tracker_error(err.into()))?,
+            };
+            let mut batch = tracker_batch(outcome, query);
+            if query.kind == MediaKind::Movie {
+                movie_prefetch::resolve_attachments(
+                    &mut batch,
+                    &self.preferences,
+                    &self.account,
+                    cancel,
+                )
+                .await;
+            }
+            Ok(batch)
         })
+    }
+}
+
+fn tracker_error(error: tracker::PrepareError) -> ProviderError {
+    match error {
+        tracker::PrepareError::Login(message) => ProviderError::Login(message),
+        tracker::PrepareError::Failed(message) => ProviderError::Failed(message),
+    }
+}
+
+fn tracker_cache_key(key: &str) -> String {
+    format!("{key}:rt2")
+}
+
+fn rank_preferences(prefs: &crate::SourcePreferences) -> RankPreferences {
+    RankPreferences {
+        resolutions: prefs
+            .preferred_resolution
+            .as_deref()
+            .and_then(|s| s.trim_end_matches('p').parse().ok())
+            .into_iter()
+            .collect(),
+        languages: prefs.preferred_language.iter().cloned().collect(),
+    }
+}
+
+fn tracker_batch(outcome: rutracker::SearchOutcome, query: &MediaQuery) -> ProviderBatch {
+    let rows = outcome
+        .offers
+        .into_iter()
+        .filter_map(|o| {
+            let mut source = MediaSource::new(
+                "rutracker",
+                Locator::RuTracker(o.topic_id),
+                o.title,
+                query.kind,
+            )
+            .ok()?;
+            source.resolution = o
+                .quality
+                .as_deref()
+                .and_then(|q| q.trim_end_matches(['p', 'i']).parse().ok());
+            source.quality = o.quality;
+            source.size = o.size;
+            source.seeds = o.seeds;
+            source.fetched_at = now();
+            Some(source)
+        })
+        .collect();
+    ProviderBatch {
+        rows: matched(query, "rutracker", rows),
+        had_results: outcome.had_topics,
+        ..Default::default()
     }
 }
 
@@ -205,16 +338,18 @@ fn matched(query: &MediaQuery, provider: &str, offers: Vec<MediaSource>) -> Vec<
         .take(100)
         .filter(|o| o.provider == provider && o.kind == query.kind)
         .filter_map(|mut offer| {
-            offer.origins = vec![provider.to_owned()];
+            offer.origins.retain(|origin| {
+                provider == kadr_catalog::popcorn::ID
+                    && kadr_catalog::popcorn::upstream_label(origin).is_some()
+            });
+            // Normalization adds the authoritative provider ID.
             match (&offer.locator, provider) {
                 (Locator::RuTracker(_), "rutracker") if offer.license.is_none() => {
-                    if query.kind == MediaKind::Movie
-                        && !kadr_catalog::rutracker::matches_movie_release(&offer.title, query)
-                    {
-                        return None;
-                    }
-                    // Cached scores are not eligibility evidence.
-                    offer.match_score = if query.episode.is_some() { 65 } else { 80 };
+                    // Neither a cached score nor a seed count proves that the
+                    // release belongs to the current movie/episode.
+                    let evidence = rutracker::classify_release(&offer.title, query)?;
+                    offer.possible_match = evidence == rutracker::ReleaseMatch::Possible;
+                    offer.match_score = if offer.possible_match { 50 } else { 80 };
                     offer.normalize().ok()
                 }
                 (Locator::Http(_), "manual-http")
@@ -249,7 +384,7 @@ impl Worker {
         self.episode.clone()
     }
 
-    fn registry(&self, media: &Media, query: &MediaQuery) -> ProviderRegistry {
+    fn registry(&self, query: &MediaQuery) -> ProviderRegistry {
         let mut registry = ProviderRegistry::default();
         if self.settings.catalog_enabled && self.source_preferences.commons_enabled {
             registry.register(commons::Provider {
@@ -294,11 +429,27 @@ impl Worker {
             registry.register(RuTrackerProvider {
                 account: self.tracker.clone(),
                 vault: self.tracker_vault.clone(),
-                media: media.clone(),
-                episode: self.catalog_episode(),
+                preferences: rank_preferences(&self.source_preferences),
+                warm: self
+                    .discovery
+                    .movie_prefetch
+                    .as_ref()
+                    .filter(|p| p.matches(query))
+                    .map(|p| p.result()),
             });
         }
         if self.settings.catalog_enabled && self.settings.network.torrents_enabled {
+            if self.source_preferences.popcorn_enabled {
+                for index in [
+                    kadr_catalog::popcorn::Index::Popcorn,
+                    kadr_catalog::popcorn::Index::Yts,
+                ] {
+                    registry.register(popcorn::Provider {
+                        index,
+                        proxy: self.settings.catalog_proxy.clone(),
+                    });
+                }
+            }
             for (position, config) in self.source_preferences.torznab.iter().enumerate() {
                 if config.enabled {
                     registry.register(torznab::Provider::new(
@@ -337,10 +488,26 @@ impl Worker {
             return;
         }
         self.tracker_search.cancel();
-        let providers = self.registry(media, &query).available(&query);
-        self.discovery.clear();
+        if force {
+            self.discovery.cancel_movie_prefetch();
+        }
+        let providers = self.registry(&query).available(&query);
+        let popcorn_missing_id = self.source_preferences.popcorn_enabled
+            && self.settings.catalog_enabled
+            && self.settings.network.torrents_enabled
+            && query.external.imdb_id.is_none();
+        let imdb_notice = "В карточке нет IMDb ID для поиска по киноиндексам. Откройте карточку в каталоге Trakt или выберите другой источник.";
+        let mut previous_magnets = self
+            .discovery
+            .current
+            .take()
+            .filter(|state| !force && state.query == query)
+            .map(|state| state.tracker_magnets)
+            .unwrap_or_default();
         if providers.is_empty() {
-            self.source_error(Level::Warning, "Нет включённых поставщиков для этого фильма или эпизода. Проверьте настройки источников или откройте свой файл или ссылку.");
+            self.source_error(Level::Warning, if popcorn_missing_id { imdb_notice } else {
+                "Нет включённых поставщиков для этого фильма или эпизода. Проверьте настройки источников или откройте свой файл или ссылку."
+            });
             return;
         }
         // Keep an explicitly attached manual input available on subsequent
@@ -364,28 +531,64 @@ impl Worker {
             pending: 0,
             succeeded: 0,
             failures: BTreeMap::new(),
+            notices: popcorn_missing_id
+                .then(|| imdb_notice.to_owned())
+                .into_iter()
+                .collect(),
             batches: Vec::new(),
             handles: BTreeMap::new(),
             ranked: Vec::new(),
             names: BTreeMap::new(),
+            tracker_magnets: BTreeMap::new(),
         };
         let mut missing = Vec::new();
         for provider in providers {
             state
                 .names
                 .insert(provider.id().into(), provider.name().into());
-            if !force && !is_local(provider.id()) && provider.validate().is_ok() {
-                match self
-                    .storage
-                    .source_cache_get(&state.key, provider.id(), now())
-                {
+            let uses_prefetch = provider.id() == "rutracker"
+                && self
+                    .discovery
+                    .movie_prefetch
+                    .as_ref()
+                    .is_some_and(|p| p.matches(&query));
+            if !force
+                && !uses_prefetch
+                && allows_disk_cache(provider.id())
+                && provider.validate().is_ok()
+            {
+                match self.storage.source_cache_get(
+                    &state.cache_key(provider.id()),
+                    provider.id(),
+                    now(),
+                ) {
                     Ok(Some(data)) => {
                         if let Ok(offers) = serde_json::from_slice::<Vec<MediaSource>>(&data)
                             && offers.iter().all(|offer| provider.accepts(offer))
                         {
-                            state.batches.extend(matched(&query, provider.id(), offers));
-                            state.succeeded += 1;
-                            continue;
+                            let was_empty = offers.is_empty();
+                            let rows = matched(&query, provider.id(), offers);
+                            // If a non-empty batch no longer matches updated
+                            // card metadata, perform a fresh search.
+                            if provider.id() != "rutracker" || was_empty || !rows.is_empty() {
+                                if provider.id() == "rutracker" && was_empty {
+                                    state.record_tracker_empty(false);
+                                }
+                                if provider.id() == "rutracker" {
+                                    // The descriptor cache never contains private links. Reuse
+                                    // only links that this card already resolved for these IDs.
+                                    for row in &rows {
+                                        if let Locator::RuTracker(id) = row.locator
+                                            && let Some(magnet) = previous_magnets.remove(&id)
+                                        {
+                                            state.tracker_magnets.insert(id, magnet);
+                                        }
+                                    }
+                                }
+                                state.batches.extend(rows);
+                                state.succeeded += 1;
+                                continue;
+                            }
                         }
                     }
                     Err(_) => self.status(
@@ -424,6 +627,11 @@ impl Worker {
     }
 
     pub(super) fn provider_answer(&mut self, answer: ProviderResult) {
+        if answer.id == "rutracker" {
+            // The foreground receiver now owns the result, including any successful
+            // login after an unauthenticated prefetch. Never replay the old failure.
+            self.discovery.movie_prefetch = None;
+        }
         let Some(state) = &mut self.discovery.current else {
             return;
         };
@@ -431,18 +639,10 @@ impl Worker {
         let mut cache_failed = false;
         let mut login = None;
         match answer.result {
-            Ok(offers) => {
-                let rows = matched(&state.query, &answer.id, offers);
-                if !is_local(&answer.id)
-                    && let Ok(data) = serde_json::to_vec(&rows)
-                {
-                    cache_failed = self
-                        .storage
-                        .source_cache_put(&state.key, &answer.id, now(), rows.is_empty(), &data)
-                        .is_err();
-                }
-                state.succeeded += 1;
-                state.batches.extend(rows);
+            Ok(batch) => {
+                cache_failed = state
+                    .accept_live_batch(&answer.id, batch, &mut self.storage)
+                    .is_err();
             }
             Err(error) => {
                 state
@@ -506,8 +706,24 @@ impl Worker {
         self.reset_tracker_prompt();
         match source.locator.clone() {
             Locator::RuTracker(id) => {
-                self.select_tracker(tracker::SelectionRequest::new(id), cancel)
-                    .await
+                let request = self
+                    .discovery
+                    .current
+                    .as_ref()
+                    .and_then(|s| s.tracker_magnets.get(&id))
+                    .map_or_else(
+                        || tracker::SelectionRequest::new(id),
+                        |magnet| tracker::SelectionRequest::with_magnet(id, magnet.clone()),
+                    );
+                self.select_tracker(request, cancel).await
+            }
+            Locator::Magnet(_)
+                if matches!(
+                    source.provider.as_str(),
+                    kadr_catalog::popcorn::ID | kadr_catalog::popcorn::YTS_ID
+                ) =>
+            {
+                self.select_popcorn(&source, cancel).await
             }
             Locator::Http(uri) | Locator::Magnet(uri) => match ManualSource::parse_link(&uri) {
                 Ok(source) => self.select_source(source, None, None, cancel).await,

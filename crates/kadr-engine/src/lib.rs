@@ -121,6 +121,8 @@ pub enum Event {
         pending: usize,
         succeeded: usize,
         failures: Vec<String>,
+        /// Informational outcomes from successful providers, not failures.
+        notices: Vec<String>,
     },
     SourcePreferences(SourcePreferences),
     RuTrackerLogin {
@@ -153,7 +155,13 @@ pub enum Command {
     /// Fetch bounded provider shelves in response to explicit user action.
     Browse,
     Search(String),
+    /// Supply a local Trakt card to command-boundary tests without API credentials.
+    #[cfg(test)]
+    OpenFixtureMovie(Box<kadr_core::catalog::Media>),
     OpenMedia(String),
+    /// Warm only RuTracker on an explicitly opened movie. Never starts playback.
+    PrefetchMovieSources(String),
+    CancelMoviePrefetch,
     FindSources,
     RetrySources,
     SelectEpisode(u16, u16),
@@ -199,6 +207,7 @@ pub struct Engine {
     shutdown: CancellationToken,
     browse_stop: CancellationToken,
     catalog_stop: CancellationToken,
+    movie_prefetch_stop: CancellationToken,
     source_stop: CancellationToken,
     playback_stop: CancellationToken,
     save_stop: CancellationToken,
@@ -271,11 +280,13 @@ impl Engine {
                     }
                 }
             })?;
+        let catalog_stop = shutdown.child_token();
         Ok((
             Self {
                 commands,
                 browse_stop: shutdown.child_token(),
-                catalog_stop: shutdown.child_token(),
+                movie_prefetch_stop: catalog_stop.child_token(),
+                catalog_stop,
                 source_stop: shutdown.child_token(),
                 playback_stop: shutdown.child_token(),
                 save_stop: shutdown.child_token(),
@@ -294,6 +305,19 @@ impl Engine {
         // Cancellation bypasses the queue: a pending metadata/IPC operation
         // cannot prevent Stop, a newer search, or application shutdown.
         let cancel = match &command {
+            Command::PrefetchMovieSources(_) => {
+                if self.catalog_stop.is_cancelled() {
+                    self.catalog_stop = self.shutdown.child_token();
+                }
+                if self.movie_prefetch_stop.is_cancelled() {
+                    self.movie_prefetch_stop = self.catalog_stop.child_token();
+                }
+                self.movie_prefetch_stop.clone()
+            }
+            Command::CancelMoviePrefetch => {
+                self.movie_prefetch_stop.cancel();
+                self.shutdown.child_token()
+            }
             Command::Browse => {
                 self.browse_stop.cancel();
                 self.browse_stop = self.shutdown.child_token();
