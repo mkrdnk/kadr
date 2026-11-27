@@ -7,6 +7,7 @@
 
 mod browse;
 pub mod commons;
+pub mod popcorn;
 pub mod rutracker;
 pub mod torznab;
 mod trakt;

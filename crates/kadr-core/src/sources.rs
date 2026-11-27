@@ -248,6 +248,10 @@ pub struct MediaSource {
     pub title: String,
     /// Original release label for display; never canonical title evidence.
     pub release_title: Option<String>,
+    /// In-memory episode mapping from an index. Never a filesystem path to open:
+    /// selection must match it to a unique video in validated torrent metainfo.
+    #[serde(skip)]
+    pub episode_file_hint: Option<String>,
     pub kind: MediaKind,
     pub year: Option<u16>,
     pub episode: Option<EpisodeNumber>,
@@ -267,6 +271,10 @@ pub struct MediaSource {
     pub fetched_at: i64,
     /// Computed by `match_source`; prefiltered adapters may assign their accuracy.
     pub match_score: u8,
+    /// Plausible enough to show for manual selection, never for automatic playback.
+    /// Recomputed from current release evidence on each discovery/cache read.
+    #[serde(skip)]
+    pub possible_match: bool,
     /// v1 hex/base32 or v2 SHA-256 hex input; normalized to lowercase hex.
     /// A hybrid magnet's additional hash is retained in its locator for dedup.
     pub info_hash: Option<String>,
@@ -296,6 +304,7 @@ impl MediaSource {
             locator,
             title: title.into(),
             release_title: None,
+            episode_file_hint: None,
             kind,
             year: None,
             episode: None,
@@ -310,6 +319,7 @@ impl MediaSource {
             peers: None,
             fetched_at: 0,
             match_score: 0,
+            possible_match: false,
             info_hash: None,
         }
         .normalize()
@@ -319,6 +329,11 @@ impl MediaSource {
         self.locator = self.locator.validate()?;
         if !valid_text(&self.provider, 100)
             || !valid_text(&self.title, 2_000)
+            || self.episode_file_hint.as_ref().is_some_and(|hint| {
+                self.episode.is_none()
+                    || !valid_text(hint, 1024)
+                    || crate::torrent::TorrentRelativePath::new(hint.as_str()).is_err()
+            })
             || self.origins.iter().any(|origin| !valid_text(origin, 4_096))
             || self
                 .license
@@ -406,8 +421,8 @@ impl MediaSource {
         Ok(self)
     }
 
-    /// Automatic film torrents use seed-first ordering. Explicit user bindings,
-    /// direct HTTP resources and episodic offers retain their existing policy.
+    /// Discovered, rather than explicitly attached. This alone is not sufficient
+    /// for automatic playback: a possible match is always manual-only.
     pub fn is_discovered_movie_torrent(&self) -> bool {
         self.kind == MediaKind::Movie
             && !matches!(self.locator, Locator::Http(_))
@@ -483,7 +498,12 @@ pub fn movie_release_has_pack_suffix(release: &str) -> bool {
     let Some(start) = start else {
         return false;
     };
-    let tokens: Vec<_> = release[start..]
+    contains_movie_pack_label(&release[start..])
+}
+
+/// Explicit pack markers in metadata already separated from the movie title.
+pub fn contains_movie_pack_label(metadata: &str) -> bool {
+    let tokens: Vec<_> = metadata
         .split(|c: char| !c.is_alphanumeric())
         .filter(|token| !token.is_empty())
         .map(str::to_lowercase)
@@ -605,7 +625,8 @@ pub fn select_sources(
 /// stay distinct. All origins survive; metadata comes from one deterministic
 /// representative, not a fabricated mixture of contradictory metadata. Dedup is
 /// intentionally batch-local: persist provider batches, not merged identity aliases.
-/// Discovered movie torrents use descending known seeds (positive, zero, unknown)
+/// Confirmed sources precede possible matches, regardless of seed count.
+/// Discovered movie torrents within each group use descending known seeds (positive, zero, unknown)
 /// before accuracy/quality preferences, both for dedup and their display order.
 /// Discovered film torrents precede other rows. Direct HTTP/manual and episodic
 /// offers retain their legacy comparison within the remaining rows.
@@ -620,9 +641,13 @@ pub fn rank_and_dedup(
     let representative_order = |left: &MediaSource, right: &MediaSource| {
         // Partitioning keeps this a transitive mixed comparator. An automatic
         // provider's known availability must survive a duplicate manual binding.
-        right
-            .is_discovered_movie_torrent()
-            .cmp(&left.is_discovered_movie_torrent())
+        left.possible_match
+            .cmp(&right.possible_match)
+            .then_with(|| {
+                right
+                    .is_discovered_movie_torrent()
+                    .cmp(&left.is_discovered_movie_torrent())
+            })
             .then_with(|| {
                 if left.is_discovered_movie_torrent() {
                     right.seeds.cmp(&left.seeds)
@@ -800,6 +825,7 @@ fn stable_key(source: &MediaSource) -> impl Ord + '_ {
         (
             &source.provider_item_id,
             &source.release_title,
+            &source.episode_file_hint,
             &source.video_codec,
             &source.audio_codec,
         ),
