@@ -340,7 +340,7 @@ pub enum RateLimit {
     Bps(u64),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PreferencesDraft {
     pub cache_limit_bytes: u64,
     pub download_limit: RateLimit,
@@ -348,7 +348,26 @@ pub struct PreferencesDraft {
     pub peer_limit: u32,
     pub torrents_enabled: bool,
     pub catalog_enabled: bool,
+    pub catalog_proxy: Option<String>,
     pub cache_directory: String,
+}
+
+impl std::fmt::Debug for PreferencesDraft {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreferencesDraft")
+            .field("cache_limit_bytes", &self.cache_limit_bytes)
+            .field("download_limit", &self.download_limit)
+            .field("upload_limit", &self.upload_limit)
+            .field("peer_limit", &self.peer_limit)
+            .field("torrents_enabled", &self.torrents_enabled)
+            .field("catalog_enabled", &self.catalog_enabled)
+            .field(
+                "catalog_proxy",
+                &self.catalog_proxy.as_ref().map(|_| "<redacted>"),
+            )
+            .field("cache_directory", &self.cache_directory)
+            .finish()
+    }
 }
 
 impl Default for PreferencesDraft {
@@ -360,6 +379,7 @@ impl Default for PreferencesDraft {
             peer_limit: 50,
             torrents_enabled: true,
             catalog_enabled: true,
+            catalog_proxy: None,
             cache_directory: String::new(),
         }
     }

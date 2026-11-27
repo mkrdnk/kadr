@@ -51,6 +51,7 @@ pub(super) fn preferences_draft(settings: &Settings) -> PreferencesDraft {
         peer_limit: u32::from(settings.network.max_connections),
         torrents_enabled: settings.network.torrents_enabled,
         catalog_enabled: settings.catalog_enabled,
+        catalog_proxy: settings.catalog_proxy.clone(),
         cache_directory: settings
             .cache_directory
             .as_ref()
@@ -73,6 +74,12 @@ pub(super) fn settings_from_draft(
     settings.network.max_connections = peers;
     settings.network.torrents_enabled = draft.torrents_enabled;
     settings.catalog_enabled = draft.catalog_enabled;
+    settings.catalog_proxy = draft
+        .catalog_proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
     // Preserve a non-UTF8 native picker path across an unchanged UI round-trip.
     let current_path = settings
         .cache_directory
@@ -273,6 +280,42 @@ mod tests {
         draft.catalog_enabled = !draft.catalog_enabled;
         let changed = settings_from_draft(settings, &draft).unwrap();
         assert_eq!(changed.default_player, PlayerPreference::Vlc);
+    }
+
+    #[test]
+    fn proxy_draft_round_trips_trims_and_clears_without_parsing() {
+        let settings = Settings {
+            catalog_proxy: Some("socks5h://127.0.0.1:1080".into()),
+            ..Settings::default()
+        };
+        let mut draft = preferences_draft(&settings);
+        assert_eq!(draft.catalog_proxy, settings.catalog_proxy);
+        assert_eq!(
+            settings_from_draft(settings.clone(), &draft).unwrap(),
+            settings
+        );
+        draft.catalog_proxy = Some("  https://proxy.example:8443 \n".into());
+        assert_eq!(
+            settings_from_draft(settings.clone(), &draft)
+                .unwrap()
+                .catalog_proxy
+                .as_deref(),
+            Some("https://proxy.example:8443")
+        );
+        for value in [None, Some(" \t ".into())] {
+            draft.catalog_proxy = value;
+            assert_eq!(
+                settings_from_draft(settings.clone(), &draft)
+                    .unwrap()
+                    .catalog_proxy,
+                None
+            );
+        }
+        draft.catalog_proxy = Some("not a proxy".into());
+        assert_eq!(
+            settings_from_draft(settings, &draft).unwrap().catalog_proxy,
+            draft.catalog_proxy
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! A narrowly scoped GPUI image client, not a general-purpose URL fetcher.
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
@@ -16,7 +16,14 @@ mod cache;
 #[derive(Default)]
 struct PolicyState {
     enabled: AtomicBool,
+    route: Mutex<PosterRoute>,
     changed: Notify,
+}
+
+#[derive(Default)]
+struct PosterRoute {
+    proxy: Option<String>,
+    client: Option<Result<reqwest::Client, ()>>,
 }
 
 /// Desktop-owned policy shared by the controller and GPUI image client.
@@ -37,16 +44,30 @@ impl PosterPolicy {
             Event::Ready { settings, .. }
             | Event::PreferencesSaved(settings)
             | Event::PreferencesRejected { settings, .. } => {
+                let mut route = self.0.route.lock().unwrap();
+                if route.proxy != settings.catalog_proxy {
+                    route.proxy = settings.catalog_proxy.clone();
+                    route.client = None;
+                    self.0.changed.notify_waiters();
+                }
                 self.set_enabled(settings.catalog_enabled);
             }
             _ => {}
         }
     }
+
+    fn client(&self) -> gpui::http_client::Result<reqwest::Client> {
+        let mut route = self.0.route.lock().unwrap();
+        let PosterRoute { proxy, client } = &mut *route;
+        client
+            .get_or_insert_with(|| poster_client(proxy.as_deref()).map_err(|_| ()))
+            .clone()
+            .map_err(|()| anyhow!("poster transport unavailable"))
+    }
 }
 
 pub struct Posters {
     runtime: Arc<tokio::runtime::Runtime>,
-    client: reqwest::Client,
     policy: PosterPolicy,
     cache: Arc<cache::Cache>,
 }
@@ -67,27 +88,33 @@ impl Posters {
                 .enable_all()
                 .build()?,
         );
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(15))
-            .connect_timeout(Duration::from_secs(5))
-            .user_agent("kadr/0.1 (local desktop; public catalogue posters)")
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() >= 5 || !allowed(attempt.url()) {
-                    attempt.stop()
-                } else {
-                    attempt.follow()
-                }
-            }))
-            .build()
-            .map_err(|_| std::io::Error::other("poster client initialization failed"))?;
         Ok(Self {
             runtime,
-            client,
             policy,
             cache,
         })
     }
+}
+
+fn poster_client(proxy: Option<&str>) -> Result<reqwest::Client, reqwest::Error> {
+    // Ignore ambient proxy settings in both modes; an explicit route must
+    // never fall back to a direct client if construction or a request fails.
+    let mut builder = reqwest::Client::builder().no_proxy();
+    if let Some(proxy) = proxy {
+        builder = builder.proxy(reqwest::Proxy::all(proxy)?);
+    }
+    builder
+        .timeout(Duration::from_secs(15))
+        .connect_timeout(Duration::from_secs(5))
+        .user_agent("kadr/0.1 (local desktop; public catalogue posters)")
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 || !allowed(attempt.url()) {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        }))
+        .build()
 }
 
 impl HttpClient for Posters {
@@ -105,17 +132,16 @@ impl HttpClient for Posters {
         &self,
         request: Request<AsyncBody>,
     ) -> BoxFuture<'static, gpui::http_client::Result<Response<AsyncBody>>> {
-        let client = self.client.clone();
         let policy = self.policy.clone();
         let cache = self.cache.clone();
         let url = request.uri().to_string();
         let get = request.method() == gpui::http_client::Method::GET;
         let task = self.runtime.spawn(async move {
-            let disabled = policy.0.changed.notified();
-            tokio::pin!(disabled);
+            let changed = policy.0.changed.notified();
+            tokio::pin!(changed);
             // Register before checking the shared flag: notify_waiters does
             // not retain a permit for a future that has not been registered.
-            disabled.as_mut().enable();
+            changed.as_mut().enable();
             if !get || !policy.0.enabled.load(Ordering::Acquire) {
                 return Err(anyhow!("poster requests are disabled"));
             }
@@ -125,7 +151,10 @@ impl HttpClient for Posters {
             }
             let fetch = async {
                 let image = cached_image(cache, url.as_str().to_owned(), async {
-                    let reply = client
+                    // Resolve the route when the request starts, not when
+                    // GPUI queues it. A settings change drops the old client.
+                    let reply = policy
+                        .client()?
                         .get(url)
                         .send()
                         .await
@@ -164,7 +193,7 @@ impl HttpClient for Posters {
             };
             tokio::select! {
                 biased;
-                () = &mut disabled => Err(anyhow!("poster request cancelled")),
+                () = &mut changed => Err(anyhow!("poster request cancelled")),
                 result = fetch => result,
             }
         });
@@ -261,6 +290,165 @@ mod tests {
         });
     }
 
+    #[test]
+    fn route_changes_discard_clients_cancel_requests_and_fail_closed() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let policy = PosterPolicy::default();
+            assert!(policy.0.route.lock().unwrap().proxy.is_none());
+            assert!(policy.client().is_ok());
+            let changed = policy.0.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let settings = Settings {
+                catalog_proxy: Some("http://[".into()),
+                ..Settings::default()
+            };
+            policy.apply_event(&Event::PreferencesSaved(settings.clone()));
+            tokio::time::timeout(Duration::from_secs(1), changed)
+                .await
+                .expect("a route change must cancel registered requests");
+            assert!(policy.0.route.lock().unwrap().client.is_none());
+            assert_eq!(
+                policy.client().err().unwrap().to_string(),
+                "poster transport unavailable"
+            );
+            assert!(
+                policy
+                    .0
+                    .route
+                    .lock()
+                    .unwrap()
+                    .client
+                    .as_ref()
+                    .unwrap()
+                    .is_err()
+            );
+
+            // Unchanged confirmed routes retain their client, even on rejection.
+            policy.apply_event(&Event::PreferencesRejected {
+                settings,
+                message: "Retain confirmed settings".into(),
+            });
+            assert!(
+                policy
+                    .0
+                    .route
+                    .lock()
+                    .unwrap()
+                    .client
+                    .as_ref()
+                    .unwrap()
+                    .is_err()
+            );
+            policy.apply_event(&Event::PreferencesSaved(Settings::default()));
+            assert!(policy.0.route.lock().unwrap().client.is_none());
+            assert!(policy.0.route.lock().unwrap().proxy.is_none());
+            assert!(policy.client().is_ok());
+        });
+    }
+
+    #[test]
+    fn poster_transport_supports_all_approved_proxy_schemes() {
+        for proxy in [
+            "http://127.0.0.1:8080",
+            "https://127.0.0.1:8443",
+            "socks5://127.0.0.1:1080",
+            "socks5h://127.0.0.1:1080",
+        ] {
+            assert!(poster_client(Some(proxy)).is_ok());
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn poster_requests_use_the_latest_confirmed_proxy_without_direct_fallback() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        fn proxy() -> (String, std::thread::JoinHandle<String>) {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = format!("http://{}", listener.local_addr().unwrap());
+            listener.set_nonblocking(true).unwrap();
+            let server = std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(std::time::Instant::now() < deadline, "proxy was not used");
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("proxy accept failed: {error}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                    assert!(request.len() < 4096);
+                }
+                stream
+                    .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+                    .unwrap();
+                String::from_utf8(request).unwrap()
+            });
+            (address, server)
+        }
+
+        let temp = cache::TestDirectory::new();
+        let policy = PosterPolicy::default();
+        let client =
+            Posters::with_cache_directory(policy.clone(), &temp.0.join("catalog-images-v1"))
+                .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let request = || {
+            Request::builder()
+                .uri("https://media.trakt.tv/movies/1398468/medium/poster.webp")
+                .body(AsyncBody::from(Vec::<u8>::new()))
+                .unwrap()
+        };
+        for initial in [true, false] {
+            let (proxy, server) = proxy();
+            let settings = Settings {
+                catalog_proxy: Some(proxy),
+                ..Settings::default()
+            };
+            policy.apply_event(&if initial {
+                Event::Ready {
+                    settings,
+                    cache: None,
+                }
+            } else {
+                Event::PreferencesSaved(settings)
+            });
+            let error = runtime.block_on(client.send(request())).err().unwrap();
+            assert_eq!(error.to_string(), "poster unavailable");
+            assert!(
+                server
+                    .join()
+                    .unwrap()
+                    .starts_with("CONNECT media.trakt.tv:443 ")
+            );
+        }
+        policy.apply_event(&Event::PreferencesSaved(Settings {
+            catalog_proxy: Some("http://[".into()),
+            ..Settings::default()
+        }));
+        let error = runtime.block_on(client.send(request())).err().unwrap();
+        assert_eq!(error.to_string(), "poster transport unavailable");
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn cached_pipeline_persists_before_return_and_does_not_fetch_a_hit() {
@@ -332,17 +520,11 @@ mod tests {
     fn http_client_gates_cached_images_on_settings_method_and_origin() {
         let temp = cache::TestDirectory::new();
         let policy = PosterPolicy::default();
-        let mut client =
+        let client =
             Posters::with_cache_directory(policy.clone(), &temp.0.join("catalog-images-v1"))
                 .unwrap();
         // A broken cache regression must never contact the real CDN in tests.
-        client.client = reqwest::Client::builder()
-            .no_proxy()
-            .resolve("media.trakt.tv", ([127, 0, 0, 1], 9).into())
-            .resolve("image.tmdb.org", ([127, 0, 0, 1], 9).into())
-            .timeout(Duration::from_millis(100))
-            .build()
-            .unwrap();
+        policy.0.route.lock().unwrap().proxy = Some("http://[".into());
         let url = "https://media.trakt.tv/movies/1398468/medium/poster.webp";
         let old_origin = "https://image.tmdb.org/t/p/w500/item.jpg";
         for key in [url, old_origin] {

@@ -107,14 +107,28 @@ impl From<api::Error> for Error {
 pub struct Client {
     anonymous: api::Client,
     authenticated: Option<api::AuthenticatedClient>,
+    session_builder: api::ClientBuilder,
 }
 
 impl Client {
     /// Construct without network activity. Only `https://rutracker.org:443` is allowed.
     pub fn new() -> Result<Self, Error> {
+        Self::new_with_proxy(None)
+    }
+
+    /// Use the same explicit, unauthenticated proxy for anonymous requests,
+    /// fresh login sessions and authenticated downloads, with no direct fallback.
+    /// `None` retains the explicitly direct RuTracker transport.
+    pub fn new_with_proxy(proxy: Option<&str>) -> Result<Self, Error> {
+        let mut session_builder = api::Client::builder();
+        if let Some(endpoint) = proxy {
+            session_builder =
+                session_builder.proxy(crate::explicit_proxy(endpoint).map_err(|_| Error::Network)?);
+        }
         Ok(Self {
-            anonymous: api::Client::builder().build().map_err(Error::from)?,
+            anonymous: session_builder.clone().build().map_err(Error::from)?,
             authenticated: None,
+            session_builder,
         })
     }
 
@@ -212,7 +226,7 @@ impl Client {
         {
             return Err(Error::Authorization);
         }
-        let candidate = api::Client::builder().build().map_err(Error::from)?;
+        let candidate = self.session_builder.clone().build().map_err(Error::from)?;
         let authenticated = request(cancel, candidate.login(username, password)).await?;
         ready(cancel)?;
         self.authenticated = Some(authenticated);

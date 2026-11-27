@@ -49,8 +49,12 @@ fn version_three_migrates_only_recorded_media_opens_to_item_history() {
     store.save_settings(&settings).unwrap();
     drop(store);
     let raw = Connection::open(&path).unwrap();
-    raw.execute_batch("DROP TABLE target_history; PRAGMA user_version = 3;")
-        .unwrap();
+    raw.execute_batch(
+        "DROP TABLE target_history;
+         ALTER TABLE settings DROP COLUMN catalog_proxy;
+         PRAGMA user_version = 3;",
+    )
+    .unwrap();
     drop(raw);
     let store = Storage::open(&path).unwrap();
     assert_eq!(store.load_settings().unwrap(), settings);
@@ -81,7 +85,9 @@ fn failed_v3_upgrade_preserves_all_prior_rows_version_and_database_bytes() {
     drop(store);
     let raw = Connection::open(&path).unwrap();
     raw.execute_batch(
-        "DROP TABLE target_history; PRAGMA user_version = 3;
+        "DROP TABLE target_history;
+         ALTER TABLE settings DROP COLUMN catalog_proxy;
+         PRAGMA user_version = 3;
          CREATE TABLE target_history(sentinel TEXT);
          INSERT INTO target_history VALUES ('preserve');",
     )

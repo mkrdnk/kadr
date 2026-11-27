@@ -9,5 +9,5 @@ futures-util = "=0.3.34"
 gpui.workspace = true
 kadr-engine = { path = "../kadr-engine" }
 kadr-ui = { path = "../kadr-ui" }
-reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "stream"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "stream", "socks"] }
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "sync", "time"] }

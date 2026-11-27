@@ -10,6 +10,7 @@ pub(super) struct Inputs {
     download: Entity<TextInput>,
     upload: Entity<TextInput>,
     peers: Entity<TextInput>,
+    catalog_proxy: Entity<TextInput>,
     pub season: Entity<TextInput>,
     pub episode: Entity<TextInput>,
     pub rutracker_username: Entity<TextInput>,
@@ -22,6 +23,11 @@ fn rate_text(rate: RateLimit) -> String {
         RateLimit::Unlimited => "unlimited".into(),
         RateLimit::Bps(value) => value.to_string(),
     }
+}
+
+fn proxy_value(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 fn parse_rate(value: &str) -> Result<RateLimit, &'static str> {
@@ -61,6 +67,13 @@ impl Inputs {
             }),
             peers: cx
                 .new(|cx| TextInput::new(preferences.peer_limit.to_string(), "Максимум пиров", cx)),
+            catalog_proxy: cx.new(|cx| {
+                TextInput::new(
+                    preferences.catalog_proxy.clone().unwrap_or_default(),
+                    "Например, socks5h://127.0.0.1:1080",
+                    cx,
+                )
+            }),
             season: cx.new(|cx| TextInput::new("", "Сезон", cx)),
             episode: cx.new(|cx| TextInput::new("", "Эпизод", cx)),
             rutracker_username: cx.new(|cx| TextInput::new("", "Имя пользователя RuTracker", cx)),
@@ -75,6 +88,10 @@ impl Inputs {
             (&self.download, rate_text(value.download_limit)),
             (&self.upload, rate_text(value.upload_limit)),
             (&self.peers, value.peer_limit.to_string()),
+            (
+                &self.catalog_proxy,
+                value.catalog_proxy.clone().unwrap_or_default(),
+            ),
         ] {
             input.update(cx, |input, cx| input.set_value(value, cx));
         }
@@ -113,6 +130,7 @@ impl Inputs {
             upload_limit: parse_rate(self.upload.read(cx).value())?,
             torrents_enabled: current.torrents_enabled,
             catalog_enabled: current.catalog_enabled,
+            catalog_proxy: proxy_value(self.catalog_proxy.read(cx).value()),
         })
     }
 }
@@ -934,6 +952,9 @@ impl KadrView {
                     .child(field("Лимит отдачи, байт/с", inputs.upload.clone()).flex_1().min_w(px(180.))))
                 .child(body("unlimited — без лимита; paused — пауза; числовой лимит BitTorrent — от 16 384 байт/с."))
                 .child(field("Максимум пиров", inputs.peers.clone()))
+                .child(field("Прокси", inputs.catalog_proxy.clone()))
+                .child(body("http://, https://, socks5:// или socks5h:// — без имени пользователя и пароля. Пустое поле — прямое соединение."))
+                .child(body("Только RuTracker, Trakt и постеры. Не применяется к BitTorrent, внешним плеерам, вручную открытым HTTP-ссылкам и локальному серверу воспроизведения. При недоступности прокси автоматического перехода на прямое соединение нет."))
                 .child(div().flex().flex_wrap().items_center().gap_4().pt_4().border_t_1().border_color(rgb(BORDER))
                     .child(column().gap_1().flex_1().min_w(px(180.))
                         .child(div().text_sm().child("Обмен BitTorrent"))
@@ -1045,6 +1066,34 @@ fn time(seconds: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_field_normalizes_only_whitespace_and_leaves_validation_to_storage() {
+        assert_eq!(PreferencesDraft::default().catalog_proxy, None);
+        for value in ["", " \n\t "] {
+            assert_eq!(proxy_value(value), None);
+        }
+        for value in [
+            "http://proxy.example:8080",
+            "https://proxy.example:8443",
+            "socks5://127.0.0.1:1080",
+            "socks5h://127.0.0.1:1080",
+            "not a proxy",
+        ] {
+            assert_eq!(proxy_value(&format!("  {value}\t")), Some(value.into()));
+        }
+    }
+
+    #[test]
+    fn preferences_debug_redacts_the_proxy_address() {
+        let draft = PreferencesDraft {
+            catalog_proxy: Some("socks5h://private-endpoint.example:1080".into()),
+            ..PreferencesDraft::default()
+        };
+        let debug = format!("{draft:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("private-endpoint"));
+    }
 
     #[test]
     fn login_requires_visible_requested_prompt_and_cannot_submit_twice() {

@@ -179,6 +179,59 @@ fn rejected_catalog_disable_still_finishes_cancelled_browse_presentation() {
 }
 
 #[test]
+fn catalog_proxy_can_be_saved_restored_and_cleared_without_network_access() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut engine, mut events) =
+        Engine::start_with_directories(directories(root.path())).unwrap();
+    wait(&mut events, |event| matches!(event, Event::Ready { .. }));
+    let configured = Settings {
+        catalog_proxy: Some("socks5h://127.0.0.1:1080".into()),
+        ..Settings::default()
+    };
+    assert!(engine.dispatch(Command::UpdateSettings(configured.clone())));
+    wait(
+        &mut events,
+        |event| matches!(event, Event::PreferencesSaved(settings) if settings == &configured),
+    );
+    let invalid = Settings {
+        catalog_proxy: Some("http://user:password@proxy.example:8080".into()),
+        ..configured.clone()
+    };
+    assert!(engine.dispatch(Command::UpdateSettings(invalid)));
+    let rejected = wait(&mut events, |event| {
+        matches!(event, Event::PreferencesRejected { .. })
+    });
+    let Event::PreferencesRejected { settings, message } = rejected else {
+        unreachable!();
+    };
+    assert_eq!(settings, configured);
+    assert!(message.contains("прокси"));
+    assert!(!message.contains("proxy.example") && !message.contains("password"));
+    assert!(engine.join());
+
+    let (mut engine, mut events) =
+        Engine::start_with_directories(directories(root.path())).unwrap();
+    wait(
+        &mut events,
+        |event| matches!(event, Event::Ready { settings, .. } if settings == &configured),
+    );
+    assert!(engine.dispatch(Command::UpdateSettings(Settings::default())));
+    wait(
+        &mut events,
+        |event| matches!(event, Event::PreferencesSaved(settings) if settings == &Settings::default()),
+    );
+    assert!(engine.join());
+
+    let (mut engine, mut events) =
+        Engine::start_with_directories(directories(root.path())).unwrap();
+    wait(
+        &mut events,
+        |event| matches!(event, Event::Ready { settings, .. } if settings == &Settings::default()),
+    );
+    assert!(engine.join());
+}
+
+#[test]
 fn rejects_invalid_directories_before_starting_worker() {
     let root = tempfile::tempdir().unwrap();
     for invalid in [

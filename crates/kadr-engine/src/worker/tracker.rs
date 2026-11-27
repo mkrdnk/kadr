@@ -41,10 +41,20 @@ impl Vault {
     }
 }
 
-#[derive(Clone, Default)]
-pub(super) struct Account(Arc<AsyncMutex<Option<rutracker::Client>>>);
+#[derive(Clone)]
+pub(super) struct Account {
+    session: Arc<AsyncMutex<Option<rutracker::Client>>>,
+    proxy: Option<String>,
+}
 
 impl Account {
+    pub(super) fn new(proxy: Option<String>) -> Self {
+        Self {
+            session: Arc::new(AsyncMutex::new(None)),
+            proxy,
+        }
+    }
+
     async fn client(
         &self,
         cancel: &CancellationToken,
@@ -52,10 +62,10 @@ impl Account {
         let mut session = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(rutracker::Error::Cancelled),
-            session = self.0.lock() => session,
+            session = self.session.lock() => session,
         };
         if session.is_none() {
-            *session = Some(rutracker::Client::new()?);
+            *session = Some(rutracker::Client::new_with_proxy(self.proxy.as_deref())?);
         }
         Ok(MutexGuard::map(session, |session| {
             session.as_mut().expect("client initialized")
@@ -194,6 +204,12 @@ impl From<rutracker::Error> for PrepareError {
             rutracker::Error::AuthenticationRequired => Self::Login(LOGIN_REQUIRED),
             rutracker::Error::Authorization => Self::Login(
                 "RuTracker не принял вход. Проверьте данные. Если сайт требует CAPTCHA, используйте ручное открытие .torrent.",
+            ),
+            rutracker::Error::Timeout => Self::failed(
+                "RuTracker не ответил вовремя. Проверьте доступ к сайту и адрес прокси в настройках сети.",
+            ),
+            rutracker::Error::Network => Self::failed(
+                "Не удалось подключиться к RuTracker. Проверьте доступ к сайту и настройки прокси.",
             ),
             error => Self::Failed(format!("RuTracker: {error}")),
         }
@@ -419,7 +435,7 @@ impl Worker {
     pub(super) async fn forget_tracker(&mut self, cancel: CancellationToken) {
         self.reset_tracker_prompt();
         self.tracker_search.cancel();
-        self.tracker = Account::default();
+        self.tracker = Account::new(self.settings.catalog_proxy.clone());
         let result = self.tracker_vault.call(&cancel, vault::forget).await;
         if cancel.is_cancelled() {
             return;

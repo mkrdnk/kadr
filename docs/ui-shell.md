@@ -84,7 +84,7 @@ TransferView {
 PreferencesDraft {
     cache_limit_bytes: u64, download_limit: RateLimit, upload_limit: RateLimit,
     peer_limit: u32, torrents_enabled: bool, catalog_enabled: bool,
-    cache_directory: String,
+    catalog_proxy: Option<String>, cache_directory: String,
 }
 ```
 

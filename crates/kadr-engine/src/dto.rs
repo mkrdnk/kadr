@@ -91,6 +91,8 @@ pub struct Settings {
     pub cache_limit_bytes: u64,
     /// Catalog requests are allowed only in response to user action.
     pub catalog_enabled: bool,
+    /// Explicit proxy endpoint for catalog requests and artwork, not playback.
+    pub catalog_proxy: Option<String>,
     /// Persisting this does not move files. None uses the default cache directory.
     pub cache_directory: Option<PathBuf>,
 }
@@ -114,6 +116,7 @@ impl Settings {
             network: NetworkLimits::from_storage(value.network),
             cache_limit_bytes: value.cache_limit_bytes,
             catalog_enabled: value.catalog_enabled,
+            catalog_proxy: value.catalog_proxy,
             cache_directory: value.cache_directory,
         }
     }
@@ -124,6 +127,7 @@ impl Settings {
             network: self.network.into_storage(),
             cache_limit_bytes: self.cache_limit_bytes,
             catalog_enabled: self.catalog_enabled,
+            catalog_proxy: self.catalog_proxy,
             cache_directory: self.cache_directory,
         }
     }
@@ -290,6 +294,7 @@ mod tests {
         );
         assert_eq!(settings.cache_limit_bytes, 10 * 1024 * 1024 * 1024);
         assert!(settings.catalog_enabled);
+        assert_eq!(settings.catalog_proxy, None);
         assert_eq!(settings.cache_directory, None);
         assert_eq!(settings.into_storage(), kadr_storage::Settings::default());
     }
@@ -321,6 +326,7 @@ mod tests {
                                 },
                                 cache_limit_bytes: 123_456_789,
                                 catalog_enabled: !enabled,
+                                catalog_proxy: enabled.then(|| "socks5h://127.0.0.1:1080".into()),
                                 cache_directory: directory,
                             };
                             let stored = settings.clone().into_storage();
@@ -366,9 +372,10 @@ mod tests {
     }
 
     #[test]
-    fn settings_debug_redacts_private_directory() {
+    fn settings_debug_redacts_private_values() {
         let settings = Settings {
             cache_directory: Some("/private/secret-cache".into()),
+            catalog_proxy: Some("http://proxy.example:1234".into()),
             ..Settings::default()
         };
         assert_eq!(format!("{settings:?}"), "Settings([redacted])");

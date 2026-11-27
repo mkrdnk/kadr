@@ -155,6 +155,8 @@ The public connection is opaque; callers cannot bypass validation via it.
    Neither measured progress nor a source link invents an episode open timestamp.
 5. RuTracker source descriptors; copies all existing source rows and keeps
    playback targets, selections and history keys intact.
+6. Optional catalog proxy endpoint without credentials. Existing settings keep
+   their values; no proxy is configured by the migration.
 
 Opening uses `BEGIN IMMEDIATE`, checks the version, applies the entire missing
 migration chain and updates `user_version` in **one transaction**. Any failure

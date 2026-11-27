@@ -61,6 +61,8 @@ pub struct Settings {
     pub cache_limit_bytes: u64,
     /// Catalog requests are allowed only in response to user action.
     pub catalog_enabled: bool,
+    /// Optional unauthenticated proxy for catalog providers and images.
+    pub catalog_proxy: Option<String>,
     /// None uses AppPaths::cache_dir(). Persisting this does not move files.
     pub cache_directory: Option<PathBuf>,
 }
@@ -83,6 +85,7 @@ impl Default for Settings {
             },
             cache_limit_bytes: 10 * 1024 * 1024 * 1024,
             catalog_enabled: true,
+            catalog_proxy: None,
             cache_directory: None,
         }
     }
@@ -99,6 +102,11 @@ impl Settings {
         }
         if !(1024 * 1024..=i64::MAX as u64).contains(&self.cache_limit_bytes) {
             return Err(Error::InvalidInput("cache limit"));
+        }
+        if let Some(endpoint) = &self.catalog_proxy
+            && !kadr_core::proxy::is_valid_endpoint(endpoint)
+        {
+            return Err(Error::InvalidInput("catalog proxy"));
         }
         if let Some(path) = &self.cache_directory {
             crate::paths::validate_private_path(path)?;
