@@ -2,13 +2,14 @@
 
 use kadr_engine::{
     CacheUsage, FileChoice, LibraryItem, PlayerPreference, RateLimit, Settings, SourceCandidate,
-    TransferStatus,
+    SourcePreferences, TorznabConfig, TransferStatus,
     catalog::{Media, MediaKind},
     source::SourceKind,
 };
 use kadr_ui::{
     EpisodeRow, LibraryRow, MediaCard, PlayerChoice, PreferencesDraft, RateLimit as UiRateLimit,
-    SourceKind as UiSourceKind, SourceRow, TorrentFileRow, TransferView,
+    SourceKind as UiSourceKind, SourcePreferencesDraft, SourceRow, TorrentFileRow, TorznabDraft,
+    TransferView,
 };
 
 pub(super) fn preference(player: PlayerChoice) -> PlayerPreference {
@@ -141,12 +142,68 @@ pub(super) fn media_card(media: Media) -> MediaCard {
     }
 }
 
-pub(super) fn source_row(index: usize, source: SourceCandidate) -> SourceRow {
+pub(super) fn source_preferences_draft(settings: &SourcePreferences) -> SourcePreferencesDraft {
+    SourcePreferencesDraft {
+        rutracker_enabled: settings.rutracker_enabled,
+        commons_enabled: settings.commons_enabled,
+        torznab: settings
+            .torznab
+            .iter()
+            .map(|endpoint| TorznabDraft {
+                name: endpoint.name.clone(),
+                base_url: endpoint.base_url.clone(),
+                api_key_env: endpoint.api_key_env.clone(),
+                enabled: endpoint.enabled,
+            })
+            .collect(),
+        preferred_resolution: settings.preferred_resolution.clone(),
+        preferred_language: settings.preferred_language.clone(),
+    }
+}
+
+pub(super) fn source_preferences(
+    draft: &SourcePreferencesDraft,
+) -> Result<SourcePreferences, &'static str> {
+    fn optional(value: &Option<String>) -> Option<String> {
+        value
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    }
+    let torznab = draft
+        .torznab
+        .iter()
+        .map(|endpoint| TorznabConfig {
+            name: endpoint.name.trim().to_owned(),
+            base_url: endpoint.base_url.trim().to_owned(),
+            api_key_env: optional(&endpoint.api_key_env),
+            enabled: endpoint.enabled,
+        })
+        .collect();
+    let preferences = SourcePreferences {
+        rutracker_enabled: draft.rutracker_enabled,
+        commons_enabled: draft.commons_enabled,
+        torznab,
+        preferred_resolution: optional(&draft.preferred_resolution),
+        preferred_language: optional(&draft.preferred_language),
+    };
+    preferences.validate().map_err(
+        |_| "Проверьте названия, адреса и имена переменных KADR_TORZNAB_… в настройках источников.",
+    )?;
+    Ok(preferences)
+}
+
+pub(super) fn source_row(source: SourceCandidate) -> SourceRow {
     SourceRow {
-        index,
+        index: source.index,
+        recommended: source.recommended,
         title: source.title,
         kind: source_kind(Some(source.kind)),
         quality: source.quality,
+        video_codec: source.video_codec,
+        audio_codec: source.audio_codec,
+        peers: source.peers,
         language: source.language,
         origin: source.origin,
         license: (!source.license.is_empty()).then_some(source.license),
@@ -237,6 +294,106 @@ mod tests {
     use super::*;
 
     #[test]
+    fn commons_preference_round_trips_both_states_without_changing_other_providers() {
+        assert!(SourcePreferencesDraft::default().commons_enabled);
+        for commons_enabled in [true, false] {
+            for rutracker_enabled in [true, false] {
+                let preferences = SourcePreferences {
+                    commons_enabled,
+                    rutracker_enabled,
+                    torznab: vec![TorznabConfig {
+                        name: "Local".into(),
+                        base_url: "http://localhost:9696/api".into(),
+                        api_key_env: Some("KADR_TORZNAB_LOCAL".into()),
+                        enabled: false,
+                    }],
+                    preferred_resolution: Some("1080p".into()),
+                    preferred_language: Some("ru".into()),
+                };
+                let draft = source_preferences_draft(&preferences);
+                assert_eq!(draft.commons_enabled, commons_enabled);
+                assert_eq!(draft.rutracker_enabled, rutracker_enabled);
+                assert_eq!(source_preferences(&draft).unwrap(), preferences);
+            }
+        }
+    }
+
+    #[test]
+    fn source_preferences_preserve_multiple_endpoints_and_independent_rutracker_toggle() {
+        let draft = SourcePreferencesDraft {
+            rutracker_enabled: false,
+            commons_enabled: true,
+            torznab: vec![
+                TorznabDraft {
+                    name: " Public ".into(),
+                    base_url: " https://public.example/torznab ".into(),
+                    api_key_env: None,
+                    enabled: true,
+                },
+                TorznabDraft {
+                    name: "Private".into(),
+                    base_url: "http://localhost:9696/api/v1/indexer".into(),
+                    api_key_env: Some(" KADR_TORZNAB_PRIVATE ".into()),
+                    enabled: false,
+                },
+            ],
+            preferred_resolution: Some(" 1080p ".into()),
+            preferred_language: Some(" ru ".into()),
+        };
+        let preferences = source_preferences(&draft).unwrap();
+        assert!(!preferences.rutracker_enabled);
+        assert!(preferences.commons_enabled);
+        assert_eq!(preferences.torznab.len(), 2);
+        assert!(preferences.torznab[0].enabled);
+        assert_eq!(preferences.torznab[0].name, "Public");
+        assert_eq!(
+            preferences.torznab[0].base_url,
+            "https://public.example/torznab"
+        );
+        assert!(preferences.torznab[0].api_key_env.is_none());
+        assert!(!preferences.torznab[1].enabled);
+        assert_eq!(
+            preferences.torznab[1].api_key_env.as_deref(),
+            Some("KADR_TORZNAB_PRIVATE")
+        );
+        let confirmed = source_preferences_draft(&preferences);
+        assert_eq!(confirmed.preferred_resolution.as_deref(), Some("1080p"));
+        assert_eq!(confirmed.preferred_language.as_deref(), Some("ru"));
+        assert_eq!(confirmed.torznab[1].name, "Private");
+    }
+
+    #[test]
+    fn source_preferences_accept_only_optional_prefixed_environment_names() {
+        let mut draft = SourcePreferencesDraft {
+            rutracker_enabled: true,
+            commons_enabled: false,
+            torznab: vec![TorznabDraft {
+                name: "Endpoint".into(),
+                base_url: "http://localhost:9696".into(),
+                api_key_env: None,
+                enabled: true,
+            }],
+            preferred_resolution: Some(" ".into()),
+            preferred_language: None,
+        };
+        for name in ["", " ", "KADR_TORZNAB_LOCAL", "KADR_TORZNAB_123"] {
+            draft.torznab[0].api_key_env = Some(name.into());
+            let preferences = source_preferences(&draft).unwrap();
+            assert!(preferences.preferred_resolution.is_none());
+        }
+        for name in [
+            "API_KEY",
+            "key-value",
+            "KADR_TORZNAB_",
+            "KADR_TORZNAB_KEY=value",
+            "KADR_TORZNAB_A B",
+        ] {
+            draft.torznab[0].api_key_env = Some(name.into());
+            assert!(source_preferences(&draft).is_err());
+        }
+    }
+
+    #[test]
     fn preferences_round_trip_without_interpreting_paused_as_unlimited() {
         let settings = Settings::default();
         let draft = preferences_draft(&settings);
@@ -321,9 +478,14 @@ mod tests {
     #[test]
     fn source_rows_preserve_engine_kind_index_and_provenance() {
         let source = SourceCandidate {
+            index: 7,
+            recommended: true,
             kind: SourceKind::Magnet,
             title: "Разрешённое видео".into(),
             quality: Some("720p".into()),
+            video_codec: Some("VP9".into()),
+            audio_codec: Some("Opus".into()),
+            peers: Some(4),
             language: None,
             license: "CC0".into(),
             origin: "Публичный каталог".into(),
@@ -331,10 +493,19 @@ mod tests {
             seeds: None,
             rutracker: false,
         };
-        let row = source_row(7, source);
+        let row = source_row(source);
         assert_eq!(row.index, 7);
+        assert!(row.recommended);
         assert_eq!(row.kind, UiSourceKind::Magnet);
         assert_eq!(row.quality.as_deref(), Some("720p"));
+        assert_eq!(
+            (
+                row.video_codec.as_deref(),
+                row.audio_codec.as_deref(),
+                row.peers
+            ),
+            (Some("VP9"), Some("Opus"), Some(4))
+        );
         assert_eq!(row.language, None);
         assert_eq!(row.license.as_deref(), Some("CC0"));
         assert_eq!(row.origin, "Публичный каталог");

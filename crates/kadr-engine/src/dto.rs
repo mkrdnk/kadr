@@ -158,15 +158,23 @@ impl CacheUsage {
 /// Display metadata only; the worker retains the actionable source descriptor.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SourceCandidate {
+    /// Selection handle, independent of display order and never a private URI.
+    pub index: usize,
     pub kind: SourceKind,
     pub title: String,
     pub quality: Option<String>,
+    pub video_codec: Option<String>,
+    pub audio_codec: Option<String>,
     pub language: Option<String>,
     pub license: String,
     pub origin: String,
     pub size: Option<u64>,
     pub seeds: Option<u32>,
+    pub peers: Option<u32>,
     pub rutracker: bool,
+    /// Completed discovery's best suitable film torrent with known seeds > 0.
+    /// Never a provisional result, HTTP resource or explicit manual attachment.
+    pub recommended: bool,
 }
 
 impl fmt::Debug for SourceCandidate {
@@ -176,17 +184,36 @@ impl fmt::Debug for SourceCandidate {
 }
 
 impl SourceCandidate {
-    pub(crate) fn from_rutracker(value: &kadr_catalog::rutracker::Offer) -> Self {
+    pub(crate) fn from_source(
+        index: usize,
+        value: &kadr_core::sources::MediaSource,
+        origin: String,
+    ) -> Self {
+        use kadr_core::sources::Locator;
         Self {
-            kind: SourceKind::TorrentFile,
-            title: value.title.clone(),
-            quality: value.quality.clone(),
-            language: None,
-            license: String::new(),
-            origin: "RuTracker".into(),
+            index,
+            kind: match value.locator {
+                Locator::Http(_) => SourceKind::Http,
+                Locator::Magnet(_) => SourceKind::Magnet,
+                Locator::TorrentUrl(_) | Locator::TorrentFile(_) | Locator::RuTracker(_) => {
+                    SourceKind::TorrentFile
+                }
+            },
+            title: value.release_title.as_ref().unwrap_or(&value.title).clone(),
+            quality: value
+                .quality
+                .clone()
+                .or_else(|| value.resolution.map(|h| format!("{h}p"))),
+            language: (!value.languages.is_empty()).then(|| value.languages.join(", ")),
+            video_codec: value.video_codec.clone(),
+            audio_codec: value.audio_codec.clone(),
+            license: value.license.clone().unwrap_or_default(),
+            origin,
             size: value.size,
             seeds: value.seeds,
-            rutracker: true,
+            peers: value.peers,
+            rutracker: matches!(value.locator, Locator::RuTracker(_)),
+            recommended: false,
         }
     }
 }
@@ -405,33 +432,45 @@ mod tests {
 
     #[test]
     fn source_display_has_no_topic_credentials_or_unverified_license() {
-        let candidate = SourceCandidate::from_rutracker(&kadr_catalog::rutracker::Offer {
-            topic_id: 42,
-            title: "Source title".into(),
-            quality: Some("1080p".into()),
-            size: Some(1024),
-            seeds: Some(20),
-        });
+        let mut source = kadr_core::sources::MediaSource::new(
+            "rutracker",
+            kadr_core::sources::Locator::RuTracker(42),
+            "Source title",
+            kadr_core::catalog::MediaKind::Movie,
+        )
+        .unwrap();
+        source.quality = Some("1080p".into());
+        source.size = Some(1024);
+        source.seeds = Some(20);
+        let candidate = SourceCandidate::from_source(9, &source, "RuTracker".into());
         assert_eq!(format!("{candidate:?}"), "SourceCandidate([redacted])");
         assert_eq!(format!("{candidate:#?}"), "SourceCandidate([redacted])");
         let SourceCandidate {
+            index,
             kind,
             title,
             quality,
+            video_codec,
+            audio_codec,
             language,
             license,
             origin,
             size,
             seeds,
+            peers,
             rutracker,
+            recommended,
         } = candidate;
+        assert_eq!(index, 9);
         assert_eq!(kind, SourceKind::TorrentFile);
         assert_eq!(title, "Source title");
         assert_eq!(quality.as_deref(), Some("1080p"));
+        assert_eq!((video_codec, audio_codec, peers), (None, None, None));
         assert_eq!(language, None);
         assert!(license.is_empty());
         assert_eq!(origin, "RuTracker");
         assert_eq!((size, seeds, rutracker), (Some(1024), Some(20), true));
+        assert!(!recommended);
     }
 
     fn stored_library_item() -> kadr_storage::LibraryItem {

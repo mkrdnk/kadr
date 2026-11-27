@@ -128,6 +128,7 @@ impl KadrView {
         // Opening another title or selecting an episode invalidates playback in
         // the shell. Do not treat the presence of metadata as a playable source.
         let playable = self.model.can_play();
+        let watch_event = self.model.card_watch_event();
         let mut copy = div()
             .flex()
             .flex_col()
@@ -181,18 +182,14 @@ impl KadrView {
                     .mt_2()
                     .child(self.button(
                         "cinema-watch",
-                        if playable {
-                            "Смотреть"
-                        } else {
+                        if media.kind == MediaKind::Series && !playable {
                             "Найти и смотреть"
-                        },
-                        Command::Emit(if playable {
-                            UiEvent::Play
                         } else {
-                            UiEvent::FindSources
-                        }),
+                            "Смотреть"
+                        },
+                        Command::Emit(watch_event.clone()),
                         true,
-                        !self.model.playback_active,
+                        self.model.accepts(&watch_event),
                         cx,
                     ))
                     .child(self.button(
@@ -200,7 +197,7 @@ impl KadrView {
                         "Источники",
                         Command::Emit(UiEvent::FindSources),
                         false,
-                        !self.model.playback_active,
+                        self.model.accepts(&UiEvent::FindSources),
                         cx,
                     ))
                     .child(self.button(
@@ -220,8 +217,15 @@ impl KadrView {
             div()
                 .text_size(px(11.))
                 .text_color(rgb(MUTED))
-                .child(if playable {
+                .child(if self.model.movie_watch_pending {
+                    "Подбираем источник для просмотра. Чтобы отменить, вернитесь назад или перейдите в другой раздел.".into()
+                } else if playable {
                     format!("Готово к открытию в {}", self.model.default_player.label())
+                } else if media.kind == MediaKind::Movie {
+                    format!(
+                        "«Смотреть» подберёт источник и откроет {}. Другой вариант можно выбрать в «Источниках».",
+                        self.model.default_player.label()
+                    )
                 } else {
                     format!(
                         "Воспроизведение в {} после выбора источника",
@@ -261,6 +265,9 @@ impl KadrView {
                     .child(self.cinema_poster(media, poster_width))
                     .child(copy),
             )
+            .when(self.model.movie_watch_pending, |content| {
+                content.child(self.source_discovery_status(cx))
+            })
             .child(
                 div()
                     .relative()

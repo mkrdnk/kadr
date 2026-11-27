@@ -25,6 +25,10 @@ use kadr_storage::{
 };
 use sha1::{Digest, Sha1};
 
+mod commons;
+mod episodes;
+mod torznab;
+
 const WAIT: Duration = Duration::from_secs(8);
 const PRIVATE_MARKER: &str = "acceptance-private-query-never-display";
 
@@ -1043,18 +1047,133 @@ fn legacy_library_can_reopen_a_saved_link_without_enabling_online_discovery() {
         matches!(event, Event::SourceSelected { playable: true, .. })
     });
     app.command(Command::FindSources);
-    app.wait("explicit notice that RuTracker did not run", |event| {
-        assert!(!matches!(
-            event,
-            Event::SourcesState(crate::AsyncState::Loading)
-        ));
-        matches!(event, Event::SourcesState(crate::AsyncState::Error(message))
-            if message.contains("Поиск RuTracker не выполнялся"))
-    });
+    app.wait(
+        "explicit notice that a legacy snapshot cannot trigger discovery",
+        |event| {
+            assert!(!matches!(
+                event,
+                Event::SourcesState(crate::AsyncState::Loading)
+            ));
+            matches!(event, Event::SourcesState(crate::AsyncState::Error(message))
+            if message.contains("Trakt"))
+        },
+    );
     assert_eq!(
         storage.source_for_target(&target).unwrap(),
         Some(descriptor)
     );
+    app.finish();
+}
+
+#[test]
+fn local_discovery_round_trip_rejects_old_handles_and_reuses_http_preparation() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = paths(root.path());
+    let input = StoredSource::Link(format!(
+        "http://127.0.0.1:9/owned.mp4?marker={PRIVATE_MARKER}"
+    ));
+    discovered_http(&paths, input).finish();
+}
+
+fn discovered_http(paths: &AppPaths, input: StoredSource) -> App {
+    let mut db = Storage::open_default(paths).unwrap();
+    let id = MediaId::new("trakt:movie:52").unwrap();
+    let target = PlaybackTarget {
+        media_id: id.clone(),
+        episode: None,
+    };
+    db.upsert_media(&kadr_storage::MediaRecord {
+        id,
+        title: "Local fixture".into(),
+        original_title: None,
+        year: Some(2020),
+        kind: kadr_storage::MediaKind::Movie,
+        description: String::new(),
+        poster_url: None,
+        attribution: String::new(),
+    })
+    .unwrap();
+    let src_id = input.source_id().unwrap();
+    db.save_source(&src_id, &input).unwrap();
+    db.link_source(&target, &src_id).unwrap();
+    let mut app = App::start(paths);
+    app.ready();
+    app.command(Command::OpenLibrary(library_id(&target)));
+    app.selected();
+    let result = |app: &mut App| {
+        let Event::SourceDiscovery {
+            stamp,
+            rows,
+            failures,
+            ..
+        } = app.wait("completed local discovery", |event| {
+            matches!(
+                event,
+                Event::SourceDiscovery {
+                    pending: 0,
+                    succeeded: 1,
+                    ..
+                }
+            )
+        })
+        else {
+            unreachable!()
+        };
+        assert!(failures.is_empty());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "Local fixture");
+        assert_eq!(rows[0].kind, SourceKind::Http);
+        (stamp, rows[0].index)
+    };
+    app.command(Command::FindSources);
+    let (stamp, old) = result(&mut app);
+    assert!(stamp.is_current());
+    app.command(Command::RetrySources);
+    assert!(
+        !stamp.is_current(),
+        "invalidate even snapshots already on the UI queue"
+    );
+    let (_, current) = result(&mut app);
+    assert_ne!(old, current);
+    app.command(Command::ChooseSource(old));
+    app.wait("reject old row", |event| {
+        matches!(event, Event::Status(Level::Error, _))
+    });
+    app.command(Command::ChooseSource(current));
+    app.selected();
+    assert_eq!(db.source_for_target(&target).unwrap(), Some(input));
+    app
+}
+
+#[test]
+#[ignore = "requires ffmpeg and mpv; Torznab enclosure and verified loopback torrent"]
+fn real_torznab_selection_plays_generated_video() {
+    torznab::play_owned_torrent();
+}
+
+#[test]
+#[ignore = "requires ffmpeg and mpv; episode search, multi-file torrent, measured playback and exact save"]
+fn real_episode_search_selects_correct_file_and_mpv_playback() {
+    episodes::play_selected_episode();
+}
+
+#[test]
+#[ignore = "requires ffmpeg and mpv; owned local video through a resolver selection"]
+fn real_discovered_source_plays_generated_video() {
+    let root = tempfile::tempdir().unwrap();
+    let origin = HttpOrigin::new(
+        generate_video(&root.path().join("owned.mp4")),
+        HttpBehavior::Stable,
+    );
+    let mut app = discovered_http(&paths(root.path()), StoredSource::Link(origin.url()));
+    app.command(Command::Play { resume: false });
+    app.wait("mpv started after explicit choice", |e| {
+        matches!(e, Event::PlaybackActive(true))
+    });
+    app.until(WAIT, "player range read", || {
+        origin.ranges.load(Ordering::Relaxed) > 0
+    });
+    app.stopped();
     app.finish();
 }
 
@@ -1456,6 +1575,10 @@ impl Drop for OwnedChild {
 }
 
 fn generate_video(path: &Path) -> Vec<u8> {
+    generate_video_from(path, "testsrc2=size=160x90:rate=10")
+}
+
+fn generate_video_from(path: &Path, video_source: &str) -> Vec<u8> {
     let mut child = OwnedChild(
         ProcessCommand::new("ffmpeg")
             .args([
@@ -1467,7 +1590,7 @@ fn generate_video(path: &Path) -> Vec<u8> {
                 "-f",
                 "lavfi",
                 "-i",
-                "testsrc2=size=160x90:rate=10",
+                video_source,
                 "-f",
                 "lavfi",
                 "-i",
@@ -1569,6 +1692,17 @@ fn real_http_mpv_atomic_save_clear_cache_library_resume_and_restart() {
 
     let mut app = App::start(&paths);
     app.ready();
+    let disabled = SourcePreferences {
+        commons_enabled: false,
+        rutracker_enabled: false,
+        torznab: Vec::new(),
+        ..SourcePreferences::default()
+    };
+    app.command(Command::SetSourcePreferences(disabled.clone()));
+    app.wait(
+        "all automatic providers disabled",
+        |event| matches!(event, Event::SourcePreferences(saved) if saved == &disabled),
+    );
     app.command(Command::SelectSource(source));
     app.selected();
     app.command(Command::AssignEpisode(1, 1));

@@ -1,4 +1,4 @@
-//! Display-only state. Source URLs and credentials belong to the controller.
+//! Display-only state. Playback URLs and credentials belong to the controller.
 //! Metadata, public image URLs and user-configured cache paths are display data.
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -195,6 +195,10 @@ pub enum UiEvent {
     Search(String),
     Browse,
     OpenMedia(String),
+    /// Watch the current movie. The controller plays a ready explicit/saved
+    /// choice normally, or resolves a recommendation for automatic playback.
+    /// Unlike `FindSources`, this is a playback intent, not just discovery.
+    WatchMovie,
     FindSources,
     SelectEpisode {
         season: u16,
@@ -215,6 +219,7 @@ pub enum UiEvent {
     Save,
     OpenIn(PlayerChoice),
     SavePreferences(PreferencesDraft),
+    SaveSourcePreferences(SourcePreferencesDraft),
     ChooseCacheDirectory,
     ClearCache,
     ClearHistory,
@@ -271,17 +276,92 @@ pub struct MediaCard {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceRow {
     pub index: usize,
+    /// Resolver recommendation only; never implies selection or starts playback.
+    pub recommended: bool,
     pub title: String,
     pub kind: SourceKind,
     pub quality: Option<String>,
+    pub video_codec: Option<String>,
+    pub audio_codec: Option<String>,
     pub language: Option<String>,
     pub origin: String,
     pub license: Option<String>,
     /// Controller-provided size in bytes; absence is not a zero-size download.
     pub size: Option<u64>,
     pub seeds: Option<u32>,
+    pub peers: Option<u32>,
     /// Tracker metadata is unverified, including quality and rights claims.
     pub rutracker: bool,
+}
+
+/// Controller-sanitized provider failures only, never raw URLs or credentials.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SourceDiscovery {
+    pub pending: usize,
+    pub succeeded: usize,
+    pub failures: Vec<String>,
+}
+
+impl SourceDiscovery {
+    pub(crate) fn heading(&self, has_rows: bool) -> &'static str {
+        match (
+            self.pending > 0,
+            has_rows,
+            self.succeeded > 0,
+            self.failures.is_empty(),
+        ) {
+            (true, false, _, _) => "Поиск источников…",
+            (true, true, _, _) => "Источники найдены · поиск продолжается",
+            (false, _, false, false) => "Все провайдеры завершились с ошибкой",
+            (false, true, _, false) => "Поиск завершён частично",
+            (false, true, _, true) => "Поиск завершён",
+            (false, false, _, _) => "Источники не найдены",
+        }
+    }
+}
+
+/// Configuration input only. API key values must never enter this draft.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct TorznabDraft {
+    pub name: String,
+    pub base_url: String,
+    pub api_key_env: Option<String>,
+    pub enabled: bool,
+}
+
+impl std::fmt::Debug for TorznabDraft {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TorznabDraft")
+            .field("name", &"<redacted>")
+            .field("base_url", &"<redacted>")
+            .field(
+                "api_key_env",
+                &self.api_key_env.as_ref().map(|_| "<redacted>"),
+            )
+            .field("enabled", &self.enabled)
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourcePreferencesDraft {
+    pub commons_enabled: bool,
+    pub rutracker_enabled: bool,
+    pub torznab: Vec<TorznabDraft>,
+    pub preferred_resolution: Option<String>,
+    pub preferred_language: Option<String>,
+}
+
+impl Default for SourcePreferencesDraft {
+    fn default() -> Self {
+        Self {
+            commons_enabled: true,
+            rutracker_enabled: true,
+            torznab: Vec::new(),
+            preferred_resolution: None,
+            preferred_language: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -392,6 +472,7 @@ pub(crate) struct ShellModel {
     pub source: Option<SourcePreview>,
     pub playback_available: bool,
     pub playback_active: bool,
+    pub preparing: bool,
     pub status: UiStatus,
     pub preferences_status: String,
     pub results: Vec<MediaCard>,
@@ -400,6 +481,9 @@ pub(crate) struct ShellModel {
     pub browse_state: SectionState,
     pub media: Option<MediaCard>,
     pub sources: Vec<SourceRow>,
+    pub source_discovery: Option<SourceDiscovery>,
+    pub source_discovery_starting: bool,
+    pub movie_watch_pending: bool,
     pub files: Vec<TorrentFileRow>,
     pub library: Vec<LibraryRow>,
     pub transfer: Option<TransferView>,
@@ -433,6 +517,7 @@ impl Default for ShellModel {
             source: None,
             playback_available: false,
             playback_active: false,
+            preparing: false,
             status: UiStatus::info("Откройте источник или найдите фильм в каталоге."),
             preferences_status: "Изменения применяются после сохранения.".into(),
             results: Vec::new(),
@@ -441,6 +526,9 @@ impl Default for ShellModel {
             browse_state: SectionState::Empty("Каталог ещё не загружен.".into()),
             media: None,
             sources: Vec::new(),
+            source_discovery: None,
+            source_discovery_starting: false,
+            movie_watch_pending: false,
             files: Vec::new(),
             library: Vec::new(),
             transfer: None,
@@ -453,14 +541,35 @@ impl Default for ShellModel {
 }
 
 impl ShellModel {
+    pub(crate) fn card_watch_event(&self) -> UiEvent {
+        if self
+            .media
+            .as_ref()
+            .is_some_and(|media| media.kind == MediaKind::Movie)
+        {
+            UiEvent::WatchMovie
+        } else if self.playback_available && self.source.is_some() {
+            UiEvent::Play
+        } else {
+            UiEvent::FindSources
+        }
+    }
+
     pub fn can_play(&self) -> bool {
         self.playback_available
             && self.source.is_some()
+            && !self.movie_watch_pending
             && !self.playback_active
-            && !matches!(
-                self.states[Section::Sources.index()],
-                SectionState::Loading(_)
-            )
+            && !self.preparing
+            && (self.discovering()
+                || !matches!(
+                    self.states[Section::Sources.index()],
+                    SectionState::Loading(_)
+                ))
+    }
+
+    pub(crate) fn discovering(&self) -> bool {
+        self.source_discovery_starting || self.source_discovery.is_some()
     }
 
     /// Check again when handling a click/key event, not only when rendering.
@@ -470,32 +579,53 @@ impl ShellModel {
             UiEvent::Stop => self.playback_active,
             UiEvent::PasteSource | UiEvent::OpenTorrent => {
                 !self.playback_active
-                    && !matches!(
-                        self.states[Section::Sources.index()],
-                        SectionState::Loading(_)
-                    )
+                    && !self.preparing
+                    && !self.movie_watch_pending
+                    && (self.discovering()
+                        || !matches!(
+                            self.states[Section::Sources.index()],
+                            SectionState::Loading(_)
+                        ))
+            }
+            UiEvent::Retry(Section::Sources) if self.media.is_some() => {
+                self.accepts(&UiEvent::PasteSource)
             }
             UiEvent::Retry(section) => {
                 matches!(self.states[section.index()], SectionState::Error(_))
             }
             UiEvent::Cancel(section) => {
-                matches!(self.states[section.index()], SectionState::Loading(_))
+                *section == Section::Sources
+                    || matches!(self.states[section.index()], SectionState::Loading(_))
             }
             UiEvent::ChooseSource(index) => {
                 self.sources.iter().any(|row| row.index == *index)
                     && self.accepts(&UiEvent::PasteSource)
             }
             UiEvent::ChooseTorrentFile(index) => {
-                self.files.iter().any(|row| row.index == *index) && !self.playback_active
+                self.files.iter().any(|row| row.index == *index)
+                    && !self.playback_active
+                    && !self.movie_watch_pending
             }
-            UiEvent::AssignEpisode { .. } => self.selected_file.is_some(),
-            UiEvent::FindSources | UiEvent::ToggleFavorite => self.media.is_some(),
-            UiEvent::SelectEpisode { season, number } => self.media.as_ref().is_some_and(|media| {
-                media
-                    .episodes
-                    .iter()
-                    .any(|episode| episode.season == *season && episode.number == *number)
-            }),
+            UiEvent::AssignEpisode { .. } => {
+                self.selected_file.is_some() && !self.movie_watch_pending
+            }
+            UiEvent::WatchMovie => {
+                self.media
+                    .as_ref()
+                    .is_some_and(|media| media.kind == MediaKind::Movie)
+                    && self.accepts(&UiEvent::PasteSource)
+            }
+            UiEvent::FindSources => self.media.is_some() && self.accepts(&UiEvent::PasteSource),
+            UiEvent::ToggleFavorite => self.media.is_some(),
+            UiEvent::SelectEpisode { season, number } => {
+                !self.movie_watch_pending
+                    && self.media.as_ref().is_some_and(|media| {
+                        media
+                            .episodes
+                            .iter()
+                            .any(|episode| episode.season == *season && episode.number == *number)
+                    })
+            }
             UiEvent::OpenMedia(id) => {
                 !self.playback_active
                     && self
@@ -511,7 +641,8 @@ impl ShellModel {
                 !self.playback_active && self.library.iter().any(|row| row.id == *id)
             }
             UiEvent::SetFavorite { id, .. } => self.library.iter().any(|row| row.id == *id),
-            UiEvent::UnlinkMedia => self.media.is_some(),
+            UiEvent::UnlinkMedia => self.media.is_some() && !self.movie_watch_pending,
+            UiEvent::SetDefaultPlayer(_) | UiEvent::ForgetRuTracker => !self.movie_watch_pending,
             UiEvent::Save | UiEvent::OpenIn(_) => self.source.is_some() && self.playback_active,
             UiEvent::Search(query) => !query.trim().is_empty(),
             _ => true,
@@ -522,6 +653,120 @@ impl ShellModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn media(kind: MediaKind) -> MediaCard {
+        MediaCard {
+            id: "media".into(),
+            title: "Title".into(),
+            original_title: None,
+            year: None,
+            description: None,
+            poster_url: None,
+            backdrop_url: None,
+            rating_tenths: None,
+            kind,
+            episodes: vec![EpisodeRow {
+                season: 1,
+                number: 2,
+                title: "Episode".into(),
+            }],
+            attribution: String::new(),
+        }
+    }
+
+    #[test]
+    fn movie_watch_intent_preserves_controller_choice_of_play_or_resolution() {
+        let mut model = ShellModel::default();
+        assert!(!model.accepts(&UiEvent::WatchMovie));
+        model.media = Some(media(MediaKind::Movie));
+        assert_eq!(model.card_watch_event(), UiEvent::WatchMovie);
+        assert!(model.accepts(&UiEvent::WatchMovie));
+        model.source = Some(SourcePreview {
+            kind: SourceKind::Http,
+            title: "Manual HTTP source".into(),
+        });
+        assert_eq!(model.card_watch_event(), UiEvent::WatchMovie);
+        model.playback_available = true;
+        assert_eq!(model.card_watch_event(), UiEvent::WatchMovie);
+        assert!(model.accepts(&UiEvent::Play));
+        assert!(model.accepts(&UiEvent::WatchMovie));
+        for (active, preparing) in [(true, false), (false, true)] {
+            model.playback_active = active;
+            model.preparing = preparing;
+            assert_eq!(model.card_watch_event(), UiEvent::WatchMovie);
+            assert!(!model.accepts(&UiEvent::Play));
+            assert!(!model.accepts(&UiEvent::WatchMovie));
+            assert!(!model.accepts(&UiEvent::FindSources));
+        }
+    }
+
+    #[test]
+    fn series_keeps_episode_selection_and_explicit_source_flow() {
+        let mut model = ShellModel {
+            media: Some(media(MediaKind::Series)),
+            ..ShellModel::default()
+        };
+        assert_eq!(model.card_watch_event(), UiEvent::FindSources);
+        assert!(!model.accepts(&UiEvent::WatchMovie));
+        assert!(model.accepts(&UiEvent::FindSources));
+        assert!(model.accepts(&UiEvent::SelectEpisode {
+            season: 1,
+            number: 2
+        }));
+        model.source = Some(SourcePreview {
+            kind: SourceKind::LocalFile,
+            title: "Episode".into(),
+        });
+        model.playback_available = true;
+        assert_eq!(model.card_watch_event(), UiEvent::Play);
+        assert!(model.can_play());
+    }
+
+    #[test]
+    fn explicit_watch_cannot_be_superseded_even_by_nonblocking_discovery() {
+        let mut model = ShellModel {
+            media: Some(media(MediaKind::Movie)),
+            movie_watch_pending: true,
+            source_discovery_starting: true,
+            selected_file: Some(4),
+            files: vec![TorrentFileRow {
+                index: 4,
+                name: "Movie".into(),
+                size: 42,
+                season: None,
+                episode: None,
+                ambiguous: false,
+            }],
+            ..ShellModel::default()
+        };
+        model.states[Section::Sources.index()] = SectionState::Loading("Discovery".into());
+        for event in [
+            UiEvent::WatchMovie,
+            UiEvent::FindSources,
+            UiEvent::Retry(Section::Sources),
+            UiEvent::PasteSource,
+            UiEvent::OpenTorrent,
+            UiEvent::ChooseTorrentFile(4),
+            UiEvent::AssignEpisode {
+                season: 1,
+                number: 2,
+            },
+            UiEvent::SelectEpisode {
+                season: 1,
+                number: 2,
+            },
+            UiEvent::UnlinkMedia,
+            UiEvent::SetDefaultPlayer(PlayerChoice::Vlc),
+        ] {
+            assert!(!model.accepts(&event), "{event:?}");
+        }
+        assert!(model.accepts(&UiEvent::Cancel(Section::Sources)));
+        assert!(model.accepts(&UiEvent::OpenMedia("media".into())));
+        assert!(model.accepts(&UiEvent::ToggleFavorite));
+        model.movie_watch_pending = false; // Fallback hands control to Sources.
+        assert!(model.accepts(&UiEvent::FindSources));
+        assert!(model.accepts(&UiEvent::PasteSource));
+    }
 
     #[test]
     fn rutracker_login_event_debug_redacts_both_fields() {
@@ -617,19 +862,165 @@ mod tests {
     }
 
     #[test]
-    fn retry_and_cancel_only_apply_to_corresponding_states() {
+    fn retry_and_cancel_only_apply_to_corresponding_states_except_source_cancellation() {
         let mut model = ShellModel::default();
         let section = Section::Sources;
         assert!(!model.accepts(&UiEvent::Retry(section)));
-        assert!(!model.accepts(&UiEvent::Cancel(section)));
+        assert!(model.accepts(&UiEvent::Cancel(section)));
         model.states[section.index()] = SectionState::Loading("Проверка источника".into());
         assert!(model.accepts(&UiEvent::Cancel(section)));
         assert!(!model.accepts(&UiEvent::Retry(section)));
         assert!(!model.accepts(&UiEvent::PasteSource));
         model.states[section.index()] = SectionState::Error("Источник недоступен".into());
         assert!(model.accepts(&UiEvent::Retry(section)));
-        assert!(!model.accepts(&UiEvent::Cancel(section)));
+        assert!(model.accepts(&UiEvent::Cancel(section)));
         assert!(model.accepts(&UiEvent::PasteSource));
+        assert!(!model.accepts(&UiEvent::Cancel(Section::Search)));
+    }
+
+    #[test]
+    fn discovery_is_nonblocking_but_preparation_and_playback_still_block_sources() {
+        let mut model = ShellModel {
+            playback_available: true,
+            source: Some(SourcePreview {
+                kind: SourceKind::Http,
+                title: "Video".into(),
+            }),
+            sources: vec![SourceRow {
+                index: 71,
+                recommended: false,
+                title: "Source".into(),
+                kind: SourceKind::Magnet,
+                quality: None,
+                language: None,
+                origin: "Indexer".into(),
+                video_codec: None,
+                audio_codec: None,
+                peers: None,
+                license: None,
+                size: None,
+                seeds: None,
+                rutracker: false,
+            }],
+            ..ShellModel::default()
+        };
+        model.states[Section::Sources.index()] = SectionState::Loading("Discovery".into());
+        model.source_discovery_starting = true;
+        for snapshot in [
+            None, // Provider count not known yet.
+            Some(SourceDiscovery {
+                pending: 2,
+                succeeded: 0,
+                failures: vec![],
+            }),
+            Some(SourceDiscovery {
+                pending: 1,
+                succeeded: 1,
+                failures: vec![],
+            }),
+            Some(SourceDiscovery {
+                pending: 0,
+                succeeded: 1,
+                failures: vec!["Indexer unavailable".into()],
+            }),
+        ] {
+            model.source_discovery_starting = snapshot.is_none();
+            model.source_discovery = snapshot;
+            assert!(model.accepts(&UiEvent::PasteSource));
+            assert!(model.accepts(&UiEvent::OpenTorrent));
+            assert!(model.accepts(&UiEvent::ChooseSource(71)));
+            assert!(!model.accepts(&UiEvent::ChooseSource(0)));
+            assert!(model.can_play());
+        }
+        model.source_discovery_starting = false;
+        model.source_discovery = None; // Blocking preparation.
+        assert!(!model.accepts(&UiEvent::PasteSource));
+        assert!(!model.accepts(&UiEvent::OpenTorrent));
+        assert!(!model.accepts(&UiEvent::ChooseSource(71)));
+        assert!(!model.can_play());
+        model.source_discovery = Some(SourceDiscovery::default());
+        model.playback_active = true;
+        assert!(!model.accepts(&UiEvent::PasteSource));
+        assert!(!model.accepts(&UiEvent::OpenTorrent));
+        assert!(!model.accepts(&UiEvent::ChooseSource(71)));
+        assert!(!model.can_play());
+        model.playback_active = false;
+        model.preparing = true;
+        assert!(!model.accepts(&UiEvent::PasteSource));
+        assert!(!model.accepts(&UiEvent::OpenTorrent));
+        assert!(!model.accepts(&UiEvent::ChooseSource(71)));
+        assert!(!model.can_play());
+        model.preparing = false;
+        model.movie_watch_pending = true;
+        assert!(!model.accepts(&UiEvent::ChooseSource(71)));
+        assert!(!model.can_play());
+        assert!(!model.accepts(&UiEvent::PlayFromStart));
+        model.movie_watch_pending = false;
+        assert!(model.accepts(&UiEvent::ChooseSource(71)));
+        assert!(model.can_play());
+    }
+
+    #[test]
+    fn discovery_feedback_distinguishes_loading_partial_complete_empty_and_failed() {
+        let mut discovery = SourceDiscovery {
+            pending: 2,
+            ..SourceDiscovery::default()
+        };
+        assert_eq!(discovery.heading(false), "Поиск источников…");
+        assert_eq!(
+            discovery.heading(true),
+            "Источники найдены · поиск продолжается"
+        );
+        discovery.pending = 0;
+        discovery.succeeded = 2;
+        assert_eq!(discovery.heading(true), "Поиск завершён");
+        assert_eq!(discovery.heading(false), "Источники не найдены");
+        discovery.failures.push("Provider unavailable".into());
+        discovery.succeeded = 1;
+        assert_eq!(discovery.heading(true), "Поиск завершён частично");
+        discovery.succeeded = 0;
+        assert_eq!(
+            discovery.heading(false),
+            "Все провайдеры завершились с ошибкой"
+        );
+    }
+
+    #[test]
+    fn commons_is_enabled_by_default_and_independent_of_torrent_providers() {
+        let defaults = SourcePreferencesDraft::default();
+        assert!(defaults.commons_enabled);
+        assert!(defaults.rutracker_enabled);
+        assert!(defaults.torznab.is_empty());
+        let disabled = SourcePreferencesDraft {
+            commons_enabled: false,
+            ..defaults.clone()
+        };
+        assert!(!disabled.commons_enabled);
+        assert_eq!(disabled.rutracker_enabled, defaults.rutracker_enabled);
+        assert_eq!(disabled.torznab, defaults.torznab);
+    }
+
+    #[test]
+    fn source_preferences_event_debug_never_exposes_url_or_env_reference() {
+        let event = UiEvent::SaveSourcePreferences(SourcePreferencesDraft {
+            torznab: vec![TorznabDraft {
+                name: "private-name".into(),
+                base_url: "https://private-indexer.example/api?apikey=private-value".into(),
+                api_key_env: Some("KADR_TORZNAB_PRIVATE".into()),
+                enabled: true,
+            }],
+            ..SourcePreferencesDraft::default()
+        });
+        let debug = format!("{event:?}");
+        for private in [
+            "private-name",
+            "private-indexer",
+            "private-value",
+            "KADR_TORZNAB_PRIVATE",
+        ] {
+            assert!(!debug.contains(private));
+        }
+        assert!(debug.contains("<redacted>"));
     }
 
     #[test]
@@ -685,11 +1076,15 @@ mod tests {
         assert!(!model.accepts(&UiEvent::ChooseSource(7)));
         model.sources.push(SourceRow {
             index: 7,
+            recommended: false,
             title: "Public source".into(),
             kind: SourceKind::Http,
             quality: None,
             language: None,
             origin: "Provider".into(),
+            video_codec: None,
+            audio_codec: None,
+            peers: None,
             license: None,
             size: None,
             seeds: None,

@@ -167,18 +167,15 @@ impl KadrView {
             self.catalog_images_enabled(),
             self.model.preferences.torrents_enabled,
         ) {
-            (false, false) => Some(
-                "Поиск RuTracker недоступен: разрешите внешний каталог и BitTorrent в настройках \
-                 и сохраните изменения. Trakt предоставляет только метаданные и ссылки на изображения, не видео. \
+            (false, _) => Some(
+                "Сетевой поиск источников (Wikimedia Commons / RuTracker / Torznab) недоступен: разрешите внешний каталог \
+                 в настройках и сохраните изменения. Trakt предоставляет только метаданные и ссылки на изображения, не видео. \
+                 Для Commons BitTorrent не нужен; RuTracker и Torznab требуют отдельного разрешения BitTorrent. \
                  Свой HTTP(S)-источник можно открыть без поиска.",
             ),
-            (false, true) => Some(
-                "Поиск RuTracker недоступен: разрешите внешний каталог в настройках и сохраните \
-                 изменения. Trakt предоставляет только метаданные и ссылки на изображения, не видео. \
-                 Можно вставить свой источник или открыть .torrent.",
-            ),
             (true, false) => Some(
-                "Поиск RuTracker недоступен: разрешите BitTorrent в настройках и сохраните изменения. \
+                "Поиск RuTracker / Torznab недоступен: разрешите BitTorrent в настройках и сохраните изменения. \
+                 Поиск Wikimedia Commons доступен, если поставщик включён; он ограничен проверенными фильмами Blender. \
                  BitTorrent обменивается частями файлов с другими участниками сети. \
                  Свой HTTP(S)-источник можно открыть без BitTorrent.",
             ),
@@ -403,7 +400,7 @@ impl KadrView {
                         "Без привязки",
                         Command::Emit(UiEvent::UnlinkMedia),
                         false,
-                        true,
+                        self.model.accepts(&UiEvent::UnlinkMedia),
                         cx,
                     )),
             );
@@ -434,7 +431,12 @@ impl KadrView {
                                                 .child(source.quality.clone().unwrap_or_else(|| "Неизвестно".into())))
                                             .child(div().text_size(px(10.)).text_color(rgb(MUTED))
                                                 .child(if source.rutracker { "BitTorrent" } else { source.kind.label() })))
+                                        .when(source.recommended, |cell| cell.child(
+                                            div().text_size(px(10.)).text_color(rgb(ACCENT)).child("Рекомендуемый"),
+                                        ))
                                         .child(div().text_size(px(11.)).text_color(rgb(MUTED)).child(source.title.clone()))
+                                        .when_some(source.video_codec.as_ref(), |cell, codec| cell.child(body(format!("Видео: {codec}"))))
+                                        .when_some(source.audio_codec.as_ref(), |cell, codec| cell.child(body(format!("Аудио: {codec}"))))
                                         .child(div().text_size(px(10.)).text_color(rgb(MUTED))
                                             .child(format!("Лицензия: {}", source.license.as_deref().unwrap_or("не указана"))))
                                         .when(source.rutracker, |cell| cell.child(
@@ -457,7 +459,8 @@ impl KadrView {
                                     .child(source.size.map(bytes).unwrap_or_else(|| "Неизвестно".into())))
                                 .child(div().w(px(58.)).flex_shrink_0().text_size(px(11.))
                                     .text_color(rgb(if source.seeds.is_some_and(|n| n > 0) { ACCENT } else { MUTED }))
-                                    .child(source.seeds.map(|n| n.to_string()).unwrap_or_else(|| "—".into())))
+                                    .child(source.seeds.map(|n| n.to_string()).unwrap_or_else(|| "—".into()))
+                                    .when_some(source.peers, |cell, peers| cell.child(div().text_color(rgb(MUTED)).child(format!("Пиры: {peers}")))))
                                 .child(
                                     self.button(
                                         ("choose-source", source.index),
@@ -934,7 +937,8 @@ impl KadrView {
                 .child(body(CATALOG_ONBOARDING))
                 .child(body("Для разработки: KADR_TRAKT_CLIENT_ID — публичный ID приложения Trakt; \
                     его можно задать вне приложения, в окружении процесса. Это не личный токен и не client secret."))
-                .child(body("RuTracker — отдельный поиск источников. Внешний каталог и BitTorrent должны быть разрешены. \
+                .child(body(COMMONS_DISCLOSURE))
+                .child(body("RuTracker и настроенные Torznab API используются для поиска источников. Для них внешний каталог и BitTorrent должны быть разрешены. \
                     Данные раздач и права на контент не проверены.")))
             .child(panel().gap_4()
                 .child(eyebrow("ХРАНИЛИЩЕ"))
@@ -954,18 +958,18 @@ impl KadrView {
                 .child(field("Максимум пиров", inputs.peers.clone()))
                 .child(field("Прокси", inputs.catalog_proxy.clone()))
                 .child(body("http://, https://, socks5:// или socks5h:// — без имени пользователя и пароля. Пустое поле — прямое соединение."))
-                .child(body("Только RuTracker, Trakt и постеры. Не применяется к BitTorrent, внешним плеерам, вручную открытым HTTP-ссылкам и локальному серверу воспроизведения. При недоступности прокси автоматического перехода на прямое соединение нет."))
+                .child(body("Для Trakt, постеров и API Wikimedia Commons, RuTracker и Torznab. Не применяется к BitTorrent, HTTP-видео, внешним плеерам и локальному серверу воспроизведения. При недоступности прокси автоматического перехода на прямое соединение нет."))
                 .child(div().flex().flex_wrap().items_center().gap_4().pt_4().border_t_1().border_color(rgb(BORDER))
                     .child(column().gap_1().flex_1().min_w(px(180.))
                         .child(div().text_sm().child("Обмен BitTorrent"))
-                        .child(body("Может отдавать загруженные части другим участникам сети.")))
+                        .child(body("Может отдавать загруженные части другим участникам сети. Отключение блокирует поиск RuTracker/Torznab, но не Wikimedia Commons.")))
                     .child(self.button("enable-torrents",
                         if self.model.preferences.torrents_enabled { "Включён" } else { "Выключен" },
                         Command::ToggleTorrents, self.model.preferences.torrents_enabled, true, cx)))
                 .child(div().flex().flex_wrap().items_center().gap_4().pt_4().border_t_1().border_color(rgb(BORDER))
                     .child(column().gap_1().flex_1().min_w(px(180.))
                         .child(div().text_sm().child("Внешний каталог"))
-                        .child(body("Trakt: только метаданные и ссылки на изображения. Также разрешает сетевой поиск источников RuTracker; BitTorrent включается отдельно.")))
+                        .child(body("Разрешает получать метаданные и изображения Trakt и обращаться к включённым сетевым поставщикам, включая Wikimedia Commons. Привязанные ручные источники остаются доступны без сетевого поиска. BitTorrent включается отдельно.")))
                     .child(self.button("enable-catalog",
                         if self.model.preferences.catalog_enabled { "Включён" } else { "Выключен" },
                         Command::ToggleCatalog, self.model.preferences.catalog_enabled, true, cx)))
@@ -1135,22 +1139,26 @@ mod tests {
     fn source_search_notice_explains_each_disabled_permission_and_draft_enable() {
         let mut view = KadrView::default();
         let notice = view.source_search_notice().unwrap();
+        assert!(notice.contains("Сетевой поиск источников"));
+        assert!(notice.contains("Wikimedia Commons"));
         assert!(notice.contains("RuTracker"));
         assert!(notice.contains("внешний каталог"));
         assert!(notice.contains("Trakt"));
         assert!(notice.contains("только метаданные"));
+        assert!(notice.contains("Для Commons BitTorrent не нужен"));
         view.applied_catalog_enabled = true;
         assert!(view.source_search_notice().is_none());
         view.model.preferences.torrents_enabled = false;
         let notice = view.source_search_notice().unwrap();
         assert!(notice.contains("разрешите BitTorrent"));
+        assert!(notice.contains("Поиск Wikimedia Commons доступен, если поставщик включён"));
+        assert!(!notice.contains("Сетевой поиск источников"));
         assert!(notice.contains("HTTP(S)"));
         view.model.preferences.catalog_enabled = false;
-        assert!(
-            view.source_search_notice()
-                .unwrap()
-                .contains("внешний каталог и BitTorrent")
-        );
+        let notice = view.source_search_notice().unwrap();
+        assert!(notice.contains("Сетевой поиск источников"));
+        assert!(notice.contains("разрешите внешний каталог"));
+        assert!(!notice.contains("разрешите BitTorrent"));
         view.model.preferences.catalog_enabled = true;
         view.applied_catalog_enabled = false;
         assert!(
@@ -1158,6 +1166,29 @@ mod tests {
                 .unwrap()
                 .contains("сохраните изменения")
         );
+    }
+
+    #[test]
+    fn source_search_notice_does_not_treat_a_disabled_commons_provider_as_enabled() {
+        let mut view = KadrView {
+            applied_catalog_enabled: true,
+            source_preferences: source_preferences::SourcePreferencesEditor::from(
+                SourcePreferencesDraft {
+                    commons_enabled: false,
+                    ..SourcePreferencesDraft::default()
+                },
+            ),
+            ..KadrView::default()
+        };
+        view.model.preferences.torrents_enabled = false;
+        assert!(
+            view.source_search_notice()
+                .unwrap()
+                .contains("доступен, если поставщик включён")
+        );
+        // Permission notices explain consent, not unsaved provider flags.
+        view.model.preferences.torrents_enabled = true;
+        assert!(view.source_search_notice().is_none());
     }
 
     #[test]

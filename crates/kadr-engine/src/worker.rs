@@ -13,6 +13,7 @@ use kadr_catalog::{Client, Options, rutracker};
 use kadr_core::{
     catalog::{Episode, Media, MediaKind},
     source::{ManualSource, SourceKind},
+    sources::{Locator, MediaQuery, MediaSource},
     torrent::{EpisodeRecognition, FileIndex, TorrentRelativePath, VideoCandidate},
 };
 use kadr_media::{
@@ -36,6 +37,7 @@ use super::{
     AsyncState, BrowseCatalog, Command, Event, FileChoice, Level, Request, TransferStatus,
 };
 
+mod discovery;
 mod tracker;
 
 #[derive(Clone)]
@@ -49,6 +51,11 @@ enum Origin {
         kind: SourceKind,
         prepared: PreparedTorrent,
     },
+    /// Remote metainfo stays in memory. Never persist an authenticated enclosure
+    /// or invent a magnet; reopening requires explicit discovery and selection.
+    RemoteTorrent {
+        prepared: PreparedTorrent,
+    },
     Saved {
         path: PathBuf,
         source_id: SourceId,
@@ -59,7 +66,7 @@ impl Origin {
     fn prepared(&self) -> Option<&PreparedTorrent> {
         match self {
             Self::Manual { prepared, .. } => prepared.as_ref(),
-            Self::RuTracker { prepared, .. } => Some(prepared),
+            Self::RuTracker { prepared, .. } | Self::RemoteTorrent { prepared } => Some(prepared),
             Self::Saved { .. } => None,
         }
     }
@@ -97,7 +104,7 @@ impl Selection {
                 info_hash: prepared.info_hash.clone(),
                 file_id: self.file_id,
             }),
-            Origin::Saved { .. } => None,
+            Origin::RemoteTorrent { .. } | Origin::Saved { .. } => None,
         }
     }
 
@@ -111,6 +118,14 @@ impl Selection {
                 .expect("RuTracker always has a descriptor")
                 .source_id()
                 .map_err(storage_error),
+            Origin::RemoteTorrent { prepared } => SourceId::new(format!(
+                "remote-torrent:v1:{}{}",
+                prepared.info_hash,
+                self.file_id
+                    .map(|id| format!(":file:{id}"))
+                    .unwrap_or_default()
+            ))
+            .map_err(storage_error),
             Origin::Saved { source_id, .. } => Ok(source_id.clone()),
         }
     }
@@ -148,8 +163,8 @@ struct Active {
 enum CatalogAnswer {
     Browse(Result<BrowseCatalog, String>),
     Search(Result<Vec<Media>, String>),
-    Details(Result<Media, String>),
-    Sources(Result<Vec<rutracker::Offer>, tracker::PrepareError>),
+    Details(Result<Box<Media>, String>),
+    Sources(crate::resolver::ProviderResult),
 }
 
 struct CatalogResult {
@@ -184,7 +199,8 @@ struct Worker {
     media: Option<Media>,
     episode: Option<Episode>,
     episode_explicit: bool,
-    sources: Vec<rutracker::Offer>,
+    discovery: discovery::Discovery,
+    source_preferences: super::SourcePreferences,
     tracker: tracker::Account,
     tracker_search: CancellationToken,
     pending_tracker: Option<tracker::Pending>,
@@ -250,6 +266,16 @@ pub(super) async fn run(
             return;
         }
     };
+    let source_preferences = match storage.load_source_preferences() {
+        Ok(value) => value,
+        Err(_) => {
+            send_error(
+                &events,
+                "Не удалось прочитать настройки поставщиков источников.",
+            );
+            return;
+        }
+    };
     let tracker = tracker::Account::new(settings.catalog_proxy.clone());
     let (save_progress, mut progress) = mpsc::unbounded_channel();
     let (catalog_results, mut answers) = mpsc::unbounded_channel();
@@ -257,6 +283,7 @@ pub(super) async fn run(
         settings: super::Settings::from_storage(settings.clone()),
         cache: cache.usage().ok().map(super::CacheUsage::from_cache),
     });
+    let _ = events.unbounded_send(Event::SourcePreferences(source_preferences.clone()));
     // Keep database ownership on this worker for the entire application lifetime.
     let mut worker = Worker {
         storage,
@@ -269,7 +296,8 @@ pub(super) async fn run(
         media: None,
         episode: None,
         episode_explicit: false,
-        sources: Vec::new(),
+        discovery: discovery::Discovery::default(),
+        source_preferences,
         tracker,
         tracker_search: shutdown.child_token(),
         pending_tracker: None,
@@ -412,7 +440,10 @@ impl Worker {
                     return;
                 }
                 self.reset_tracker_prompt();
-                self.sources.clear();
+                self.discovery.clear();
+                self.media = None;
+                self.episode = None;
+                self.episode_explicit = false;
                 self.selection = None;
                 self.send(Event::SearchState(AsyncState::Loading));
                 let client = self.catalog.clone();
@@ -421,6 +452,7 @@ impl Worker {
                     let result = client
                         .details(&id, &cancel)
                         .await
+                        .map(Box::new)
                         .map_err(|error| error.to_string());
                     let _ = output.send(CatalogResult {
                         cancel,
@@ -458,7 +490,7 @@ impl Worker {
                 if let Some((source, file_id, target)) = retry {
                     self.select_source(source, file_id, target, cancel).await;
                 } else {
-                    self.find_sources(cancel);
+                    self.resolve_sources(cancel, true);
                 }
             }
             Command::SelectEpisode(season, number) => {
@@ -478,7 +510,7 @@ impl Worker {
                     return;
                 }
                 self.episode_explicit = true;
-                self.sources.clear();
+                self.discovery.clear();
                 self.selection = None;
                 self.send(Event::TorrentFiles(Vec::new()));
                 self.send(Event::SourceSelected {
@@ -497,17 +529,10 @@ impl Worker {
             }
             Command::ChooseSource(index) => {
                 if self.idle() {
-                    let Some(topic_id) = self.sources.get(index).map(|offer| offer.topic_id) else {
-                        self.source_error(
-                            Level::Error,
-                            "Источник больше недоступен; повторите поиск.",
-                        );
-                        return;
-                    };
-                    self.select_tracker(tracker::SelectionRequest::new(topic_id), cancel)
-                        .await;
+                    self.choose_offer(index, cancel).await;
                 }
             }
+            Command::WatchRelease(index) => self.watch_release(index, cancel).await,
             Command::SignInRuTracker { username, password } => {
                 if self.idle() {
                     self.sign_in_tracker(username, password, cancel).await;
@@ -525,6 +550,8 @@ impl Worker {
                         self.status(Level::Error, "Номер эпизода должен быть больше нуля.");
                         return;
                     }
+                    self.discovery.clear();
+                    self.publish_source_offers();
                     self.episode = Some(Episode {
                         season,
                         number,
@@ -539,6 +566,9 @@ impl Worker {
                         Level::Info,
                         "Привязка эпизода изменена. Прогресс будет храниться отдельно.",
                     );
+                    if let Some(index) = self.selection.as_ref().and_then(|s| s.file_id) {
+                        self.choose_file(index);
+                    }
                 }
             }
             Command::Play { resume } => {
@@ -564,6 +594,7 @@ impl Worker {
                 }
             }
             Command::UpdateSettings(settings) => self.update_settings(settings.into_storage()),
+            Command::SetSourcePreferences(preferences) => self.set_source_preferences(preferences),
             Command::ClearCache => {
                 match self.cache.clear_inactive() {
                     Ok(usage) => {
@@ -590,7 +621,7 @@ impl Worker {
             Command::UnlinkMedia => {
                 if self.idle() {
                     self.reset_tracker_prompt();
-                    self.sources.clear();
+                    self.discovery.clear();
                     self.send(Event::SourcesState(AsyncState::Ready(Vec::new())));
                     self.media = None;
                     self.episode = None;
@@ -601,6 +632,7 @@ impl Worker {
                     self.send(Event::MediaSelected {
                         media: None,
                         favorite: false,
+                        episode: None,
                     });
                     self.status(
                         Level::Info,
@@ -610,7 +642,7 @@ impl Worker {
             }
             Command::Cancel => {
                 self.reset_tracker_prompt();
-                self.sources.clear();
+                self.discovery.clear();
                 if self.active.is_none() {
                     self.selection = None;
                     self.send(Event::TorrentFiles(Vec::new()));
@@ -629,46 +661,38 @@ impl Worker {
     }
 
     fn find_sources(&mut self, cancel: CancellationToken) {
-        let Some(media) = self.media.clone() else {
-            self.source_error(
-                Level::Warning,
-                "Сначала откройте карточку фильма или сериала.",
-            );
-            return;
-        };
-        self.sources.clear();
-        self.selection = None;
-        self.send(Event::TorrentFiles(Vec::new()));
-        self.send(Event::SourceSelected {
-            kind: None,
-            title: String::new(),
-            playable: false,
-            suggested_filename: String::new(),
-        });
-        self.tracker_search.cancel();
-        if !self.tracker_allowed() {
-            self.source_error(
-                Level::Warning,
-                "Поиск RuTracker не выполнялся: включите «Внешний каталог» и «Обмен BitTorrent» в настройках или откройте свой источник.",
-            );
+        self.resolve_sources(cancel, false);
+    }
+
+    async fn watch_release(&mut self, index: usize, cancel: CancellationToken) {
+        if !self.idle() {
+            self.send(Event::PlaybackActive(true));
             return;
         }
-        self.send(Event::SourcesState(AsyncState::Loading));
-        let episode = self.episode.clone();
-        self.tracker_search = cancel.child_token();
-        let cancel = self.tracker_search.clone();
-        let tracker = self.tracker.clone();
-        let tracker_vault = self.tracker_vault.clone();
-        let output = self.catalog_results.clone();
-        self.catalog_jobs.spawn(async move {
-            let result = tracker
-                .search(&tracker_vault, &media, episode.as_ref(), &cancel)
-                .await;
-            let _ = output.send(CatalogResult {
-                cancel,
-                answer: CatalogAnswer::Sources(result),
-            });
-        });
+        if self.tracker_search.is_cancelled() || self.discovery.recommended_handle() != Some(index)
+        {
+            self.source_error(
+                Level::Warning,
+                "Рекомендация больше не актуальна. Обновите источники.",
+            );
+        } else {
+            // Never play a previous selection if preparing this release fails.
+            self.selection = None;
+            self.choose_offer(index, cancel.clone()).await;
+            if !cancel.is_cancelled()
+                && self.selection.as_ref().is_some_and(|source| {
+                    source.is_playable(self.settings.network.torrents_enabled)
+                })
+            {
+                // Play owns process startup, progress reporting, and Stop from here.
+                self.play(true, self.settings.default_player, cancel).await;
+                return;
+            }
+        }
+        self.send(Event::PlaybackActive(false));
+        if !cancel.is_cancelled() {
+            self.send(Event::MovieWatchNeedsInput(super::DiscoveryStamp(cancel)));
+        }
     }
 
     fn catalog_answer(&mut self, result: CatalogResult) {
@@ -686,6 +710,7 @@ impl Worker {
             })),
             CatalogAnswer::Details(result) => match result {
                 Ok(media) => {
+                    let media = *media;
                     if self.active.is_some() {
                         self.status(
                             Level::Warning,
@@ -710,7 +735,7 @@ impl Worker {
                     self.media = Some(media.clone());
                     self.episode = None;
                     self.episode_explicit = false;
-                    self.sources.clear();
+                    self.discovery.clear();
                     self.selection = None;
                     self.send(Event::TorrentFiles(Vec::new()));
                     self.send(Event::SourceSelected {
@@ -723,33 +748,19 @@ impl Worker {
                     self.send(Event::MediaSelected {
                         media: Some(media),
                         favorite,
+                        episode: None,
                     });
                     self.send(Event::SourcesState(AsyncState::Ready(Vec::new())));
                 }
                 Err(message) => self.send(Event::SearchState(AsyncState::Error(message))),
             },
-            CatalogAnswer::Sources(result) => match result {
-                Ok(offers) => {
-                    self.sources = offers;
-                    self.publish_source_offers();
-                }
-                Err(tracker::PrepareError::Failed(message)) => {
-                    self.send(Event::SourcesState(AsyncState::Error(message)));
-                }
-                Err(tracker::PrepareError::Login(message)) => {
-                    self.publish_source_offers();
-                    self.request_tracker_discovery_login(message);
-                }
-            },
+            CatalogAnswer::Sources(result) => self.provider_answer(result),
         }
     }
 
     fn publish_source_offers(&self) {
         self.send(Event::SourcesState(AsyncState::Ready(
-            self.sources
-                .iter()
-                .map(super::SourceCandidate::from_rutracker)
-                .collect(),
+            self.discovery.rows(),
         )));
     }
 
@@ -870,15 +881,14 @@ impl Worker {
                 .collect();
             if matches.len() == 1 {
                 Some(matches[0])
-            } else if choices.len() == 1
-                && self.episode.as_ref().is_none_or(|episode| {
-                    choices[0]
-                        .season
-                        .zip(choices[0].episode)
-                        .is_none_or(|identified| identified == (episode.season, episode.number))
-                })
+            } else if let [only] = choices.as_slice()
+                && self.episode.is_none()
+                // A single video is not enough when its filename identifies
+                // an episode or pack rather than the film on this card.
+                && !(self.media.as_ref().is_some_and(|m| m.kind == MediaKind::Movie)
+                    && (only.episode.is_some() || only.ambiguous))
             {
-                Some(choices[0].index)
+                Some(only.index)
             } else {
                 None
             }
@@ -944,6 +954,23 @@ impl Worker {
             self.status(Level::Error, "Выберите видеофайл из списка.");
             return;
         };
+        if self.episode_explicit
+            && let Some(episode) = &self.episode
+            && let Some((season, number)) = choice.season.zip(choice.episode)
+            && (season, number) != (episode.season, episode.number)
+        {
+            let message = format!(
+                "Файл распознан как S{season:02}E{number:02}, но выбран S{:02}E{:02}. Выберите другой файл, измените эпизод или отвяжите источник от каталога.",
+                episode.season, episode.number,
+            );
+            if let Some(selection) = &mut self.selection {
+                selection.file_id = None;
+                selection.target = None;
+            }
+            self.publish_selection();
+            self.status(Level::Error, &message);
+            return;
+        }
         if !self.episode_explicit {
             self.episode = None;
             if let (Some(season), Some(number)) = (choice.season, choice.episode) {
@@ -977,6 +1004,7 @@ impl Worker {
         let kind = match &selection.origin {
             Origin::Manual { source, .. } => Some(source.kind()),
             Origin::RuTracker { kind, .. } => Some(*kind),
+            Origin::RemoteTorrent { .. } => Some(SourceKind::TorrentFile),
             Origin::Saved { .. } => None,
         };
         let playable = selection.is_playable(self.settings.network.torrents_enabled);
@@ -1657,6 +1685,7 @@ impl Worker {
                 self.send(Event::MediaSelected {
                     media: self.media.clone(),
                     favorite,
+                    episode: self.catalog_episode().map(|ep| (ep.season, ep.number)),
                 });
             }
             self.publish_library();
@@ -1669,7 +1698,7 @@ impl Worker {
         // Replacing a library item must never leave the previous input ready
         // for an unrelated card after an error or a later settings update.
         self.reset_tracker_prompt();
-        self.sources.clear();
+        self.discovery.clear();
         self.selection = None;
         self.send(Event::TorrentFiles(Vec::new()));
         self.send(Event::SourceSelected {
@@ -1715,6 +1744,7 @@ impl Worker {
         self.send(Event::MediaSelected {
             media: self.media.clone(),
             favorite: item.entry.favorite,
+            episode: target.episode.map(|ep| (ep.season, ep.episode)),
         });
         let saved = self.storage.saved_file(&target).ok().flatten();
         self.send(Event::LibraryOpened {
@@ -1854,10 +1884,17 @@ impl Worker {
             self.cache = cache;
         }
         let proxy_changed = settings.catalog_proxy != self.settings.catalog_proxy;
-        let tracker_disabled = !settings.catalog_enabled || !settings.network.torrents_enabled;
+        let tracker_disabled = (!settings.catalog_enabled && self.settings.catalog_enabled)
+            || (!settings.network.torrents_enabled && self.settings.network.torrents_enabled);
         if tracker_disabled || proxy_changed {
             // A fresh account must never reuse a client or cookie jar on the old route.
+            self.tracker_search.cancel();
             self.tracker = tracker::Account::new(settings.catalog_proxy.clone());
+        }
+        if proxy_changed && self.discovery.active() {
+            self.reset_tracker_prompt();
+            self.discovery.clear();
+            self.publish_source_offers();
         }
         self.settings = settings;
         self.catalog = catalog;
@@ -1865,7 +1902,7 @@ impl Worker {
             self.settings.clone(),
         )));
         if !self.settings.catalog_enabled {
-            self.sources.clear();
+            self.discovery.clear();
             self.send(Event::BrowseState(AsyncState::Error(
                 "Каталог отключён в Настройках. Ручные источники и локальная библиотека доступны."
                     .into(),
@@ -1880,8 +1917,8 @@ impl Worker {
             self.tracker_search.cancel();
             let was_preparing = self.pending_tracker.is_some();
             self.reset_tracker_prompt();
-            if self.settings.catalog_enabled && (was_preparing || !self.sources.is_empty()) {
-                self.sources.clear();
+            if self.settings.catalog_enabled && (was_preparing || self.discovery.active()) {
+                self.discovery.clear();
                 self.source_error(
                     Level::Warning,
                     "Поиск RuTracker выключен вместе с BitTorrent.",

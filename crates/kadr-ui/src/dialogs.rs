@@ -33,7 +33,7 @@ impl KadrView {
     }
 
     pub(super) fn overlay(&self, width: f32, height: f32, cx: &mut Context<Self>) -> Option<Div> {
-        if self.preparing {
+        if self.model.preparing {
             return Some(self.modal_layer(false, None, self.preparation_dialog(width, cx), cx));
         }
         self.modal_from?;

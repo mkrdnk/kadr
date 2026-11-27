@@ -9,6 +9,7 @@
 //! loop to wait for player teardown, pending saves and storage cleanup.
 mod dto;
 mod playback;
+mod resolver;
 #[cfg(test)]
 mod tests;
 mod worker;
@@ -19,6 +20,7 @@ pub use dto::{
 };
 pub use kadr_catalog::BrowseCatalog;
 pub use kadr_core::source;
+pub use kadr_storage::{SourcePreferences, TorznabConfig};
 
 /// Provider-neutral metadata, without actionable source descriptors.
 ///
@@ -58,6 +60,15 @@ pub enum AsyncState<T> {
     Error(String),
 }
 
+/// A read-only validity check for snapshots already queued on the UI loop.
+pub struct DiscoveryStamp(CancellationToken);
+
+impl DiscoveryStamp {
+    pub fn is_current(&self) -> bool {
+        !self.0.is_cancelled()
+    }
+}
+
 pub struct FileChoice {
     pub index: usize,
     pub name: String,
@@ -90,13 +101,28 @@ pub enum Event {
     },
     Status(Level, String),
     PlaybackActive(bool),
+    /// A requested movie release needs a file choice, login, or another source.
+    MovieWatchNeedsInput(DiscoveryStamp),
     BrowseState(AsyncState<BrowseCatalog>),
     SearchState(AsyncState<Vec<Media>>),
     MediaSelected {
         media: Option<Media>,
         favorite: bool,
+        episode: Option<(u16, u16)>,
     },
     SourcesState(AsyncState<Vec<SourceCandidate>>),
+    /// Cumulative provider results. Only the originating target should render
+    /// this snapshot; a zero pending count marks the end of the search.
+    SourceDiscovery {
+        stamp: DiscoveryStamp,
+        media_id: String,
+        episode: Option<(u16, u16)>,
+        rows: Vec<SourceCandidate>,
+        pending: usize,
+        succeeded: usize,
+        failures: Vec<String>,
+    },
+    SourcePreferences(SourcePreferences),
     RuTrackerLogin {
         message: Option<String>,
         pending: bool,
@@ -133,6 +159,8 @@ pub enum Command {
     SelectEpisode(u16, u16),
     SelectSource(ManualSource),
     ChooseSource(usize),
+    /// Explicit Watch action, bound to the winning handle of a completed search.
+    WatchRelease(usize),
     /// Submit the user's own credentials. The command intentionally has no Debug.
     SignInRuTracker {
         username: String,
@@ -153,6 +181,7 @@ pub enum Command {
     },
     OpenLibrary(String),
     UpdateSettings(Settings),
+    SetSourcePreferences(SourcePreferences),
     ClearCache,
     ClearHistory,
     UnlinkMedia,
@@ -270,11 +299,23 @@ impl Engine {
                 self.browse_stop = self.shutdown.child_token();
                 self.browse_stop.clone()
             }
-            Command::Search(_)
-            | Command::OpenMedia(_)
-            | Command::FindSources
-            | Command::RetrySources
-            | Command::SelectEpisode(_, _) => {
+            Command::FindSources => {
+                // The worker coalesces repeated clicks for the current target.
+                self.source_stop.cancel();
+                if self.catalog_stop.is_cancelled() {
+                    self.catalog_stop = self.shutdown.child_token();
+                }
+                self.catalog_stop.clone()
+            }
+            Command::SelectEpisode(_, _) | Command::AssignEpisode(_, _) => {
+                // A synchronous target change invalidates previous IO. It
+                // must itself survive the immediately following Find/Select:
+                // that command relies on the target already queued before it.
+                self.catalog_stop.cancel();
+                self.source_stop.cancel();
+                self.shutdown.child_token()
+            }
+            Command::Search(_) | Command::OpenMedia(_) | Command::RetrySources => {
                 if !matches!(&command, Command::Search(_)) {
                     self.source_stop.cancel();
                 }
@@ -293,7 +334,7 @@ impl Engine {
                 self.source_stop = self.shutdown.child_token();
                 self.source_stop.clone()
             }
-            Command::Play { .. } => {
+            Command::Play { .. } | Command::WatchRelease(_) => {
                 self.playback_stop.cancel();
                 self.playback_stop = self.shutdown.child_token();
                 self.playback_stop.clone()
@@ -320,6 +361,11 @@ impl Engine {
                 self.catalog_stop.cancel();
                 self.source_stop.cancel();
                 self.save_stop.cancel();
+                self.shutdown.child_token()
+            }
+            Command::SetSourcePreferences(_) => {
+                self.catalog_stop.cancel();
+                self.source_stop.cancel();
                 self.shutdown.child_token()
             }
             Command::UpdateSettings(settings) => {

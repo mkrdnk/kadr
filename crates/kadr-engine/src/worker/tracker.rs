@@ -231,7 +231,10 @@ impl Worker {
     }
 
     pub(super) fn tracker_allowed(&self) -> bool {
-        self.settings.catalog_enabled && self.settings.network.torrents_enabled && !self.headless
+        self.source_preferences.rutracker_enabled
+            && self.settings.catalog_enabled
+            && self.settings.network.torrents_enabled
+            && !self.headless
     }
 
     pub(super) fn request_tracker_discovery_login(&mut self, message: &str) {
@@ -420,7 +423,7 @@ impl Worker {
         self.tracker_login(None, false);
         if matches!(self.pending_tracker, Some(Pending::Discovery)) {
             self.reset_tracker_prompt();
-            self.find_sources(cancel);
+            self.resolve_sources(cancel, true);
         } else {
             self.load_tracker_selection(false, cancel).await;
         }
@@ -435,6 +438,11 @@ impl Worker {
     pub(super) async fn forget_tracker(&mut self, cancel: CancellationToken) {
         self.reset_tracker_prompt();
         self.tracker_search.cancel();
+        self.discovery.clear();
+        self.publish_source_offers();
+        if self.storage.clear_provider_results("rutracker").is_err() {
+            self.status(Level::Warning, "Не удалось удалить кэш поиска RuTracker.");
+        }
         self.tracker = Account::new(self.settings.catalog_proxy.clone());
         let result = self.tracker_vault.call(&cancel, vault::forget).await;
         if cancel.is_cancelled() {
