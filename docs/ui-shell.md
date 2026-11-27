@@ -22,6 +22,10 @@ the application to configure a GPUI HTTP client.
   license; manual clipboard attachment and `.torrent` picker; explicit unlink
   from the current media; player selection and playback controls. Private URLs
   and stream tokens have no fields in the presentation DTOs and are not shown.
+  A discovery snapshot reports pending/successful/failed providers. Fast
+  results are selectable while others run, and manual input works before
+  the first result. Refresh bypasses the discovery cache; dismissing the
+  dialog invalidates its search, not an already prepared manual input.
   RuTracker rows also show available size and seed count, without asserting
   playback rights. If the selected topic has no magnet, Sources shows a masked
   sign-in form only when requested by the engine.
@@ -36,7 +40,9 @@ the application to configure a GPUI HTTP client.
   Stop controls. Every unknown statistic is explicitly unknown, not zero.
 - **Settings**: default player; editable cache bytes/path, download/upload
   limits, peer cap, BitTorrent and catalogue toggles, directory picker, save,
-  clear-cache and clear-history requests.
+  clear-cache and clear-history requests. Source preferences have a separate
+  editor/acknowledgement: provider switches, endpoints, optional names of
+  key environment variables (not secrets), preferred resolution and language.
 
 Sections support `SectionState::{Unavailable,Loading,Empty,Error}`.
 Source/search work is cancellable; retry repeats the corresponding request.
@@ -65,7 +71,7 @@ EpisodeRow { season: u16, number: u16, title: String }
 SourceRow {
     index: usize, title: String, kind: SourceKind, quality: Option<String>,
     language: Option<String>, origin: String, license: Option<String>,
-    size: Option<u64>, seeds: Option<u32>, rutracker: bool,
+    size: Option<u64>, seeds: Option<u32>, rutracker: bool, recommended: bool,
 }
 TorrentFileRow {
     index: usize, name: String, size: u64, season: Option<u16>,
@@ -96,7 +102,7 @@ and the detail's Sources open over the current page rather than replacing it.
 New events:
 
 ```rust,ignore
-Search(String), Browse, OpenMedia(String), FindSources,
+Search(String), Browse, OpenMedia(String), WatchMovie, FindSources,
 SelectEpisode { season: u16, number: u16 }, ChooseSource(usize),
 ToggleFavorite, SetFavorite { id: String, favorite: bool }, OpenLibrary(String),
 ChooseTorrentFile(usize), AssignEpisode { season: u16, number: u16 },
@@ -107,6 +113,9 @@ SignInRuTracker(RuTrackerCredentials), ForgetRuTracker
 
 Existing events remain `PasteSource,OpenTorrent,Play,PlayFromStart,Stop`,
 `SetDefaultPlayer(PlayerChoice),Retry(Section),Cancel(Section)`.
+`WatchMovie` is the movie card's explicit play intent; `FindSources` only
+shows options. The view renders the engine's `recommended` marker and never
+derives a winner from a partially received or visually filtered list.
 The source/torrent indices are controller-provided identifiers, not visual row
 positions. `AssignEpisode` applies to the last selected torrent-file index.
 The controller must reject stale selections or operations when their underlying
@@ -122,8 +131,12 @@ set_search_results(Vec<MediaCard>)
 set_browse_catalog(Vec<MediaCard>, Vec<MediaCard>) // movies, shows
 set_browse_state(SectionState)
 set_media_detail(Option<MediaCard>)
+set_catalog_episode(Option<(u16, u16)>)
 set_media_favorite(bool)
 set_sources(Vec<SourceRow>)
+begin_source_discovery()
+set_source_discovery(Option<SourceDiscovery>)
+set_source_preferences(SourcePreferencesDraft)
 set_torrent_files(Vec<TorrentFileRow>)
 set_library(Vec<LibraryRow>)
 set_transfer(Option<TransferView>)

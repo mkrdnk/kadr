@@ -1,5 +1,9 @@
 # MVP acceptance evidence
 
+For the current Trakt-based Source Resolver and AC-01–15, see
+[Source Resolver acceptance](source-resolver-acceptance.md). The Archive/TVmaze
+and macOS results below are historical and do not validate this revision.
+
 This is an evidence index, not a declaration that every target platform or a
 publicly signed release has passed. `DONE.md` records exact final commands and
 platform results; historical P0 evidence is not substituted for runtime tests.
