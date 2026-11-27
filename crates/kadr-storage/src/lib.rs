@@ -4,7 +4,7 @@
 //! from a GPUI render callback. IDs are stable opaque keys, not source URLs or
 //! file paths. No network, playback inference, or telemetry is performed here.
 //!
-//! # Source resolver (schema v8)
+//! # Source resolver (schema v10)
 //!
 //! [`SourcePreferences`] is independent of [`Settings`]. RuTracker defaults to
 //! enabled to preserve availability, but the caller must still enforce explicit
@@ -16,8 +16,13 @@
 //! v7 adds strict `source_preferences`, ordered `torznab_configs` and
 //! `source_cache` tables. v8 adds independent `commons_enabled`: true on clean
 //! installs, false on all pre-v8 upgrades to avoid expanding prior consent.
-//! Explicit opt-in/out survives restarts. Commons needs catalog consent, not
-//! BitTorrent or credentials. The migration chain remains one transaction,
+//! v9 adds `popcorn_enabled`, false on all installations until explicitly enabled.
+//! v10 resets that flag: v9 consent covered only fusme.link movies by IMDb ID,
+//! not additional mirrors or numbered episodes. The single switch remains off
+//! until explicitly re-enabled; subsequent v10 restarts preserve that choice.
+//! Other preferences and resolver cache survive this migration unchanged.
+//! Commons needs catalog consent, not BitTorrent or credentials.
+//! The migration chain remains one transaction,
 //! preserving settings/history and refusing newer schemas without changing them.
 //! Resolver results live in SQLite, not the media file cache; no media files are
 //! moved or created by resolver preference/cache writes.

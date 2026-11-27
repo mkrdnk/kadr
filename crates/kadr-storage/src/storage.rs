@@ -10,7 +10,7 @@ use crate::{
     snapshots::link_source_row,
 };
 
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 10;
 
 /// Synchronous connection, intended to be owned by one background worker.
 /// No raw connection is exposed, so writes always pass validation.
@@ -682,6 +682,19 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             transaction.execute("UPDATE source_preferences SET commons_enabled = 1", [])?;
         }
         transaction.pragma_update(None, "user_version", 8)?;
+    }
+    if version < 9 {
+        transaction.execute_batch(
+            "ALTER TABLE source_preferences ADD COLUMN popcorn_enabled INTEGER NOT NULL DEFAULT 0
+                 CHECK(popcorn_enabled IN (0, 1));",
+        )?;
+        transaction.pragma_update(None, "user_version", 9)?;
+    }
+    if version < 10 {
+        // v9 consent covered only fusme.link movie lookups by IMDb ID, not
+        // additional mirrors or numbered episodes. Require a fresh opt-in.
+        transaction.execute("UPDATE source_preferences SET popcorn_enabled = 0", [])?;
+        transaction.pragma_update(None, "user_version", 10)?;
     }
     if version < 1 {
         write_settings(&transaction, &Settings::default())?;
