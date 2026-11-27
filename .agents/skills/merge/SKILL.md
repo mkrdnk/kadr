@@ -21,8 +21,12 @@ again.
    publication remote is GitHub `mkrdnk/kadr`, not a local checkout. Fetch
    current refs. Use the requested base, otherwise the verified GitHub default
    (historically `master`). Inspect applicable contribution instructions, PR
-   templates, destination rules, permissions and allowed merge methods. Use
-   authenticated GitHub tooling; do not assume the `gh` CLI is installed.
+   templates, destination rules, permissions and allowed merge methods.
+   Use the configured GitHub MCP server for GitHub API operations: repository
+   settings, pull requests, reviews, CI checks and logs, merge, and confirmation.
+   Use Git for local work and branch transport (fetch and push). If a required
+   MCP operation is unavailable or denied, report the operation and error;
+   do not switch credentials, use `gh`, or bypass the check.
 2. Use a topic branch for the change; if currently on the destination, branch
    from the change state without moving or publishing the destination. Review
    all new and modified files, including staged changes; commit all and only
