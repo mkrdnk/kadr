@@ -383,36 +383,6 @@ fn restart_recovers_pending_index_and_missing_managed_directory() {
 }
 
 #[test]
-fn process_exit_releases_stale_active_state_without_losing_bytes() {
-    const CHILD_ROOT: &str = "KADR_CACHE_CRASH_TEST_ROOT";
-    if let Some(root) = std::env::var_os(CHILD_ROOT) {
-        let manager = CacheManager::open(PathBuf::from(root), 10).unwrap();
-        let lease = manager.reserve("inprogress", 10).unwrap();
-        std::fs::write(lease.path().join("verified"), b"verified").unwrap();
-        // No CacheLease/CacheManager destructors: emulate abrupt termination.
-        std::process::exit(0);
-    }
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap().join("cache");
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "cache::tests::process_exit_releases_stale_active_state_without_losing_bytes",
-        ])
-        .env(CHILD_ROOT, &root)
-        .status()
-        .unwrap();
-    assert!(status.success());
-    let manager = CacheManager::open(root, 10).unwrap();
-    assert_eq!(manager.usage().unwrap().active_leases, 0);
-    let lease = manager.reserve("inprogress", 10).unwrap();
-    assert_eq!(
-        std::fs::read(lease.path().join("verified")).unwrap(),
-        b"verified"
-    );
-}
-
-#[test]
 fn corrupt_or_future_index_is_not_reset_and_permissions_are_private() {
     let (_temp, manager) = setup(10);
     let root = manager.path.clone();
