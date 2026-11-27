@@ -1281,6 +1281,14 @@ enum HttpBehavior {
     StallHead,
 }
 
+// macOS can inherit O_NONBLOCK on accepted streams. Keep accept pollable,
+// but always read/write HTTP headers using the fixture's socket timeouts.
+fn accept_http(listener: &TcpListener) -> std::io::Result<(TcpStream, SocketAddr)> {
+    let connection = listener.accept()?;
+    connection.0.set_nonblocking(false)?;
+    Ok(connection)
+}
+
 /// Minimal owned origin, not kadr-media::Server: independently implements strong
 /// ETag + conditional ranges, so the HTTP -> RemoteSource boundary is exercised.
 struct HttpOrigin {
@@ -1316,7 +1324,7 @@ impl HttpOrigin {
                         connections.swap_remove(index).join().unwrap();
                     }
                 }
-                match listener.accept() {
+                match accept_http(&listener) {
                     Ok((mut socket, _)) => {
                         if connections.len() == 16 {
                             continue;

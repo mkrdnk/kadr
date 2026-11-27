@@ -68,7 +68,7 @@ fn opening_a_movie_checks_a_cached_topic_before_find_and_reuses_the_lookup() {
     app.command(Command::PrefetchMovieSources(id.as_str().into()));
     let deadline = Instant::now() + WAIT;
     let mut socket = loop {
-        match listener.accept() {
+        match accept_http(&listener) {
             Ok((socket, _)) => break socket,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(5))

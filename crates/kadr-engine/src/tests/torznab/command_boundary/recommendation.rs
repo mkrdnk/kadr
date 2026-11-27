@@ -46,7 +46,7 @@ impl OfferOrigin {
         let (done, count, origin) = (stop.clone(), downloads.clone(), base.clone());
         let worker = thread::spawn(move || {
             while !done.load(Ordering::SeqCst) {
-                let (mut socket, _) = match listener.accept() {
+                let (mut socket, _) = match accept_http(&listener) {
                     Ok(connection) => connection,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(2));

@@ -158,7 +158,7 @@ fn enabled_popcorn_reaches_only_the_configured_proxy_and_reports_failure() {
     let mut hosts = Vec::new();
     for _ in 0..6 {
         let mut socket = loop {
-            match listener.accept() {
+            match accept_http(&listener) {
                 Ok((socket, _)) => break socket,
                 Err(error)
                     if error.kind() == std::io::ErrorKind::WouldBlock

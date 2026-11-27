@@ -74,7 +74,7 @@ impl Origin {
                     reply(&mut socket, &body);
                     replied_tx.send(()).unwrap();
                 }
-                let (mut socket, _) = match listener.accept() {
+                let (mut socket, _) = match accept_http(&listener) {
                     Ok(connection) => connection,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(2));
