@@ -108,7 +108,10 @@ fn v5_migration_preserves_existing_settings_and_has_no_proxy() {
     drop(store);
     let raw = Connection::open(&path).unwrap();
     raw.execute_batch(
-        "ALTER TABLE settings DROP COLUMN catalog_proxy;
+        "DROP TABLE source_cache;
+         DROP TABLE torznab_configs;
+         DROP TABLE source_preferences;
+         ALTER TABLE settings DROP COLUMN catalog_proxy;
          PRAGMA user_version = 5;",
     )
     .unwrap();
@@ -140,7 +143,13 @@ fn v6_migration_collision_rolls_back_without_replacing_existing_values() {
     store.save_settings(&settings).unwrap();
     drop(store);
     let raw = Connection::open(&path).unwrap();
-    raw.pragma_update(None, "user_version", 5).unwrap();
+    raw.execute_batch(
+        "DROP TABLE source_cache;
+         DROP TABLE torznab_configs;
+         DROP TABLE source_preferences;
+         PRAGMA user_version = 5;",
+    )
+    .unwrap();
     drop(raw);
     let before = std::fs::read(&path).unwrap();
     assert!(matches!(Storage::open(&path), Err(Error::Database)));

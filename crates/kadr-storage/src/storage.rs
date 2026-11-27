@@ -10,7 +10,7 @@ use crate::{
     snapshots::link_source_row,
 };
 
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// Synchronous connection, intended to be owned by one background worker.
 /// No raw connection is exposed, so writes always pass validation.
@@ -666,6 +666,22 @@ fn migrate(connection: &mut Connection) -> Result<()> {
     if version < 6 {
         transaction.execute_batch("ALTER TABLE settings ADD COLUMN catalog_proxy TEXT;")?;
         transaction.pragma_update(None, "user_version", 6)?;
+    }
+    if version < 7 {
+        crate::source_resolver::migrate(&transaction)?;
+        transaction.pragma_update(None, "user_version", 7)?;
+    }
+    if version < 8 {
+        // Existing installs have not consented to a new provider. Only a clean
+        // database gets the opt-out default; do not infer consent from RuTracker.
+        transaction.execute_batch(
+            "ALTER TABLE source_preferences ADD COLUMN commons_enabled INTEGER NOT NULL DEFAULT 0
+                 CHECK(commons_enabled IN (0, 1));",
+        )?;
+        if version == 0 {
+            transaction.execute("UPDATE source_preferences SET commons_enabled = 1", [])?;
+        }
+        transaction.pragma_update(None, "user_version", 8)?;
     }
     if version < 1 {
         write_settings(&transaction, &Settings::default())?;

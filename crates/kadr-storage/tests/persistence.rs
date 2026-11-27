@@ -50,7 +50,10 @@ fn schema_version(connection: &Connection) -> i64 {
 fn downgrade_to_v2(connection: &Connection) {
     connection
         .execute_batch(
-            "DROP TABLE target_history;
+            "DROP TABLE source_cache;
+         DROP TABLE torznab_configs;
+         DROP TABLE source_preferences;
+         DROP TABLE target_history;
          DROP TABLE target_sources;
          DROP TABLE sources;
          DROP TABLE saved_files;

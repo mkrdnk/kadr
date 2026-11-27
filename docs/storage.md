@@ -131,9 +131,9 @@ engine must honor explicit pause/limit/unlimited semantics (zero must not turn
 into unlimited). No telemetry, network request, source resolution, or background
 download is started by opening storage.
 Catalog enabled does not authorize startup/background fetching: the application
-must issue a request only after an explicit search/browse action. This aggregate
-toggle is the provider policy for the MVP; there is no speculative per-provider
-settings registry. Settings writes preserve all fields in one atomic singleton
+must issue a request only after an explicit search/browse action. Source-provider
+preferences never override the catalog or BitTorrent permission. Settings writes
+preserve all fields in one atomic singleton
 upsert; editors should load, clone/edit, and save the full snapshot.
 
 ## Schema, migrations and failure behavior
@@ -157,6 +157,19 @@ The public connection is opaque; callers cannot bypass validation via it.
    playback targets, selections and history keys intact.
 6. Optional catalog proxy endpoint without credentials. Existing settings keep
    their values; no proxy is configured by the migration.
+7. Source-provider preferences, Torznab endpoint configurations (environment
+   **names**, not key values), and disposable source-discovery results. A cache
+   row belongs to one Trakt movie or show/season/episode and one provider.
+   At most 1 MiB per row, 1,024 rows and 16 MiB of result payloads. Reads and
+   writes prune expired rows; positive results live for 30 minutes, successful
+   empty responses for 5. Timeouts and provider errors do not write rows.
+   Local attachments use the user's selected or linked input, not this cache.
+   Changing source preferences invalidates results in the same transaction.
+   The media payload quota and permanent saved files are unaffected.
+8. Independent Commons provider permission. On a new database it is enabled;
+   existing databases migrate with it disabled, so an upgrade never expands
+   the user's previous network permissions. The global catalog switch still
+   gates all network discovery. No source files or video bytes are migrated.
 
 Opening uses `BEGIN IMMEDIATE`, checks the version, applies the entire missing
 migration chain and updates `user_version` in **one transaction**. Any failure
@@ -373,7 +386,7 @@ mutating global environment variables. macOS runtime validation remains open.
 The documented macOS paths follow the directory library's platform mapping;
 they have not been exercised on macOS here.
 
-Not implemented in this crate: cache entries/LRU/eviction or actual rate
+Not implemented in this crate: media **file** cache entries/LRU/eviction or actual rate
 enforcement; active/saved-file cache protection; interruption-safe media copying;
 path override UI/moves; migration backup or repair UI; an async storage API
 (the desktop owns its worker/command queue); paginated favorites; encryption.
