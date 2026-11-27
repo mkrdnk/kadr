@@ -109,13 +109,22 @@ impl Client {
     /// A runtime override takes precedence even if invalid; it never silently uses
     /// the distributor's compiled ID instead of the user's explicit configuration.
     pub fn new(options: Options) -> Result<Self, Error> {
-        let http = reqwest::Client::builder()
+        Self::new_with_proxy(options, None)
+    }
+
+    /// Construct offline with an optional unauthenticated proxy endpoint.
+    /// `None` retains reqwest's implicit proxy defaults. An explicit proxy
+    /// replaces those defaults, with no direct fallback if it fails.
+    pub fn new_with_proxy(options: Options, proxy: Option<&str>) -> Result<Self, Error> {
+        let mut http = reqwest::Client::builder()
             .user_agent("kadr/0.1 (desktop catalog; explicit user requests)")
             .connect_timeout(Duration::from_secs(5))
             .timeout(REQUEST_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|_| Error::Network)?;
+            .redirect(reqwest::redirect::Policy::none());
+        if let Some(endpoint) = proxy {
+            http = http.no_proxy().proxy(explicit_proxy(endpoint)?);
+        }
+        let http = http.build().map_err(|_| Error::Network)?;
         Ok(Self {
             http,
             options,
@@ -234,6 +243,13 @@ impl Client {
     }
 }
 
+fn explicit_proxy(endpoint: &str) -> Result<reqwest::Proxy, Error> {
+    if !kadr_core::proxy::is_valid_endpoint(endpoint) {
+        return Err(Error::Network);
+    }
+    reqwest::Proxy::all(endpoint).map_err(|_| Error::Network)
+}
+
 fn configured_client_id(runtime: Option<&str>, compiled: Option<&str>) -> Option<HeaderValue> {
     runtime.or(compiled).and_then(client_id)
 }
@@ -286,3 +302,6 @@ fn network_error(error: reqwest::Error) -> Error {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod proxy_tests;

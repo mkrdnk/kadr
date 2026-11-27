@@ -23,7 +23,10 @@ replacement implementation presented under the upstream name.
    Credentials in URL authorities, alternate ports, mirrors, cross-origin
    redirects and HTTP downgrades are rejected before transmission.
    At most five redirects; referer forwarding, environment proxies and
-   automatic request retries are disabled. No SPKI/certificate pin is
+   automatic request retries are disabled. Transport is direct by default.
+   The desktop adapter can explicitly supply `reqwest::Proxy::all` through
+   `ClientBuilder::proxy`; this replaces the direct route without fallback,
+   not the authorized origin or TLS policy. No SPKI/certificate pin is
    claimed: the fixed HTTPS origin uses the platform TLS trust store.
 3. Timeout defaults: 5-second connection, 15-second whole request. The
    adapter also wraps operations in a 20-second deadline and supports
@@ -60,6 +63,13 @@ replacement implementation presented under the upstream name.
    Login HTTP errors are checked before interpreting success markers.
    Unsupported Windows-1251 input fails rather than silently altering
    credentials or search words.
+8. Enable reqwest's already available `socks` feature without adding packages.
+   The adapter validates proxy endpoints with `kadr_core::proxy::is_valid_endpoint`
+   before building an explicit proxy; credentials in proxy addresses are rejected.
+   The vendored builder accepts the resulting proxy object rather than adding
+   a second endpoint parser. Builders are cloneable, but clients and cookie jars
+   are not: every build still creates a fresh, independent in-memory session.
+   Client debug output omits the HTTP transport so it cannot expose the proxy.
 
 This is a private path dependency, excluded from the root workspace. It is not
 an upstream release or a general-purpose mirror/proxy API. `kadr_catalog`
@@ -74,6 +84,9 @@ or dropping the login future cannot install its jar. Logout destroys the
 authenticated jar locally, not the server-side session. Passwords and usernames
 are not saved in the client. The app remains responsible for protecting any
 credential-store use and avoiding network wire-level debug logging.
+`Client::new()` remains direct; `Client::new_with_proxy(Some(endpoint))` uses
+the same route for anonymous operations, every fresh login candidate, and the
+authenticated session's subsequent downloads. Logout does not change the route.
 
 Search tries distinct localized and original title words. It conservatively
 compares complete slash/pipe-separated title alternatives and explicit
@@ -94,6 +107,10 @@ No live login or credentialed connectivity checks are part of the tests.
 Transport tests use loopback HTTP through test-only clients; production cannot
 override or disable the authorized HTTPS origin. Parser tests use local
 fixtures; no test data are injected into production search results.
+Explicit-proxy tests use loopback HTTP CONNECT and SOCKS5 remote-DNS fixtures
+that reject tunnels before TLS. They check the fixed `rutracker.org:443` target
+for anonymous, fresh-login and authenticated-download transports without
+connecting to RuTracker or disabling certificate verification.
 
 The adapter tests run with `cargo test --locked -p kadr-catalog`. For fork
 unit tests without creating a second committed lockfile, copy this directory

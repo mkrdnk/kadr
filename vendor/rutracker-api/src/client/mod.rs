@@ -14,7 +14,7 @@
 pub(crate) mod builder;
 mod cookies;
 
-use std::ops::Deref;
+use std::{fmt, ops::Deref};
 
 use url::Url;
 
@@ -26,10 +26,17 @@ use crate::search::SearchRequest;
 use crate::topic::Topic;
 
 /// Anonymous rutracker client.
-#[derive(Debug)]
 pub struct Client {
     http: reqwest::Client,
     base_url: Url,
+}
+
+impl fmt::Debug for Client {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Client")
+            .field("base_url", &self.base_url)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Client {

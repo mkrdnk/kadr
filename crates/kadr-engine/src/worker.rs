@@ -243,15 +243,14 @@ pub(super) async fn run(
             return;
         }
     };
-    let catalog = match Client::new(Options {
-        enabled: settings.catalog_enabled,
-    }) {
+    let catalog = match catalog_client(&settings) {
         Ok(client) => Arc::new(client),
         Err(_) => {
             send_error(&events, "Не удалось настроить каталоги.");
             return;
         }
     };
+    let tracker = tracker::Account::new(settings.catalog_proxy.clone());
     let (save_progress, mut progress) = mpsc::unbounded_channel();
     let (catalog_results, mut answers) = mpsc::unbounded_channel();
     let _ = events.unbounded_send(Event::Ready {
@@ -271,7 +270,7 @@ pub(super) async fn run(
         episode: None,
         episode_explicit: false,
         sources: Vec::new(),
-        tracker: tracker::Account::default(),
+        tracker,
         tracker_search: shutdown.child_token(),
         pending_tracker: None,
         tracker_vault: tracker::Vault::default(),
@@ -333,6 +332,15 @@ pub(super) async fn run(
     worker.close_active("").await;
     worker.catalog_jobs.abort_all();
     while worker.catalog_jobs.join_next().await.is_some() {}
+}
+
+fn catalog_client(settings: &Settings) -> Result<Client, kadr_catalog::Error> {
+    Client::new_with_proxy(
+        Options {
+            enabled: settings.catalog_enabled,
+        },
+        settings.catalog_proxy.as_deref(),
+    )
 }
 
 impl Worker {
@@ -1776,6 +1784,14 @@ impl Worker {
                 "Запрос каталога отменён изменением настроек.".into(),
             )));
         }
+        if let Some(endpoint) = &settings.catalog_proxy
+            && !kadr_core::proxy::is_valid_endpoint(endpoint)
+        {
+            self.reject_settings(
+                "Укажите адрес прокси HTTP(S) или SOCKS5 без логина, пароля и пути.",
+            );
+            return;
+        }
         if settings.validate().is_err() {
             self.reject_settings("Проверьте лимиты, путь к кэшу и сетевые настройки.");
             return;
@@ -1799,9 +1815,7 @@ impl Worker {
             );
             return;
         }
-        let catalog = match Client::new(Options {
-            enabled: settings.catalog_enabled,
-        }) {
+        let catalog = match catalog_client(&settings) {
             Ok(client) => Arc::new(client),
             Err(_) => {
                 self.reject_settings("Не удалось настроить каталог; прежние настройки оставлены.");
@@ -1838,6 +1852,12 @@ impl Worker {
         if let Some(cache) = replacement {
             self.cache = cache;
         }
+        let proxy_changed = settings.catalog_proxy != self.settings.catalog_proxy;
+        let tracker_disabled = !settings.catalog_enabled || !settings.network.torrents_enabled;
+        if tracker_disabled || proxy_changed {
+            // A fresh account must never reuse a client or cookie jar on the old route.
+            self.tracker = tracker::Account::new(settings.catalog_proxy.clone());
+        }
         self.settings = settings;
         self.catalog = catalog;
         self.send(Event::PreferencesSaved(super::Settings::from_storage(
@@ -1855,11 +1875,10 @@ impl Worker {
             )));
             self.send(Event::SourcesState(AsyncState::Ready(Vec::new())));
         }
-        if !self.settings.catalog_enabled || !self.settings.network.torrents_enabled {
+        if tracker_disabled {
             self.tracker_search.cancel();
             let was_preparing = self.pending_tracker.is_some();
             self.reset_tracker_prompt();
-            self.tracker = tracker::Account::default();
             if self.settings.catalog_enabled && (was_preparing || !self.sources.is_empty()) {
                 self.sources.clear();
                 self.source_error(
