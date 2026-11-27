@@ -86,3 +86,15 @@ Passwords are stored in the system vault, not in SQLite.
 The login session and authenticated metainfo are in memory; reopening an entry
 resolves the topic again and verifies its info hash before reusing the saved
 file selection. The app does not attempt to bypass CAPTCHA.
+
+### Catalog proxy
+
+The optional **Network → Proxy** setting covers HTTP(S) requests to RuTracker
+(search, sign-in, magnet lookup and `.torrent` download), Trakt and allowed
+poster hosts. Enter an `http://`, `https://`, `socks5://` (local DNS) or
+`socks5h://` (proxy DNS) endpoint without credentials. Saving applies it to
+new operations and discards the previous RuTracker session. A configured
+proxy never falls back to a direct request; TLS verification and destination
+restrictions still apply. Use a proxy you trust. An empty field restores the
+default transports. BitTorrent, manual HTTP(S) media, loopback playback and
+external players do not use this setting.
