@@ -10,7 +10,7 @@ use crate::{
     snapshots::link_source_row,
 };
 
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Synchronous connection, intended to be owned by one background worker.
 /// No raw connection is exposed, so writes always pass validation.
@@ -69,7 +69,7 @@ impl Storage {
         let settings = self.connection.query_row(
             "SELECT player, torrents_enabled, download_kind, download_bytes,
                     upload_kind, upload_bytes, max_connections, cache_limit_bytes,
-                    catalog_enabled, cache_directory
+                    catalog_enabled, cache_directory, catalog_proxy
              FROM settings WHERE singleton = 1",
             [],
             |row| {
@@ -84,6 +84,7 @@ impl Storage {
                     row.get::<_, i64>(7)?,
                     row.get::<_, i64>(8)?,
                     row.get::<_, Option<Vec<u8>>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
                 ))
             },
         )?;
@@ -98,6 +99,7 @@ impl Storage {
             cache,
             catalog,
             cache_directory,
+            catalog_proxy,
         ) = settings;
         let settings = Settings {
             default_player: match player.as_str() {
@@ -127,6 +129,7 @@ impl Storage {
                 _ => return Err(Error::CorruptData("catalog preference")),
             },
             cache_directory: cache_directory.map(decode_path).transpose()?,
+            catalog_proxy,
         };
         settings
             .validate()
@@ -460,8 +463,8 @@ fn write_settings(connection: &Connection, settings: &Settings) -> Result<()> {
         "INSERT INTO settings
          (singleton, player, torrents_enabled, download_kind, download_bytes,
           upload_kind, upload_bytes, max_connections, cache_limit_bytes,
-          catalog_enabled, cache_directory)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+          catalog_enabled, cache_directory, catalog_proxy)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(singleton) DO UPDATE SET
              player = excluded.player,
              torrents_enabled = excluded.torrents_enabled,
@@ -472,7 +475,8 @@ fn write_settings(connection: &Connection, settings: &Settings) -> Result<()> {
              max_connections = excluded.max_connections,
              cache_limit_bytes = excluded.cache_limit_bytes,
              catalog_enabled = excluded.catalog_enabled,
-             cache_directory = excluded.cache_directory",
+             cache_directory = excluded.cache_directory,
+             catalog_proxy = excluded.catalog_proxy",
         params![
             match settings.default_player {
                 PlayerPreference::Mpv => "mpv",
@@ -488,6 +492,7 @@ fn write_settings(connection: &Connection, settings: &Settings) -> Result<()> {
             settings.cache_limit_bytes as i64,
             settings.catalog_enabled,
             settings.cache_directory.as_deref().map(encode_path),
+            settings.catalog_proxy.as_deref(),
         ],
     )?;
     Ok(())
@@ -657,6 +662,10 @@ fn migrate(connection: &mut Connection) -> Result<()> {
              ALTER TABLE sources_v5 RENAME TO sources;",
         )?;
         transaction.pragma_update(None, "user_version", 5)?;
+    }
+    if version < 6 {
+        transaction.execute_batch("ALTER TABLE settings ADD COLUMN catalog_proxy TEXT;")?;
+        transaction.pragma_update(None, "user_version", 6)?;
     }
     if version < 1 {
         write_settings(&transaction, &Settings::default())?;

@@ -57,6 +57,7 @@ fn downgrade_to_v2(connection: &Connection) {
          DROP TABLE media_records;
          ALTER TABLE settings DROP COLUMN catalog_enabled;
          ALTER TABLE settings DROP COLUMN cache_directory;
+         ALTER TABLE settings DROP COLUMN catalog_proxy;
          ALTER TABLE playback_progress DROP COLUMN file_id;
          PRAGMA user_version = 2;",
         )
@@ -105,6 +106,7 @@ fn defaults_are_explicit_private_and_bounded() {
         RateLimit::BytesPerSecond(_)
     ));
     assert_eq!(settings.network.upload, RateLimit::Paused);
+    assert_eq!(settings.catalog_proxy, None);
     settings.validate().unwrap();
 }
 
