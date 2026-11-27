@@ -105,7 +105,7 @@ pub(crate) async fn check_status(resp: Response) -> Result<Response> {
     if status == StatusCode::TOO_MANY_REQUESTS {
         return Err(Error::RateLimited);
     }
-    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+    if status == StatusCode::UNAUTHORIZED {
         return Err(Error::NotAuthenticated);
     }
     Err(Error::Server(status.as_u16()))
@@ -178,6 +178,28 @@ pub(crate) async fn read_html(resp: Response) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn only_unauthorized_is_an_authentication_status() {
+        for status in [200, 204, 401, 403, 429, 503] {
+            // Even success-like or login-like content cannot override status.
+            let body = "<span id=logged-in-username>user</span><form id=login-form-full>\
+                        <input name=login_username><input name=login_password type=password></form>";
+            let wire = format!(
+                "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let (response, server) = crate::tests::loopback_response(wire.as_bytes()).await;
+            let result = check_status(response).await;
+            drop(server);
+            match status {
+                200 | 204 => assert_eq!(result.unwrap().status().as_u16(), status),
+                401 => assert!(matches!(result, Err(Error::NotAuthenticated))),
+                429 => assert!(matches!(result, Err(Error::RateLimited))),
+                _ => assert!(matches!(result, Err(Error::Server(code)) if code == status)),
+            }
+        }
+    }
 
     #[test]
     fn cp1251_encodes_cyrillic() {

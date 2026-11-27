@@ -31,8 +31,10 @@ replacement implementation presented under the upstream name.
 3. Timeout defaults: 5-second connection, 15-second whole request. The
    adapter also wraps operations in a 20-second deadline and supports
    cancellation. HTML parsing is synchronous over the bounded input, so it
-   cannot be interrupted in the middle of a parser poll. There are at most two first-page searches
-   per call and 50 returned offers. No topic-per-result requests.
+   cannot be interrupted in the middle of a parser poll. Search fallback is
+   bounded across title variants and pages; at most 50 offers are returned.
+   The search itself does not enumerate topic pages. The desktop can separately
+   prefetch up to three original-post attachments for an opened movie card.
 4. Read both HTML and torrent responses incrementally with a real 4 MiB
    limit. Check advertised length early and every chunk before appending;
    never buffer the full body before enforcing the limit.
@@ -58,9 +60,14 @@ replacement implementation presented under the upstream name.
    Cookie input is bounded to 4 KiB each and 64 records; exceeding the
    record bound clears the local session rather than growing indefinitely.
 7. Keep absent search size/seeds as `None`; do not interpret a registration
-   timestamp as a size. Unknown pages fail rather than masquerading as empty
-   results. Login-form HTML is recognized in search and topic responses.
-   Login HTTP errors are checked before interpreting success markers.
+   timestamp as a size. Empty searches require explicit evidence, not just
+   missing or malformed rows. A positive count with no usable rows is an error;
+   a partially readable table keeps its usable rows. A genuine full login form
+   (`#login-form-full` with both username and password fields) is recognized in search,
+   topic and non-torrent download responses. HTTP 401 is an authentication
+   error; HTTP 403 remains `Server(403)`, not an invitation to log in.
+   Login HTTP errors are checked before interpreting DOM success markers;
+   unknown/challenge responses are parse errors rather than rejected credentials.
    Unsupported Windows-1251 input fails rather than silently altering
    credentials or search words.
 8. Enable reqwest's already available `socks` feature without adding packages.
@@ -88,18 +95,27 @@ credential-store use and avoiding network wire-level debug logging.
 the same route for anonymous operations, every fresh login candidate, and the
 authenticated session's subsequent downloads. Logout does not change the route.
 
-Search tries distinct localized and original title words. It conservatively
-compares complete slash/pipe-separated title alternatives and explicit
-production-year metadata, not a year occurring anywhere in a release title.
-Selected episodes require recognizable season/episode scope; season packs
-remain candidates and the original title preserves their full scope for explicit
-selection. Unsupported labels/layouts can yield no offers. This is not an exact
-matching or rights guarantee. RuTracker can require login even for search;
+Search uses title words from the selected card, including bounded fallback to
+its original title, available aliases and subsequent result pages. The adapter
+distinguishes strong title/year evidence from plausible manual-only matches.
+Known contradictions are excluded; season packs remain candidates and the
+original title preserves their full scope for explicit selection. An unreadable
+results layout is not evidence of a zero count. This is not a rights guarantee.
+RuTracker can require login even for search;
 `AuthenticationRequired` is surfaced without an implicit login prompt.
 
-Magnet lookup is lazy and the URI is validated by kadr-core. A missing magnet
-is `Ok(None)`; an invalid advertised magnet is an error, not a synthesized link.
-The caller decides when to offer authenticated torrent fallback. Download
+Magnet lookup reads only HTML and does not start BitTorrent. Topic parsing requires a matching topic-heading link and
+the first post in `table#topic_main > tbody[id^="post_"]`, identified by its
+`.post_head .p-link` topic permalink (`t=...`, not a reply's `p=...#...`).
+An anonymous header-only table group may precede it.
+It reads only the
+first unquoted `fieldset.attach` or `table.attach` in that post's message cell,
+not links in replies, quoted posts, the description or sidebars. The magnet is
+the decoded DOM `href` attribute, never a URI synthesized from an info hash.
+Advertised magnets receive basic URI/hash checks here and final validation in
+kadr-core. Only a recognized attachment without a magnet is `Ok(None)`;
+unreadable posts, absent/unsupported attachment layouts and invalid advertised
+magnets are errors. The caller decides when to offer authenticated torrent fallback. Download
 requires the torrent content type and rejects an obviously mislabeled body;
 the torrent engine still must perform full metainfo validation.
 
@@ -107,6 +123,9 @@ No live login or credentialed connectivity checks are part of the tests.
 Transport tests use loopback HTTP through test-only clients; production cannot
 override or disable the authorized HTTPS origin. Parser tests use local
 fixtures; no test data are injected into production search results.
+The synthetic topic fixtures retain the header/post/permalink structure found
+in [archived RuTracker HTML](https://raw.githubusercontent.com/frozenspider/torrent-updates-checker/fa290c3b99fe98c7d1741854a7eaafb4501319d8/src/test/resources/rutracker/the-boys_2020-10-19.htm);
+their titles, IDs, hashes and links are test values, not live connectivity evidence.
 Explicit-proxy tests use loopback HTTP CONNECT and SOCKS5 remote-DNS fixtures
 that reject tunnels before TLS. They check the fixed `rutracker.org:443` target
 for anonymous, fresh-login and authenticated-download transports without
