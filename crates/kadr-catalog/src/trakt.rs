@@ -1,5 +1,5 @@
 use super::*;
-use kadr_core::catalog::ExternalMetadata;
+use kadr_core::catalog::{ExternalMetadata, ExternalRating, RatingSource};
 use std::collections::BTreeSet;
 
 const SEASON_LIMIT: usize = 100;
@@ -283,6 +283,84 @@ fn image(value: &Value) -> Option<String> {
     })
 }
 
+fn runtime(value: &Value) -> Option<u16> {
+    value
+        .as_u64()
+        .and_then(|value| u16::try_from(value).ok())
+        .filter(|value| *value > 0)
+}
+
+fn genres(value: &Value) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(100)
+        .filter_map(Value::as_str)
+        .filter(|slug| catalog::valid_slug(slug) && seen.insert(*slug))
+        .take(30)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Only the documented `ratings?extended=all` provider blocks are interpreted.
+/// See Trakt's official `movieRatingsResponseSchema.ts`,
+/// `showRatingsResponseSchema.ts`, and <https://developer.trakt.tv/docs/filters>
+/// for the distinct scales. Links, distributions and unknown sources are ignored.
+pub(super) fn external_ratings(data: &Value, kind: MediaKind) -> Vec<ExternalRating> {
+    let mut ratings = Vec::new();
+    for (key, field, source, maximum) in [
+        ("imdb", "rating", RatingSource::Imdb, 10),
+        ("tmdb", "rating", RatingSource::Tmdb, 10),
+        ("metascore", "rating", RatingSource::Metascore, 100),
+        (
+            "rotten_tomatoes",
+            "rating",
+            RatingSource::RottenTomatoes,
+            100,
+        ),
+        (
+            "rotten_tomatoes",
+            "user_rating",
+            RatingSource::RottenTomatoesAudience,
+            100,
+        ),
+        ("letterboxd", "rating", RatingSource::Letterboxd, 5),
+        ("mal", "rating", RatingSource::MyAnimeList, 10),
+    ] {
+        if source == RatingSource::Letterboxd && kind != MediaKind::Movie {
+            continue;
+        }
+        let block = &data[key];
+        let Some(rating) = block[field]
+            .as_f64()
+            .filter(|rating| rating.is_finite() && (0.0..=f64::from(maximum)).contains(rating))
+        else {
+            continue;
+        };
+        let votes = matches!(
+            source,
+            RatingSource::Imdb
+                | RatingSource::Tmdb
+                | RatingSource::Letterboxd
+                | RatingSource::MyAnimeList
+        )
+        .then(|| block["votes"].as_u64())
+        .flatten();
+        if votes == Some(0) {
+            continue;
+        }
+        ratings.push(ExternalRating {
+            source,
+            rating_tenths: (rating * 10.0).round() as u16,
+            max_tenths: maximum * 10,
+            votes,
+        });
+    }
+    ratings
+}
+
 pub(super) fn media(data: &Value, kind: MediaKind) -> Option<Media> {
     let id = data["ids"]["trakt"].as_u64().filter(|id| *id > 0)?;
     let title = plain_title(&data["title"]);
@@ -308,6 +386,18 @@ pub(super) fn media(data: &Value, kind: MediaKind) -> Option<Media> {
             .filter(|year| (1800..2200).contains(year))
             .map(|year| year as u16),
         rating_tenths: rating,
+        runtime_minutes: runtime(&data["runtime"]),
+        genres: genres(&data["genres"]),
+        certification: data["certification"]
+            .as_str()
+            .filter(|value| {
+                !value.trim().is_empty()
+                    && value.chars().count() <= 32
+                    && !value.chars().any(char::is_control)
+            })
+            .map(|value| plain(&Value::String(value.to_owned()), 32))
+            .filter(|value| !value.is_empty()),
+        external_ratings: Vec::new(),
         description: plain(&data["overview"], 16_000),
         poster_url: image(&data["images"]["poster"]),
         backdrop_url: image(&data["images"]["fanart"]),
@@ -353,6 +443,11 @@ pub(super) fn episodes(data: &Value) -> Result<Vec<Episode>, Error> {
                 number,
                 title: plain_title(&row["title"]),
                 description: plain(&row["overview"], 8_000),
+                runtime_minutes: runtime(&row["runtime"]),
+                // The official image guide documents screenshot arrays but no
+                // episode URL path. Do not widen the canonical image allowlist
+                // or invent URLs; retain only already-approved public layouts.
+                screenshot_url: image(&row["images"]["screenshot"]),
             });
         }
     }

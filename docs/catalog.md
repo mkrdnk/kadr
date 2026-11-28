@@ -15,14 +15,23 @@ There is no ID in request URLs or diagnostics, and no OAuth secret in the app.
 Missing configuration leaves manual playback and the library available.
 
 Search and browse include movies and TV shows, not general video uploads.
-The shelves use Trakt's trending endpoints, not rankings computed by kadr.
+The Home shelves use Trakt's trending endpoints. Movie and show catalogs
+request paginated trending or popular feeds, with `genres` and `years`
+applied by Trakt. The fixed ranking endpoints do not document title, release
+date or rating sort direction; kadr does not approximate those by sorting
+loaded cards. Genre options come from `/genres/{movies|shows}`. Pagination
+uses the provider's headers when available, not the number of visible cards.
 Metadata retains the original title when Trakt provides it.
 Posters and wide artwork come from approved Trakt image hosts without API
 headers. The desktop stores accepted raster image bytes in a bounded per-user
 `catalog-images-v1` cache before rendering them; no direct browser/CDN hotlink is
 used. This directory is separate from the torrent payload cache and its quota.
-The displayed rating is Trakt's ten-point rating, not IMDb's; missing values
-remain missing. Details load numbered episodes for shows, including specials
+Detail ratings are labelled by service. A cancellable, optional
+`/{movies|shows}/{id}/ratings?extended=all` request to Trakt supplies external
+scores (including IMDb and TMDB) when available with the configured Client ID.
+Missing data or a failure of this optional request does not replace the Trakt
+score or fail the details. Each score keeps its source's scale. Details load
+numbered episodes for shows, including specials
 when the provider supplies season zero. Partial season data is not passed off
 as a complete episode list.
 
@@ -68,13 +77,17 @@ A live Trakt check needs a configured application Client ID and network access:
 cargo test --locked -p kadr-catalog live_catalog -- --ignored --nocapture
 ```
 
-## On-demand source resolution
+## Card-scoped source resolution
 
 **Find sources** targets one Trakt movie or one numbered episode, never a
 catalog shelf. Text, IDs and aliases come from metadata already in the card;
 there is no background title crawl. Local library snapshots predating external
 IDs can still match by title/year. A local input can always be opened directly,
 including when no provider returned anything.
+The separate, off-by-default «Поиск при открытии» setting allows the same
+lookup for an opened film or a selected episode, still subject to the catalog,
+BitTorrent and individual provider permissions. It does not start playback,
+download video, or connect to torrent peers.
 
 - `kadr-core::sources` validates locators and holds the query, normalized offer,
   match score and deterministic ranking. A known ID conflict is not resolved
@@ -93,13 +106,12 @@ including when no provider returned anything.
   stamp, plus stable, opaque selection handles. Re-ranking cannot silently
   redirect a click to a different release. On explicit selection the existing
   HTTP/torrent preparation and player session paths take over.
-- **Watch** on a movie is an explicit request for playback. Without an explicitly
-  selected source, the desktop waits for the final snapshot of that card. Only a
-  matching torrent with a known positive seed count can be recommended; the
-  highest count wins, with deterministic ties. The worker rechecks the winning
-  handle before preparing it. **Sources** shows the same results without launching
-  anything. HTTP results and torrents with zero or unknown seeds remain available
-  for explicit selection. Episode playback retains its explicit source/file flow.
+- **Watch** is an explicit request for playback. Without a prepared source, the
+  desktop waits for the final snapshot of the film or selected episode. Auto
+  selection considers exact matches, user preferences, known positive seeds
+  for torrents, and verified Commons offers for HTTP. The worker rechecks the
+  target, preferences and handle before preparation, then checks torrent file
+  ambiguity before launch. Other results remain available for manual selection.
 
 ### Optional indexes: Popcorn and YTS
 
@@ -107,7 +119,8 @@ The shared opt-in is off on new and upgraded installations. With the catalog
 and BitTorrent enabled, a movie lookup sends its IMDb ID to two independent
 indexes; an episode lookup contacts Popcorn only. Anime films and numbered
 anime episodes follow the same movie/series division, not a third hostname.
-No shelf crawl, automatic card-open request or lookup without an IMDb ID.
+No shelf crawl or lookup without an IMDb ID. Requests on card open or episode
+selection require the separate automatic-search permission.
 
 | Index | Mirrors, in order | Request |
 |---|---|---|

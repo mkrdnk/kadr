@@ -43,6 +43,43 @@ pub(crate) fn valid_imdb_id(id: &str) -> bool {
     })
 }
 
+/// The original rating service, even when the score is delivered by Trakt.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum RatingSource {
+    Imdb,
+    Tmdb,
+    Metascore,
+    RottenTomatoes,
+    RottenTomatoesAudience,
+    Letterboxd,
+    MyAnimeList,
+}
+
+impl RatingSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Imdb => "IMDb",
+            Self::Tmdb => "TMDB",
+            Self::Metascore => "Metascore",
+            Self::RottenTomatoes => "Rotten Tomatoes",
+            Self::RottenTomatoesAudience => "Rotten Tomatoes Audience",
+            Self::Letterboxd => "Letterboxd",
+            Self::MyAnimeList => "MyAnimeList",
+        }
+    }
+}
+
+/// A provider-reported score on its original scale, not an inferred Trakt score.
+/// Both values use fixed-point tenths: IMDb 8.3/10 is `83 / 100`, while
+/// Rotten Tomatoes 83/100 is `830 / 1000`. No external links are persisted.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ExternalRating {
+    pub source: RatingSource,
+    pub rating_tenths: u16,
+    pub max_tenths: u16,
+    pub votes: Option<u64>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Media {
     /// Stable, storage-safe, namespaced provider identifier, not a title.
@@ -57,6 +94,17 @@ pub struct Media {
     /// None means absent or unsupported; never inferred from popularity or search rank.
     #[serde(default)]
     pub rating_tenths: Option<u8>,
+    #[serde(default)]
+    pub runtime_minutes: Option<u16>,
+    /// Provider genre slugs, not localized display labels.
+    #[serde(default)]
+    pub genres: Vec<String>,
+    /// Provider certification (for example PG-13), not a local age assessment.
+    #[serde(default)]
+    pub certification: Option<String>,
+    /// Optional detail enrichment; an empty list never means zero scores.
+    #[serde(default)]
+    pub external_ratings: Vec<ExternalRating>,
     pub description: String,
     pub poster_url: Option<String>,
     /// Public provider image, independent of the poster; absent in older records.
@@ -78,6 +126,11 @@ pub struct Episode {
     pub number: u16,
     pub title: String,
     pub description: String,
+    #[serde(default)]
+    pub runtime_minutes: Option<u16>,
+    /// Only accepted public provider images, never a URL inferred from an ID.
+    #[serde(default)]
+    pub screenshot_url: Option<String>,
 }
 
 /// A provider-offered file, not an instruction to start playback or a download.

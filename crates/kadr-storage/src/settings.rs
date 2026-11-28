@@ -65,6 +65,8 @@ pub struct Settings {
     pub catalog_proxy: Option<String>,
     /// None uses AppPaths::cache_dir(). Persisting this does not move files.
     pub cache_directory: Option<PathBuf>,
+    /// Persisted layout preference; false keeps the sidebar expanded.
+    pub sidebar_collapsed: bool,
 }
 
 impl fmt::Debug for Settings {
@@ -87,6 +89,7 @@ impl Default for Settings {
             catalog_enabled: true,
             catalog_proxy: None,
             cache_directory: None,
+            sidebar_collapsed: false,
         }
     }
 }

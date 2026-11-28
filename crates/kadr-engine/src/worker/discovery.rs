@@ -11,6 +11,7 @@ mod commons;
 mod manual;
 mod movie_prefetch;
 mod popcorn;
+mod recommendation;
 mod torznab;
 
 #[cfg(test)]
@@ -34,6 +35,8 @@ pub(super) struct Discovery {
     next_handle: usize,
     current: Option<SearchState>,
     movie_prefetch: Option<movie_prefetch::MoviePrefetch>,
+    rank_preferences: RankPreferences,
+    playback_request: Option<crate::PlaybackPreferences>,
 }
 
 struct SearchState {
@@ -121,14 +124,16 @@ impl Discovery {
 
     pub(super) fn clear(&mut self) {
         self.current = None;
+        self.playback_request = None;
         self.cancel_movie_prefetch();
     }
 
     fn rank(&mut self, prefs: &super::super::SourcePreferences) {
+        self.rank_preferences = rank_preferences(prefs);
         let Some(state) = &mut self.current else {
             return;
         };
-        state.ranked = rank_and_dedup(state.batches.clone(), &rank_preferences(prefs))
+        state.ranked = rank_and_dedup(state.batches.clone(), &self.rank_preferences)
             .into_iter()
             .map(|source| {
                 let key = (source.provider.clone(), source.id.clone());
@@ -180,19 +185,12 @@ impl Discovery {
     }
 
     pub(super) fn recommended_handle(&self) -> Option<usize> {
-        let state = self.current.as_ref()?;
-        if state.pending != 0 || state.query.kind != MediaKind::Movie {
-            return None;
-        }
-        state
-            .ranked
-            .iter()
-            .find(|(_, source)| {
-                !source.possible_match
-                    && source.is_discovered_movie_torrent()
-                    && source.seeds.is_some_and(|seeds| seeds > 0)
-            })
-            .map(|(handle, _)| *handle)
+        self.recommendation(
+            self.playback_request
+                .as_ref()
+                .unwrap_or(&crate::PlaybackPreferences::default()),
+            |_| true,
+        )
     }
 
     fn snapshot(&self, token: &CancellationToken) -> Option<Event> {
@@ -283,7 +281,7 @@ fn rank_preferences(prefs: &crate::SourcePreferences) -> RankPreferences {
         resolutions: prefs
             .preferred_resolution
             .as_deref()
-            .and_then(|s| s.trim_end_matches('p').parse().ok())
+            .and_then(crate::playback::preferred_height)
             .into_iter()
             .collect(),
         languages: prefs.preferred_language.iter().cloned().collect(),
@@ -379,6 +377,8 @@ impl Worker {
                 number: key.episode,
                 title: String::new(),
                 description: String::new(),
+                runtime_minutes: None,
+                screenshot_url: None,
             });
         }
         self.episode.clone()
@@ -603,6 +603,7 @@ impl Worker {
         self.tracker_search = token.child_token();
         state.pending = missing.len();
         self.discovery.current = Some(state);
+        self.discovery.playback_request = None;
         self.discovery.rank(&self.source_preferences);
         self.publish_discovery();
         if !missing.is_empty() {
@@ -677,6 +678,32 @@ impl Worker {
         self.send(Event::SourcePreferences(self.source_preferences.clone()));
     }
 
+    pub(super) fn can_choose_offer(&self, index: usize) -> bool {
+        let Some(query) = self
+            .media
+            .as_ref()
+            .and_then(|media| MediaQuery::from_media(media, self.catalog_episode().as_ref()))
+        else {
+            return false;
+        };
+        let Some(state) = &self.discovery.current else {
+            return false;
+        };
+        state.query == query
+            && state.ranked.iter().any(|(handle, source)| {
+                *handle == index
+                    && self
+                        .registry(&query)
+                        .available(&query)
+                        .iter()
+                        .any(|provider| {
+                            provider.id() == source.provider
+                                && provider.validate().is_ok()
+                                && provider.accepts(source)
+                        })
+            })
+    }
+
     pub(super) async fn choose_offer(&mut self, index: usize, cancel: CancellationToken) {
         let source = self
             .discovery
@@ -699,6 +726,8 @@ impl Worker {
                 number: episode.episode(),
                 title: String::new(),
                 description: String::new(),
+                runtime_minutes: None,
+                screenshot_url: None,
             });
             self.episode_explicit = true;
         }

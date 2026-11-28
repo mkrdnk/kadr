@@ -55,6 +55,7 @@ fn version_three_migrates_only_recorded_media_opens_to_item_history() {
          DROP TABLE source_preferences;
          DROP TABLE target_history;
          ALTER TABLE settings DROP COLUMN catalog_proxy;
+         ALTER TABLE settings DROP COLUMN sidebar_collapsed;
          PRAGMA user_version = 3;",
     )
     .unwrap();
@@ -93,6 +94,7 @@ fn failed_v3_upgrade_preserves_all_prior_rows_version_and_database_bytes() {
          DROP TABLE source_preferences;
          DROP TABLE target_history;
          ALTER TABLE settings DROP COLUMN catalog_proxy;
+         ALTER TABLE settings DROP COLUMN sidebar_collapsed;
          PRAGMA user_version = 3;
          CREATE TABLE target_history(sentinel TEXT);
          INSERT INTO target_history VALUES ('preserve');",

@@ -1,4 +1,4 @@
-//! Recommendation and WatchRelease at the engine boundary. Each provider owns
+//! Recommendation and explicit watch at the engine boundary. Each provider owns
 //! its loopback indexer and metainfo; a channel, not a sleep, releases the loser
 //! or winner that finishes last. Ordinary tests stop at the existing cache quota.
 //! Run with `cargo test -p kadr-engine command_boundary::recommendation`.
@@ -25,6 +25,22 @@ struct OfferOrigin {
 
 impl OfferOrigin {
     fn new(year: u16, seeds: Option<u32>, metadata: Vec<u8>, delayed: bool) -> Self {
+        Self::release_offer(
+            &format!("Fixture {year} 1080p"),
+            "2000",
+            seeds,
+            metadata,
+            delayed,
+        )
+    }
+
+    fn release_offer(
+        title: &str,
+        category: &str,
+        seeds: Option<u32>,
+        metadata: Vec<u8>,
+        delayed: bool,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -35,7 +51,7 @@ impl OfferOrigin {
             format!("<t:attr name='seeders' value='{n}'/>")
         });
         let feed = format!(
-            "<rss version='2.0' xmlns:t='http://torznab.com/schemas/2015/feed'><channel><title>Owned</title><link>{base}/</link><description>Owned fixture</description><item><title>Fixture {year} 1080p</title><guid>owned</guid><t:attr name='category' value='2000'/><t:attr name='infohash' value='{hash}'/>{seeds}<enclosure type='application/x-bittorrent' url='{base}/download'/></item></channel></rss>"
+            "<rss version='2.0' xmlns:t='http://torznab.com/schemas/2015/feed'><channel><title>Owned</title><link>{base}/</link><description>Owned fixture</description><item><title>{title}</title><guid>owned</guid><t:attr name='category' value='{category}'/><t:attr name='infohash' value='{hash}'/>{seeds}<enclosure type='application/x-bittorrent' url='{base}/download'/></item></channel></rss>"
         ).into_bytes();
         let stop = Arc::new(AtomicBool::new(false));
         let downloads = Arc::new(AtomicUsize::new(0));
@@ -80,7 +96,7 @@ impl OfferOrigin {
                         &metadata
                     }
                     "/api" if caps => {
-                        reply(&mut socket, b"<caps><searching><movie-search available='yes' supportedParams='q'/></searching></caps>");
+                        reply(&mut socket, b"<caps><searching><movie-search available='yes' supportedParams='q'/><tv-search available='yes' supportedParams='q,season,ep'/></searching></caps>");
                         continue;
                     }
                     "/api" => &feed,
@@ -221,8 +237,8 @@ fn snapshot(
     target: &PlaybackTarget,
     pending: usize,
 ) -> (DiscoveryStamp, Vec<SourceCandidate>) {
-    let event = app.wait("cumulative movie discovery", |event| {
-        quiet(event);
+    let event = app.wait("cumulative target discovery", |event| {
+        unprepared(event);
         if let Event::SourceDiscovery {
             stamp,
             media_id,
@@ -236,7 +252,10 @@ fn snapshot(
         {
             assert!(stamp.is_current());
             assert_eq!(media_id, target.media_id.as_str());
-            assert_eq!(*episode, None);
+            assert_eq!(
+                *episode,
+                target.episode.map(|key| (key.season, key.episode))
+            );
             assert!(failures.is_empty(), "{failures:?}");
             assert!(
                 notices.is_empty(),
@@ -295,6 +314,331 @@ fn quota(app: &mut App) {
 
 fn metadata(name: &str, byte: u8) -> Vec<u8> {
     metainfo(&[(name, vec![byte; 2 * 1024 * 1024])], true)
+}
+
+fn unprepared(event: &Event) {
+    quiet(event);
+    assert!(
+        !matches!(event, Event::TorrentFiles(files) if !files.is_empty()),
+        "discovery/recommendation/rejected watch prepared metainfo"
+    );
+    assert!(
+        !matches!(event, Event::SourceSelected { playable: true, .. }),
+        "discovery/recommendation/rejected watch selected a playable file"
+    );
+}
+
+fn recommend(app: &mut App, preferences: &PlaybackPreferences) -> (DiscoveryStamp, Option<usize>) {
+    app.command(Command::RecommendPlayback(preferences.clone()));
+    let Event::PlaybackRecommendation { stamp, index } =
+        app.wait("IO-free playback recommendation", |event| {
+            unprepared(event);
+            matches!(event, Event::PlaybackRecommendation { .. })
+        })
+    else {
+        unreachable!()
+    };
+    assert!(stamp.is_current());
+    (stamp, index)
+}
+
+fn rejected_watch(app: &mut App, index: usize, preferences: &PlaybackPreferences) {
+    app.command(Command::WatchRecommended {
+        index,
+        preferences: preferences.clone(),
+        resume: false,
+    });
+    app.wait("watch authority rejected before metainfo", |event| {
+        unprepared(event);
+        matches!(event, Event::Status(Level::Warning, message)
+            if message.contains("Не удалось подтвердить источник"))
+    });
+    app.wait("rejected watch requests explicit input", |event| {
+        unprepared(event);
+        matches!(event, Event::MovieWatchNeedsInput(stamp) if stamp.is_current())
+    });
+}
+
+fn no_downloads(fast: &OfferOrigin, slow: &OfferOrigin) {
+    assert_eq!(fast.downloads.load(Ordering::SeqCst), 0);
+    assert_eq!(slow.downloads.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn recommend_playback_is_io_free_and_watch_requires_the_same_preferences() {
+    if isolated_case("recommend_playback_is_io_free_and_watch_requires_the_same_preferences") {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let fast = OfferOrigin::new(2020, Some(3), metadata("Alternate.mp4", 3), false);
+    let slow = OfferOrigin::new(2020, Some(27), metadata("Winner.mp4", 7), true);
+    let (mut app, db, target) = start(&paths(root.path()), &fast, &slow, options(vec![]));
+    let preferences = PlaybackPreferences::default();
+    let (partial_stamp, partial) = begin(&mut app, &slow, &target);
+    assert_eq!(recommend(&mut app, &preferences).1, None);
+    rejected_watch(&mut app, partial.index, &preferences);
+    no_downloads(&fast, &slow);
+    slow.release();
+    let (_, rows) = snapshot(&mut app, &target, 0);
+    let winner = rows.iter().find(|row| row.recommended).unwrap();
+    assert_eq!(winner.origin, "Slow fixture");
+    let (stamp, index) = recommend(&mut app, &preferences);
+    assert_eq!(index, Some(winner.index));
+    assert!(partial_stamp.is_current());
+    no_downloads(&fast, &slow);
+
+    // Each field belongs to the request, even when it cannot change the winner.
+    for changed in [
+        PlaybackPreferences {
+            preferred_resolution: Some("720p".into()),
+            ..preferences.clone()
+        },
+        PlaybackPreferences {
+            preferred_language: Some("en".into()),
+            ..preferences.clone()
+        },
+        PlaybackPreferences {
+            subtitles_off: true,
+            ..preferences.clone()
+        },
+    ] {
+        rejected_watch(&mut app, winner.index, &changed);
+        assert!(stamp.is_current());
+        no_downloads(&fast, &slow);
+    }
+    // Recommending new preferences supersedes the old request even with the
+    // same winning handle; neither operation may prepare media.
+    let changed = PlaybackPreferences {
+        subtitles_off: true,
+        ..preferences.clone()
+    };
+    assert_eq!(recommend(&mut app, &changed).1, Some(winner.index));
+    rejected_watch(&mut app, winner.index, &preferences);
+    no_downloads(&fast, &slow);
+    assert_eq!(recommend(&mut app, &preferences).1, Some(winner.index));
+
+    app.command(Command::WatchRecommended {
+        index: winner.index,
+        preferences,
+        resume: false,
+    });
+    app.wait("only explicit watch prepares the winning movie", |event| {
+        quiet(event);
+        assert!(!matches!(event, Event::MovieWatchNeedsInput(_)));
+        if let Event::SourceSelected {
+            playable: true,
+            suggested_filename,
+            ..
+        } = event
+        {
+            assert_eq!(suggested_filename, "Winner.mp4");
+            return true;
+        }
+        false
+    });
+    quota(&mut app);
+    assert!(!stamp.is_current());
+    assert_eq!(fast.downloads.load(Ordering::SeqCst), 0);
+    assert_eq!(slow.downloads.load(Ordering::SeqCst), 1);
+    finish_quiet(&mut app);
+    assert!(db.history(10).unwrap().is_empty());
+    assert!(db.saved_files().unwrap().is_empty());
+    assert!(db.load_progress(&target).unwrap().is_none());
+}
+
+#[test]
+fn watch_recommended_revalidates_handles_settings_and_source_preferences() {
+    if isolated_case("watch_recommended_revalidates_handles_settings_and_source_preferences") {
+        return;
+    }
+    for invalidation in [
+        "refresh",
+        "navigation",
+        "cancel",
+        "catalog",
+        "torrent",
+        "sources",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let fast = OfferOrigin::new(2020, Some(3), metadata("Alternate.mp4", 3), false);
+        let slow = OfferOrigin::new(2020, Some(27), metadata("Winner.mp4", 7), true);
+        let (mut app, mut db, target) = start(&paths(root.path()), &fast, &slow, options(vec![]));
+        begin(&mut app, &slow, &target);
+        slow.release();
+        snapshot(&mut app, &target, 0);
+        let preferences = PlaybackPreferences::default();
+        let (stamp, index) = recommend(&mut app, &preferences);
+        let index = index.expect("completed positive-seed movie has a recommendation");
+        match invalidation {
+            "refresh" => {
+                app.command(Command::RetrySources);
+                slow.held.recv_timeout(WAIT).unwrap();
+                slow.release();
+                let (_, rows) = snapshot(&mut app, &target, 0);
+                assert!(rows.iter().all(|row| row.index != index));
+                assert_ne!(recommend(&mut app, &preferences).1, Some(index));
+            }
+            "navigation" => {
+                let other = second_card(&mut db);
+                open_card(&mut app, &other);
+            }
+            "cancel" => {
+                app.command(Command::Cancel);
+                app.wait("cancellation clears source rows", |event| {
+                    unprepared(event);
+                    matches!(event, Event::SourcesState(AsyncState::Ready(rows)) if rows.is_empty())
+                });
+            }
+            "catalog" | "torrent" => {
+                let mut settings = Settings::from_storage(db.load_settings().unwrap());
+                if invalidation == "catalog" {
+                    settings.catalog_enabled = false;
+                } else {
+                    settings.network.torrents_enabled = false;
+                }
+                save_settings(&mut app, &settings);
+            }
+            "sources" => {
+                let stored = SourcePreferences {
+                    rutracker_enabled: false,
+                    commons_enabled: false,
+                    ..Default::default()
+                };
+                app.command(Command::SetSourcePreferences(stored.clone()));
+                app.wait("provider permissions revoked", |event| {
+                    unprepared(event);
+                    matches!(event, Event::SourcePreferences(saved) if saved == &stored)
+                });
+            }
+            _ => unreachable!(),
+        }
+        assert!(!stamp.is_current(), "{invalidation}");
+        rejected_watch(&mut app, index, &preferences);
+        assert!(app.backend.join());
+        while let Ok(event) = app.events.try_recv() {
+            unprepared(&event);
+        }
+        no_downloads(&fast, &slow);
+        assert!(db.history(10).unwrap().is_empty());
+        assert!(db.saved_files().unwrap().is_empty());
+        assert!(db.source_for_target(&target).unwrap().is_none());
+    }
+}
+
+#[test]
+fn watch_recommended_prepares_only_the_exact_episode_after_explicit_watch() {
+    if isolated_case("watch_recommended_prepares_only_the_exact_episode_after_explicit_watch") {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let fast = OfferOrigin::release_offer(
+        "Fixture 2020 S02E04 1080p",
+        "5000",
+        Some(999),
+        metadata("Wrong.S02E04.mp4", 3),
+        false,
+    );
+    let slow = OfferOrigin::release_offer(
+        "Fixture 2020 S02E03 1080p",
+        "5000",
+        Some(27),
+        metainfo(
+            &[
+                ("README.txt", b"owned fixture".to_vec()),
+                ("Fixture.S02E04.mp4", vec![4; 2 * 1024 * 1024]),
+                ("Fixture.S02E03.mp4", vec![3; 2 * 1024 * 1024]),
+            ],
+            true,
+        ),
+        true,
+    );
+    let (mut app, mut db, _) = start(&paths(root.path()), &fast, &slow, options(vec![]));
+    let id = MediaId::new("trakt:show:54").unwrap();
+    db.upsert_media(&kadr_storage::MediaRecord {
+        id: id.clone(),
+        title: "Fixture".into(),
+        original_title: None,
+        year: Some(2020),
+        kind: kadr_storage::MediaKind::Series,
+        description: String::new(),
+        poster_url: None,
+        attribution: String::new(),
+    })
+    .unwrap();
+    db.set_favorite(&id, true).unwrap();
+    let mut target = PlaybackTarget {
+        media_id: id,
+        episode: None,
+    };
+    open_card(&mut app, &target);
+    app.command(Command::AssignEpisode(2, 3));
+    app.wait("exact episode assigned to cached series", |event| {
+        unprepared(event);
+        matches!(event, Event::Status(Level::Info, message)
+            if message.contains("Привязка эпизода изменена"))
+    });
+    target.episode = Some(EpisodeKey::new(2, 3).unwrap());
+    app.command(Command::FindSources);
+    slow.held.recv_timeout(WAIT).unwrap();
+    let preferences = PlaybackPreferences {
+        preferred_resolution: Some("1080p".into()),
+        preferred_language: Some("en".into()),
+        subtitles_off: true,
+    };
+    assert_eq!(recommend(&mut app, &preferences).1, None);
+    no_downloads(&fast, &slow);
+    slow.release();
+    let (_, rows) = snapshot(&mut app, &target, 0);
+    assert_eq!(
+        rows.len(),
+        1,
+        "wrong episode must not compete by seed count"
+    );
+    assert_eq!(rows[0].origin, "Slow fixture");
+    let (stamp, index) = recommend(&mut app, &preferences);
+    assert_eq!(index, Some(rows[0].index));
+    no_downloads(&fast, &slow);
+    app.command(Command::WatchRecommended {
+        index: index.unwrap(),
+        preferences,
+        resume: false,
+    });
+    let Event::TorrentFiles(files) = app.wait("watch inspects the episode pack", |event| {
+        quiet(event);
+        assert!(!matches!(event, Event::MovieWatchNeedsInput(_)));
+        matches!(event, Event::TorrentFiles(files) if !files.is_empty())
+    }) else {
+        unreachable!()
+    };
+    assert_eq!(files.len(), 2);
+    assert!(files.iter().any(|file| {
+        file.index == 2 && file.season == Some(2) && file.episode == Some(3) && !file.ambiguous
+    }));
+    app.wait(
+        "watch selects exact episode rather than the first video",
+        |event| {
+            quiet(event);
+            if let Event::SourceSelected {
+                playable: true,
+                suggested_filename,
+                ..
+            } = event
+            {
+                assert_eq!(suggested_filename, "Fixture.S02E03.mp4");
+                return true;
+            }
+            assert!(!matches!(event, Event::MovieWatchNeedsInput(_)));
+            false
+        },
+    );
+    quota(&mut app);
+    assert!(!stamp.is_current());
+    assert_eq!(fast.downloads.load(Ordering::SeqCst), 0);
+    assert_eq!(slow.downloads.load(Ordering::SeqCst), 1);
+    finish_quiet(&mut app);
+    assert!(db.history(10).unwrap().is_empty());
+    assert!(db.saved_files().unwrap().is_empty());
+    assert!(db.load_progress(&target).unwrap().is_none());
 }
 
 #[test]

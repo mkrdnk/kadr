@@ -28,6 +28,10 @@ pub struct SourcePreferences {
     /// Requires no credentials; callers must enforce the global catalog permission.
     pub commons_enabled: bool,
     pub popcorn_enabled: bool,
+    /// Separate informed opt-in to automatic outbound movie/episode discovery
+    /// on already enabled providers. Does not enable providers or replace their
+    /// permissions, and does not gate the existing movie-only RuTracker prefetch.
+    pub auto_discover: bool,
     /// At most 16 configs, in user order, with distinct normalized endpoints.
     pub torznab: Vec<TorznabConfig>,
     /// Optional nonblank, control-free labels, at most 64 UTF-8 bytes each.
@@ -55,6 +59,7 @@ impl Default for SourcePreferences {
             rutracker_enabled: true,
             commons_enabled: true,
             popcorn_enabled: false,
+            auto_discover: false,
             torznab: Vec::new(),
             preferred_resolution: None,
             preferred_language: None,
@@ -185,13 +190,15 @@ impl Storage {
             transaction.execute(
                 "UPDATE source_preferences SET rutracker_enabled = ?1,
                  preferred_resolution = ?2, preferred_language = ?3,
-                 commons_enabled = ?4, popcorn_enabled = ?5 WHERE singleton = 1",
+                 commons_enabled = ?4, popcorn_enabled = ?5, auto_discover = ?6
+                 WHERE singleton = 1",
                 params![
                     preferences.rutracker_enabled,
                     preferences.preferred_resolution,
                     preferences.preferred_language,
                     preferences.commons_enabled,
                     preferences.popcorn_enabled,
+                    preferences.auto_discover,
                 ],
             )?;
             transaction.execute("DELETE FROM torznab_configs", [])?;
@@ -315,9 +322,9 @@ fn validate_cache_keys(media: &str, provider: &str) -> Result<()> {
 }
 
 fn read_preferences(connection: &Connection) -> Result<SourcePreferences> {
-    let (enabled, resolution, language, commons, popcorn) = connection.query_row(
+    let (enabled, resolution, language, commons, popcorn, auto_discover) = connection.query_row(
         "SELECT rutracker_enabled, preferred_resolution, preferred_language,
-                commons_enabled, popcorn_enabled
+                commons_enabled, popcorn_enabled, auto_discover
          FROM source_preferences WHERE singleton = 1",
         [],
         |row| {
@@ -327,6 +334,7 @@ fn read_preferences(connection: &Connection) -> Result<SourcePreferences> {
                 row.get(2)?,
                 row.get::<_, i64>(3)?,
                 row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
             ))
         },
     )?;
@@ -334,6 +342,7 @@ fn read_preferences(connection: &Connection) -> Result<SourcePreferences> {
         rutracker_enabled: decode_bool(enabled)?,
         commons_enabled: decode_bool(commons)?,
         popcorn_enabled: decode_bool(popcorn)?,
+        auto_discover: decode_bool(auto_discover)?,
         preferred_resolution: resolution,
         preferred_language: language,
         torznab: Vec::new(),

@@ -1,43 +1,14 @@
 //! Native cinema pages. All titles, artwork and progress come from the controller.
 
 use gpui::{
-    Context, Div, FontWeight, KeyDownEvent, ObjectFit, Stateful, div, img, linear_color_stop,
-    linear_gradient, prelude::*, px, rgb, rgba,
+    Context, Div, FontWeight, ObjectFit, Stateful, div, img, linear_color_stop, linear_gradient,
+    prelude::*, px, rgb, rgba,
 };
 
 use super::{
     ACCENT, BACKGROUND, BORDER, CATALOG_ONBOARDING, Command, KadrView, LibraryRow, MUTED,
-    MediaCard, MediaKind, PANEL, Section, SectionState, TEXT, UiEvent, icon,
+    MediaCard, MediaKind, PANEL, Section, SectionState, TEXT, UiEvent, cards::poster_title, icon,
 };
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) enum CatalogOrder {
-    #[default]
-    Provider,
-    Title,
-    Newest,
-    Rating,
-}
-
-impl CatalogOrder {
-    pub(super) fn cycle(&mut self) {
-        *self = match self {
-            Self::Provider => Self::Title,
-            Self::Title => Self::Newest,
-            Self::Newest => Self::Rating,
-            Self::Rating => Self::Provider,
-        };
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Provider => "Порядок каталога",
-            Self::Title => "По названию",
-            Self::Newest => "Сначала новые",
-            Self::Rating => "По рейтингу Trakt",
-        }
-    }
-}
 
 impl KadrView {
     pub(super) fn home(&self, width: f32, cx: &mut Context<Self>) -> Div {
@@ -53,297 +24,18 @@ impl KadrView {
             )
     }
 
-    pub(super) fn catalog_page(&self, section: Section, width: f32, cx: &mut Context<Self>) -> Div {
-        let layout = Layout::new(width);
-        let items = if section == Section::Shows {
-            &self.model.shows
-        } else {
-            &self.model.movies
-        };
-        let items = ordered(items, self.catalog_order);
-        page(layout)
-            .child(page_heading("ОТКРЫВАЙТЕ НОВОЕ", section.title()))
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_2()
-                    .py_2()
-                    .mb_5()
-                    .border_y_1()
-                    .border_color(rgb(BORDER))
-                    .child(self.button(
-                        "cinema-order",
-                        self.catalog_order.label(),
-                        Command::CycleCatalogOrder,
-                        false,
-                        !items.is_empty(),
-                        cx,
-                    ))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgb(MUTED))
-                            .child(format!("В каталоге: {}", items.len())),
-                    ),
-            )
-            .child(
-                div()
-                    .grid()
-                    .grid_cols(layout.columns as u16)
-                    .gap_x(px(14.))
-                    .gap_y(px(24.))
-                    .children(items.iter().enumerate().map(|(index, media)| {
-                        self.cinema_card(media, index, layout.card_width(), cx)
-                    })),
-            )
-            .when(
-                items.is_empty() || !matches!(self.model.browse_state, SectionState::Empty(_)),
-                |page| page.child(self.cinema_browse_state(cx)),
-            )
-    }
-
-    pub(super) fn detail_page(&self, width: f32, cx: &mut Context<Self>) -> Div {
-        let layout = Layout::new(width);
-        let Some(media) = &self.model.media else {
-            return page(layout)
-                .child(self.button(
-                    "cinema-back",
-                    "Назад",
-                    Command::BackToResults,
-                    false,
-                    true,
-                    cx,
-                ))
-                .child(
-                    div()
-                        .py_8()
-                        .text_color(rgb(MUTED))
-                        .child("Карточка ещё не загружена."),
-                );
-        };
-        let narrow = layout.inner < 580.;
-        let poster_width = if narrow { 120. } else { 180. };
-        // Opening another title or selecting an episode invalidates playback in
-        // the shell. Do not treat the presence of metadata as a playable source.
-        let playable = self.model.can_play();
-        let watch_event = self.model.card_watch_event();
-        let mut copy = div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_w_0()
-            .gap_3()
-            .child(kicker(kind_label(media.kind)))
-            .child(
-                div()
-                    .text_size(px(if narrow { 30. } else { 44. }))
-                    .line_height(px(if narrow { 34. } else { 47. }))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(media.title.clone()),
-            )
-            .when_some(
-                media
-                    .original_title
-                    .as_ref()
-                    .filter(|title| !title.trim().is_empty()),
-                |copy, title| {
-                    copy.child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(rgb(MUTED))
-                            .child(title.clone()),
-                    )
-                },
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_3()
-                    .text_size(px(12.))
-                    .text_color(rgb(MUTED))
-                    .when_some(media.year, |meta, year| meta.child(year.to_string()))
-                    .when_some(media.rating_tenths, |meta, rating| {
-                        meta.child(
-                            div()
-                                .text_color(rgb(ACCENT))
-                                .child(format!("★ {}", rating_label(rating))),
-                        )
-                    }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .mt_2()
-                    .child(self.button(
-                        "cinema-watch",
-                        if media.kind == MediaKind::Series && !playable {
-                            "Найти и смотреть"
-                        } else {
-                            "Смотреть"
-                        },
-                        Command::Emit(watch_event.clone()),
-                        true,
-                        self.model.accepts(&watch_event),
-                        cx,
-                    ))
-                    .child(self.button(
-                        "cinema-sources",
-                        "Источники",
-                        Command::Emit(UiEvent::FindSources),
-                        false,
-                        self.model.accepts(&UiEvent::FindSources),
-                        cx,
-                    ))
-                    .child(self.button(
-                        "cinema-favorite",
-                        if self.model.media_favorite {
-                            "В избранном"
-                        } else {
-                            "В избранное"
-                        },
-                        Command::Emit(UiEvent::ToggleFavorite),
-                        self.model.media_favorite,
-                        true,
-                        cx,
-                    )),
-            );
-        copy = copy.child(
-            div()
-                .text_size(px(11.))
-                .text_color(rgb(MUTED))
-                .child(if self.model.movie_watch_pending {
-                    "Подбираем источник для просмотра. Чтобы отменить, вернитесь назад или перейдите в другой раздел.".into()
-                } else if playable {
-                    format!("Готово к открытию в {}", self.model.default_player.label())
-                } else if media.kind == MediaKind::Movie {
-                    format!(
-                        "«Смотреть» подберёт источник и откроет {}. Другой вариант можно выбрать в «Источниках».",
-                        self.model.default_player.label()
-                    )
-                } else {
-                    format!(
-                        "Воспроизведение в {} после выбора источника",
-                        self.model.default_player.label()
-                    )
-                }),
-        );
-
-        let mut content = page(layout)
-            .relative()
-            .child(self.cinema_backdrop(
-                media.backdrop_url.as_deref(),
-                media.poster_url.as_deref(),
-                480.,
-            ))
-            .child(
-                div().relative().flex().items_start().child(
-                    self.button(
-                        "cinema-back",
-                        format!("‹ {}", self.detail_from.title()),
-                        Command::BackToResults,
-                        false,
-                        true,
-                        cx,
-                    )
-                    .h(px(33.)),
-                ),
-            )
-            .child(
-                div()
-                    .relative()
-                    .flex()
-                    .when(narrow, |hero| hero.flex_col())
-                    .when(!narrow, |hero| hero.items_end().min_h(px(360.)))
-                    .gap(px(if narrow { 20. } else { 30. }))
-                    .pt(px(38.))
-                    .child(self.cinema_poster(media, poster_width))
-                    .child(copy),
-            )
-            .when(self.model.movie_watch_pending, |content| {
-                content.child(self.source_discovery_status(cx))
-            })
-            .child(
-                div()
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .mt_8()
-                    .pt_6()
-                    .border_t_1()
-                    .border_color(rgb(BORDER))
-                    .child(kicker(if media.kind == MediaKind::Series {
-                        "О СЕРИАЛЕ"
-                    } else {
-                        "О ФИЛЬМЕ"
-                    }))
-                    .child(
-                        div()
-                            .max_w(px(760.))
-                            .text_size(px(13.))
-                            .line_height(px(22.))
-                            .text_color(rgb(MUTED))
-                            .child(
-                                media
-                                    .description
-                                    .as_ref()
-                                    .filter(|text| !text.trim().is_empty())
-                                    .cloned()
-                                    .unwrap_or_else(|| "Описание пока отсутствует.".into()),
-                            ),
-                    )
-                    .when(!media.attribution.trim().is_empty(), |body| {
-                        body.child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(rgb(MUTED))
-                                .child(media.attribution.clone()),
-                        )
-                    }),
-            );
-        if media.kind == MediaKind::Series {
-            content = content.child(
-                div()
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .mt_8()
-                    .child(kicker("СЕЗОНЫ И ЭПИЗОДЫ"))
-                    .when(media.episodes.is_empty(), |episodes| {
-                        episodes.child(
-                            div().text_size(px(12.)).text_color(rgb(MUTED))
-                                .child("Список эпизодов отсутствует. Сезон и эпизод можно указать при выборе файла."),
-                        )
-                    })
-                    .children(media.episodes.iter().enumerate().map(|(index, episode)| {
-                        self.button(
-                            ("cinema-episode", index),
-                            format!("S{:02}E{:02} · {}", episode.season, episode.number, episode.title),
-                            Command::Emit(UiEvent::SelectEpisode { season: episode.season, number: episode.number }),
-                            self.model.selected_episode == Some((episode.season, episode.number)),
-                            !self.model.playback_active,
-                            cx,
-                        )
-                    })),
-            );
-        }
-        content
-    }
-
     fn cinema_images_enabled(&self) -> bool {
         self.preferences_loaded
             && self.applied_catalog_enabled
             && self.model.preferences.catalog_enabled
     }
 
-    fn cinema_backdrop(&self, backdrop: Option<&str>, poster: Option<&str>, height: f32) -> Div {
+    pub(super) fn cinema_backdrop(
+        &self,
+        backdrop: Option<&str>,
+        poster: Option<&str>,
+        height: f32,
+    ) -> Div {
         div()
             .absolute()
             .top_0()
@@ -424,6 +116,10 @@ impl KadrView {
                 },
             )
         };
+        let action_enabled = match &command {
+            Command::Emit(event) => self.accepts(event),
+            _ => true,
+        };
         let progress_width = (width - 48.).clamp(1., 280.);
         div()
             .relative()
@@ -473,7 +169,7 @@ impl KadrView {
                                 action,
                                 command,
                                 true,
-                                !browse_primary || !browsing,
+                                action_enabled,
                                 cx,
                             ))
                             .when(browse_primary, |actions| {
@@ -587,6 +283,7 @@ impl KadrView {
                                     media,
                                     index,
                                     layout.card_width(),
+                                    true,
                                     cx,
                                 ))
                             },
@@ -604,122 +301,32 @@ impl KadrView {
             })
     }
 
-    fn cinema_card(
+    pub(super) fn cinema_card(
         &self,
         media: &MediaCard,
         index: usize,
         width: f32,
+        show_kind: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let command = Command::Emit(UiEvent::OpenMedia(media.id.clone()));
-        let keyboard_command = command.clone();
-        div()
-            .id(("cinema-card", index))
-            .group("cinema-card")
-            .min_w_0()
-            .rounded_md()
-            .tab_index(0)
-            .cursor_pointer()
-            .focus(|style| style.bg(rgb(BORDER)))
-            .child(
-                self.cinema_poster(media, width).child(
+        let event = UiEvent::OpenMedia(media.id.clone());
+        let enabled = self.accepts(&event);
+        self.poster_action(("cinema-card", index), Command::Emit(event), enabled, cx)
+            .child(self.poster_image(media.poster_url.as_deref(), media.kind, width))
+            .child(poster_title(media.title.clone()).mt_2())
+            .when_some(card_metadata(media, show_kind), |card, metadata| {
+                card.child(
                     div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .justify_center()
-                        .gap_2()
-                        .bg(rgba(0x0c0c0eb5))
-                        .opacity(0.)
-                        .group_hover("cinema-card", |style| style.opacity(1.))
-                        .child(
-                            div()
-                                .size(px(35.))
-                                .rounded_full()
-                                .bg(rgb(ACCENT))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(icon("play", 18., BACKGROUND)),
-                        )
-                        .child(div().text_size(px(10.)).child("Подробнее")),
-                ),
-            )
-            .child(
-                div()
-                    .mt_2()
-                    .text_size(px(12.))
-                    .truncate()
-                    .child(media.title.clone()),
-            )
-            .child(
-                div()
-                    .mt_1()
-                    .text_size(px(10.))
-                    .text_color(rgb(MUTED))
-                    .child(metadata(media)),
-            )
-            .on_click(cx.listener(move |this, _, _, cx| this.run_command(&command, cx)))
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") && !event.is_held {
-                    cx.stop_propagation();
-                    this.run_command(&keyboard_command, cx);
-                }
-            }))
-    }
-
-    fn cinema_poster(&self, media: &MediaCard, width: f32) -> Div {
-        div()
-            .relative()
-            .w(px(width))
-            .h(px(width * 1.5))
-            .flex_shrink_0()
-            .rounded_md()
-            .overflow_hidden()
-            .border_1()
-            .border_color(rgba(0xffffff12))
-            .bg(rgb(PANEL))
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(icon(
-                        if media.kind == MediaKind::Series {
-                            "tv"
-                        } else {
-                            "film"
-                        },
-                        28.,
-                        MUTED,
-                    )),
-            )
-            .when_some(
-                image_url(media.poster_url.as_deref(), self.cinema_images_enabled()),
-                |poster, url| {
-                    poster.child(img(url).relative().size_full().object_fit(ObjectFit::Cover))
-                },
-            )
-            .when_some(media.rating_tenths, |poster, rating| {
-                poster.child(
-                    div()
-                        .absolute()
-                        .right(px(6.))
-                        .top(px(6.))
-                        .px_2()
-                        .py_1()
-                        .rounded_sm()
-                        .border_1()
-                        .border_color(rgba(0xffffff18))
-                        .bg(rgba(0x111114d9))
-                        .text_size(px(9.))
-                        .child(format!("★ {}", rating_label(rating))),
+                        .mt_1()
+                        .text_size(px(10.))
+                        .text_color(rgb(MUTED))
+                        .child(metadata),
                 )
             })
+    }
+
+    pub(super) fn cinema_poster(&self, media: &MediaCard, width: f32) -> Div {
+        self.poster_image(media.poster_url.as_deref(), media.kind, width)
     }
 
     fn cinema_browse_state(&self, cx: &mut Context<Self>) -> Div {
@@ -776,15 +383,15 @@ impl KadrView {
 }
 
 #[derive(Clone, Copy)]
-struct Layout {
+pub(super) struct Layout {
     width: f32,
     padding: f32,
     inner: f32,
-    columns: usize,
+    pub(super) columns: usize,
 }
 
 impl Layout {
-    fn new(width: f32) -> Self {
+    pub(super) fn new(width: f32) -> Self {
         let width = if width.is_finite() {
             width.clamp(1., 1400.)
         } else {
@@ -807,12 +414,12 @@ impl Layout {
         }
     }
 
-    fn card_width(self) -> f32 {
+    pub(super) fn card_width(self) -> f32 {
         ((self.inner - 14. * (self.columns - 1) as f32) / self.columns as f32).max(1.)
     }
 }
 
-fn page(layout: Layout) -> Div {
+pub(super) fn page(layout: Layout) -> Div {
     div()
         .w(px(layout.width))
         .max_w_full()
@@ -832,7 +439,7 @@ fn kicker(text: impl Into<String>) -> Div {
         .child(text.into())
 }
 
-fn page_heading(eyebrow: &'static str, title: &str) -> Div {
+pub(super) fn page_heading(eyebrow: &'static str, title: &str) -> Div {
     div().mb_5().child(kicker(eyebrow)).child(
         div()
             .mt_1()
@@ -856,8 +463,12 @@ fn metadata(media: &MediaCard) -> String {
     }
 }
 
-fn rating_label(rating: u8) -> String {
-    format!("Trakt {}.{:01}", rating / 10, rating % 10)
+fn card_metadata(media: &MediaCard, show_kind: bool) -> Option<String> {
+    if show_kind {
+        Some(metadata(media))
+    } else {
+        media.year.map(|year| year.to_string())
+    }
 }
 
 fn image_url(url: Option<&str>, enabled: bool) -> Option<String> {
@@ -900,17 +511,6 @@ fn time_label(seconds: u64) -> String {
     }
 }
 
-fn ordered(items: &[MediaCard], order: CatalogOrder) -> Vec<&MediaCard> {
-    let mut items: Vec<_> = items.iter().collect();
-    match order {
-        CatalogOrder::Provider => {}
-        CatalogOrder::Title => items.sort_by_cached_key(|media| media.title.to_lowercase()),
-        CatalogOrder::Newest => items.sort_by_key(|media| std::cmp::Reverse(media.year)),
-        CatalogOrder::Rating => items.sort_by_key(|media| std::cmp::Reverse(media.rating_tenths)),
-    }
-    items
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -918,6 +518,8 @@ mod tests {
     fn row(id: &str, opened_at: i64, position: Option<u64>, duration: Option<u64>) -> LibraryRow {
         LibraryRow {
             id: id.into(),
+            media_id: id.into(),
+            episode: None,
             title: id.into(),
             details: String::new(),
             favorite: false,
@@ -936,6 +538,10 @@ mod tests {
             original_title: None,
             year,
             rating_tenths,
+            external_ratings: vec![],
+            runtime_minutes: None,
+            genres: vec![],
+            certification: None,
             description: None,
             poster_url: None,
             backdrop_url: None,
@@ -964,27 +570,14 @@ mod tests {
     }
 
     #[test]
-    fn catalog_sort_is_stable_and_missing_values_are_last() {
-        let items = vec![
-            media("Beta", None, None),
-            media("alpha", Some(2020), Some(80)),
-            media("Gamma", Some(2024), Some(80)),
-        ];
-        let titles = |order| {
-            ordered(&items, order)
-                .iter()
-                .map(|media| media.title.as_str())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(titles(CatalogOrder::Provider), ["Beta", "alpha", "Gamma"]);
-        assert_eq!(titles(CatalogOrder::Title), ["alpha", "Beta", "Gamma"]);
-        assert_eq!(titles(CatalogOrder::Newest), ["Gamma", "alpha", "Beta"]);
-        assert_eq!(titles(CatalogOrder::Rating), ["alpha", "Gamma", "Beta"]);
-        let mut order = CatalogOrder::default();
-        for _ in 0..4 {
-            order.cycle();
-        }
-        assert_eq!(order, CatalogOrder::default());
+    fn card_metadata_omits_redundant_kind_and_absent_year() {
+        let mut item = media("Title", None, None);
+        assert_eq!(card_metadata(&item, true).as_deref(), Some("Фильм"));
+        assert_eq!(card_metadata(&item, false), None);
+        item.year = Some(2024);
+        item.kind = MediaKind::Series;
+        assert_eq!(card_metadata(&item, true).as_deref(), Some("2024 · Сериал"));
+        assert_eq!(card_metadata(&item, false).as_deref(), Some("2024"));
     }
 
     #[test]
@@ -1042,9 +635,6 @@ mod tests {
     #[test]
     fn display_values_do_not_invent_metadata_or_round_to_hours() {
         assert_eq!(metadata(&media("Title", None, None)), "Фильм");
-        assert_eq!(rating_label(87), "Trakt 8.7");
-        assert_eq!(rating_label(100), "Trakt 10.0");
-        assert_eq!(CatalogOrder::Rating.label(), "По рейтингу Trakt");
         assert_eq!(time_label(59), "59 сек");
         assert_eq!(time_label(3660), "1 ч 1 мин");
     }

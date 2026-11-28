@@ -10,7 +10,7 @@ use crate::{
     snapshots::link_source_row,
 };
 
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 /// Synchronous connection, intended to be owned by one background worker.
 /// No raw connection is exposed, so writes always pass validation.
@@ -69,7 +69,7 @@ impl Storage {
         let settings = self.connection.query_row(
             "SELECT player, torrents_enabled, download_kind, download_bytes,
                     upload_kind, upload_bytes, max_connections, cache_limit_bytes,
-                    catalog_enabled, cache_directory, catalog_proxy
+                    catalog_enabled, cache_directory, catalog_proxy, sidebar_collapsed
              FROM settings WHERE singleton = 1",
             [],
             |row| {
@@ -85,6 +85,7 @@ impl Storage {
                     row.get::<_, i64>(8)?,
                     row.get::<_, Option<Vec<u8>>>(9)?,
                     row.get::<_, Option<String>>(10)?,
+                    row.get::<_, i64>(11)?,
                 ))
             },
         )?;
@@ -100,6 +101,7 @@ impl Storage {
             catalog,
             cache_directory,
             catalog_proxy,
+            sidebar_collapsed,
         ) = settings;
         let settings = Settings {
             default_player: match player.as_str() {
@@ -130,6 +132,11 @@ impl Storage {
             },
             cache_directory: cache_directory.map(decode_path).transpose()?,
             catalog_proxy,
+            sidebar_collapsed: match sidebar_collapsed {
+                0 => false,
+                1 => true,
+                _ => return Err(Error::CorruptData("sidebar preference")),
+            },
         };
         settings
             .validate()
@@ -463,8 +470,8 @@ fn write_settings(connection: &Connection, settings: &Settings) -> Result<()> {
         "INSERT INTO settings
          (singleton, player, torrents_enabled, download_kind, download_bytes,
           upload_kind, upload_bytes, max_connections, cache_limit_bytes,
-          catalog_enabled, cache_directory, catalog_proxy)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+          catalog_enabled, cache_directory, catalog_proxy, sidebar_collapsed)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          ON CONFLICT(singleton) DO UPDATE SET
              player = excluded.player,
              torrents_enabled = excluded.torrents_enabled,
@@ -476,7 +483,8 @@ fn write_settings(connection: &Connection, settings: &Settings) -> Result<()> {
              cache_limit_bytes = excluded.cache_limit_bytes,
              catalog_enabled = excluded.catalog_enabled,
              cache_directory = excluded.cache_directory,
-             catalog_proxy = excluded.catalog_proxy",
+             catalog_proxy = excluded.catalog_proxy,
+             sidebar_collapsed = excluded.sidebar_collapsed",
         params![
             match settings.default_player {
                 PlayerPreference::Mpv => "mpv",
@@ -493,6 +501,7 @@ fn write_settings(connection: &Connection, settings: &Settings) -> Result<()> {
             settings.catalog_enabled,
             settings.cache_directory.as_deref().map(encode_path),
             settings.catalog_proxy.as_deref(),
+            settings.sidebar_collapsed,
         ],
     )?;
     Ok(())
@@ -695,6 +704,17 @@ fn migrate(connection: &mut Connection) -> Result<()> {
         // additional mirrors or numbered episodes. Require a fresh opt-in.
         transaction.execute("UPDATE source_preferences SET popcorn_enabled = 0", [])?;
         transaction.pragma_update(None, "user_version", 10)?;
+    }
+    if version < 11 {
+        // Neither a layout preference nor enabled providers imply consent to
+        // automatic outbound discovery. Keep both flags off on every upgrade.
+        transaction.execute_batch(
+            "ALTER TABLE settings ADD COLUMN sidebar_collapsed INTEGER NOT NULL DEFAULT 0
+                 CHECK(sidebar_collapsed IN (0, 1));
+             ALTER TABLE source_preferences ADD COLUMN auto_discover INTEGER NOT NULL DEFAULT 0
+                 CHECK(auto_discover IN (0, 1));",
+        )?;
+        transaction.pragma_update(None, "user_version", 11)?;
     }
     if version < 1 {
         write_settings(&transaction, &Settings::default())?;

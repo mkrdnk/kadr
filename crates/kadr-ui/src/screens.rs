@@ -1,7 +1,7 @@
 //! Screen composition and form validation. No application services or IO.
 use super::*;
 use crate::input::TextInput;
-use gpui::{Entity, img};
+use gpui::Entity;
 
 pub(super) struct Inputs {
     pub(super) search: Entity<TextInput>,
@@ -370,233 +370,6 @@ impl KadrView {
         }
     }
 
-    pub(super) fn source_rows(&self, cx: &mut Context<Self>) -> Div {
-        let mut content = column().gap_3();
-        if let Some(media) = &self.model.media {
-            content = content.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .px_1()
-                    .child(
-                        column()
-                            .gap_1()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(MUTED))
-                                    .child("ПРИВЯЗАНО К КАРТОЧКЕ"),
-                            )
-                            .child(div().text_sm().child(media.title.clone()))
-                            .when_some(self.model.selected_episode, |context, (s, e)| {
-                                context.child(body(format!("S{s:02}E{e:02}")))
-                            }),
-                    )
-                    .child(self.button(
-                        "unlink-media",
-                        "Без привязки",
-                        Command::Emit(UiEvent::UnlinkMedia),
-                        false,
-                        self.model.accepts(&UiEvent::UnlinkMedia),
-                        cx,
-                    )),
-            );
-        }
-        let groups = self.visible_source_groups();
-        let has_possible = groups
-            .iter()
-            .any(|(group, _)| *group == SourceGroup::Possible);
-        if groups.is_empty() && !self.model.sources.is_empty() {
-            content = content.child(body("Нет раздач с указанным качеством."));
-        } else if !groups.is_empty() {
-            for (group, rows) in groups {
-                let table = column()
-                    .gap_0()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(PANEL))
-                    .overflow_hidden()
-                    .child(
-                        source_table_row()
-                            .py_2()
-                            .text_size(px(9.))
-                            .text_color(rgb(MUTED))
-                            .child(div().flex_1().min_w(px(150.)).child("КАЧЕСТВО / ТИП"))
-                            .child(div().w(px(150.)).flex_shrink_0().child("ПРОВАЙДЕР / ЯЗЫК"))
-                            .child(div().w(px(78.)).flex_shrink_0().child("РАЗМЕР"))
-                            .child(div().w(px(58.)).flex_shrink_0().child("СИДЫ"))
-                            .child(div().w(px(94.)).flex_shrink_0()),
-                    )
-                    .children(rows.into_iter().map(|source| {
-                        source_table_row()
-                            .py_3()
-                            .border_t_1()
-                            .border_color(rgb(BORDER))
-                            .child(
-                                column()
-                                    .gap_1()
-                                    .flex_1()
-                                    .min_w(px(150.))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .flex_wrap()
-                                            .gap_2()
-                                            .child(
-                                                div()
-                                                    .text_size(px(14.))
-                                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                    .child(
-                                                        source
-                                                            .quality
-                                                            .clone()
-                                                            .unwrap_or_else(|| "Неизвестно".into()),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(px(10.))
-                                                    .text_color(rgb(MUTED))
-                                                    .child(if source.rutracker {
-                                                        "BitTorrent"
-                                                    } else {
-                                                        source.kind.label()
-                                                    }),
-                                            ),
-                                    )
-                                    .when(source.recommended, |cell| {
-                                        cell.child(
-                                            div()
-                                                .text_size(px(10.))
-                                                .text_color(rgb(ACCENT))
-                                                .child("Рекомендуемый"),
-                                        )
-                                    })
-                                    .child(
-                                        div()
-                                            .text_size(px(11.))
-                                            .text_color(rgb(MUTED))
-                                            .child(source.title.clone()),
-                                    )
-                                    .when_some(source.video_codec.as_ref(), |cell, codec| {
-                                        cell.child(body(format!("Видео: {codec}")))
-                                    })
-                                    .when_some(source.audio_codec.as_ref(), |cell, codec| {
-                                        cell.child(body(format!("Аудио: {codec}")))
-                                    })
-                                    .child(div().text_size(px(10.)).text_color(rgb(MUTED)).child(
-                                        format!(
-                                            "Лицензия: {}",
-                                            source.license.as_deref().unwrap_or("не указана")
-                                        ),
-                                    ))
-                                    .when(source.rutracker, |cell| {
-                                        cell.child(
-                                            div()
-                                                .text_size(px(10.))
-                                                .text_color(rgb(WARNING))
-                                                .child("Не проверено · права неизвестны"),
-                                        )
-                                    }),
-                            )
-                            .child(
-                                column()
-                                    .gap_1()
-                                    .w(px(150.))
-                                    .flex_shrink_0()
-                                    .child(
-                                        div().text_size(px(11.)).child(
-                                            if source.rutracker
-                                                && !source
-                                                    .origin
-                                                    .to_ascii_lowercase()
-                                                    .contains("rutracker")
-                                            {
-                                                format!("RuTracker · {}", source.origin)
-                                            } else {
-                                                source.origin.clone()
-                                            },
-                                        ),
-                                    )
-                                    .child(
-                                        div().text_size(px(10.)).text_color(rgb(MUTED)).child(
-                                            source
-                                                .language
-                                                .clone()
-                                                .unwrap_or_else(|| "Язык неизвестен".into()),
-                                        ),
-                                    ),
-                            )
-                            .child(
-                                div().w(px(78.)).flex_shrink_0().text_size(px(11.)).child(
-                                    source
-                                        .size
-                                        .map(bytes)
-                                        .unwrap_or_else(|| "Неизвестно".into()),
-                                ),
-                            )
-                            .child(
-                                div()
-                                    .w(px(58.))
-                                    .flex_shrink_0()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(if source.seeds.is_some_and(|n| n > 0) {
-                                        ACCENT
-                                    } else {
-                                        MUTED
-                                    }))
-                                    .child(
-                                        source
-                                            .seeds
-                                            .map(|n| n.to_string())
-                                            .unwrap_or_else(|| "—".into()),
-                                    )
-                                    .when_some(source.peers, |cell, peers| {
-                                        cell.child(
-                                            div()
-                                                .text_color(rgb(MUTED))
-                                                .child(format!("Пиры: {peers}")),
-                                        )
-                                    }),
-                            )
-                            .child(
-                                self.button(
-                                    ("choose-source", source.index),
-                                    "Выбрать",
-                                    Command::Emit(UiEvent::ChooseSource(source.index)),
-                                    false,
-                                    self.model.accepts(&UiEvent::ChooseSource(source.index)),
-                                    cx,
-                                )
-                                .w(px(94.))
-                                .flex_shrink_0()
-                                .px_2()
-                                .py_2()
-                                .text_size(px(11.))
-                                .text_center(),
-                            )
-                    }));
-                content = content
-                    .when(has_possible, |content| {
-                        content.child(eyebrow(group.heading()))
-                    })
-                    .when_some(group.explanation(), |content, explanation| {
-                        content.child(body(explanation))
-                    })
-                    .child(table);
-            }
-            content = content.child(div().text_size(px(10.)).text_color(rgb(MUTED)).child(
-                "«Неизвестно» и «—» — нет данных. Выбор источника не запускает воспроизведение.",
-            ));
-        }
-        content
-    }
-
     pub(super) fn torrent_files(&self, cx: &mut Context<Self>) -> Div {
         if self.model.files.is_empty() {
             return column();
@@ -813,83 +586,96 @@ impl KadrView {
         content = content.child(column().gap_3().children(rows.into_iter().enumerate().map(
             |(index, row)| {
                 panel()
-                    .flex_row()
-                    .items_center()
-                    .gap_4()
-                    .child(library_poster(row, self.catalog_images_enabled()))
+                    .gap_2()
                     .child(
-                        column()
+                        self.poster_action(
+                            ("library-card", index),
+                            Command::Emit(UiEvent::OpenLibrary(row.id.clone())),
+                            self.model.accepts(&UiEvent::OpenLibrary(row.id.clone())),
+                            cx,
+                        )
+                        .flex()
+                        .items_center()
+                        .gap_4()
+                        .child(self.poster_image(row.poster_url.as_deref(), MediaKind::Movie, 76.))
+                        .child(
+                            column()
+                                .gap_2()
+                                .flex_1()
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .text_size(px(15.))
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .child(row.title.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .child(row.details.clone()),
+                                )
+                                .child(div().text_size(px(11.)).text_color(rgb(MUTED)).child(
+                                    if row.completed {
+                                        "Просмотр завершён".into()
+                                    } else {
+                                        match (row.position, row.duration) {
+                                            (Some(p), Some(d)) => {
+                                                format!("Позиция {} / {}", time(p), time(d))
+                                            }
+                                            (Some(p), None) => {
+                                                format!(
+                                                    "Позиция {} · длительность неизвестна",
+                                                    time(p)
+                                                )
+                                            }
+                                            _ => "Позиция просмотра неизвестна".into(),
+                                        }
+                                    },
+                                ))
+                                .when_some(
+                                    measured_fraction(row.position, row.duration),
+                                    |card, fraction| card.child(progress_track(fraction)),
+                                ),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
                             .gap_2()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_size(px(15.))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .child(row.title.clone()),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(MUTED))
-                                    .child(row.details.clone()),
-                            )
-                            .child(div().text_size(px(11.)).text_color(rgb(MUTED)).child(
-                                if row.completed {
-                                    "Просмотр завершён".into()
+                            .pl(px(92.))
+                            .pt_1()
+                            .child(self.button(
+                                ("open-library", index),
+                                if row.can_resume() {
+                                    "Продолжить / открыть"
                                 } else {
-                                    match (row.position, row.duration) {
-                                        (Some(p), Some(d)) => {
-                                            format!("Позиция {} / {}", time(p), time(d))
-                                        }
-                                        (Some(p), None) => {
-                                            format!("Позиция {} · длительность неизвестна", time(p))
-                                        }
-                                        _ => "Позиция просмотра неизвестна".into(),
-                                    }
+                                    "Открыть"
                                 },
+                                Command::Emit(UiEvent::OpenLibrary(row.id.clone())),
+                                true,
+                                self.model.accepts(&UiEvent::OpenLibrary(row.id.clone())),
+                                cx,
                             ))
-                            .when_some(
-                                measured_fraction(row.position, row.duration),
-                                |card, fraction| card.child(progress_track(fraction)),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .gap_2()
-                                    .pt_1()
-                                    .child(self.button(
-                                        ("open-library", index),
-                                        if row.can_resume() {
-                                            "Продолжить / открыть"
-                                        } else {
-                                            "Открыть"
-                                        },
-                                        Command::Emit(UiEvent::OpenLibrary(row.id.clone())),
-                                        true,
-                                        self.model.accepts(&UiEvent::OpenLibrary(row.id.clone())),
-                                        cx,
-                                    ))
-                                    .child(self.button(
-                                        ("favorite-library", index),
-                                        if row.favorite {
-                                            "Убрать из избранного"
-                                        } else {
-                                            "В избранное"
-                                        },
-                                        Command::Emit(UiEvent::SetFavorite {
-                                            id: row.id.clone(),
-                                            favorite: !row.favorite,
-                                        }),
-                                        false,
-                                        self.model.accepts(&UiEvent::SetFavorite {
-                                            id: row.id.clone(),
-                                            favorite: !row.favorite,
-                                        }),
-                                        cx,
-                                    )),
-                            ),
+                            .child(self.button(
+                                ("favorite-library", index),
+                                if row.favorite {
+                                    "Убрать из избранного"
+                                } else {
+                                    "В избранное"
+                                },
+                                Command::Emit(UiEvent::SetFavorite {
+                                    id: row.id.clone(),
+                                    favorite: !row.favorite,
+                                }),
+                                false,
+                                self.model.accepts(&UiEvent::SetFavorite {
+                                    id: row.id.clone(),
+                                    favorite: !row.favorite,
+                                }),
+                                cx,
+                            )),
                     )
             },
         )));
@@ -1109,10 +895,6 @@ fn field(label: &'static str, input: Entity<TextInput>) -> Div {
         .child(input)
 }
 
-fn source_table_row() -> Div {
-    div().flex().items_center().gap_3().px_4()
-}
-
 fn source_metric(label: &'static str, value: &str) -> Div {
     column().gap_1().min_w(px(100.)).child(body(label)).child(
         div()
@@ -1120,33 +902,6 @@ fn source_metric(label: &'static str, value: &str) -> Div {
             .font_weight(gpui::FontWeight::MEDIUM)
             .child(value.to_owned()),
     )
-}
-
-fn library_poster(row: &LibraryRow, enabled: bool) -> Div {
-    let url = row
-        .poster_url
-        .as_ref()
-        .filter(|url| enabled && (url.starts_with("https://") || url.starts_with("http://")));
-    div()
-        .w(px(76.))
-        .h(px(114.))
-        .flex_shrink_0()
-        .rounded_md()
-        .overflow_hidden()
-        .bg(rgb(BACKGROUND))
-        .flex()
-        .items_center()
-        .justify_center()
-        .when_some(url, |card, url| {
-            card.child(
-                img(url.clone())
-                    .size_full()
-                    .object_fit(gpui::ObjectFit::Cover)
-                    .with_loading(|| icon("film", 22., MUTED).into_any_element())
-                    .with_fallback(|| icon("film", 22., MUTED).into_any_element()),
-            )
-        })
-        .when(url.is_none(), |card| card.child(icon("film", 22., MUTED)))
 }
 
 fn measured_fraction(done: Option<u64>, total: Option<u64>) -> Option<f32> {
@@ -1336,6 +1091,8 @@ mod tests {
     fn library_filters_do_not_invent_history_or_resume() {
         let mut row = LibraryRow {
             id: "local:item".into(),
+            media_id: "local:item".into(),
+            episode: None,
             title: "Own video".into(),
             poster_url: None,
             details: String::new(),

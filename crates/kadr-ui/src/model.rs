@@ -89,8 +89,9 @@ impl PlayerChoice {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SourceKind {
+    #[default]
     Http,
     Magnet,
     TorrentFile,
@@ -186,27 +187,40 @@ impl SectionState {
 pub enum UiEvent {
     PasteSource,
     OpenTorrent,
+    ImportSource {
+        torrent: bool,
+        attach: bool,
+    },
     Play,
     PlayFromStart,
     Stop,
     SetDefaultPlayer(PlayerChoice),
+    SetSidebarCollapsed(bool),
     Retry(Section),
     Cancel(Section),
     /// Stop quiet card warming without discarding an explicit source choice.
     CancelMoviePrefetch,
     Search(String),
     Browse,
+    CatalogPage(crate::CatalogRequest),
+    CatalogGenres(MediaKind),
     OpenMedia(String),
     /// Watch the current movie. The controller plays a ready explicit/saved
     /// choice normally, or resolves a recommendation for automatic playback.
     /// Unlike `FindSources`, this is a playback intent, not just discovery.
     WatchMovie,
+    WatchDetail {
+        resume: bool,
+        preferences: PlaybackOptions,
+    },
     FindSources,
+    DiscoverSources,
     SelectEpisode {
         season: u16,
         number: u16,
     },
     ChooseSource(usize),
+    WatchSource(usize),
     ToggleFavorite,
     SetFavorite {
         id: String,
@@ -231,6 +245,13 @@ pub enum UiEvent {
     ForgetRuTracker,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlaybackOptions {
+    pub preferred_resolution: Option<String>,
+    pub preferred_language: Option<String>,
+    pub subtitles_off: bool,
+}
+
 /// Transient sign-in input; neither field is available in debug formatting.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RuTrackerCredentials {
@@ -244,20 +265,23 @@ impl std::fmt::Debug for RuTrackerCredentials {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MediaKind {
+    #[default]
     Movie,
     Series,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EpisodeRow {
     pub season: u16,
     pub number: u16,
     pub title: String,
+    pub runtime_minutes: Option<u32>,
+    pub screenshot_url: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MediaCard {
     pub id: String,
     pub title: String,
@@ -270,12 +294,16 @@ pub struct MediaCard {
     pub backdrop_url: Option<String>,
     /// Provider rating on a ten-point scale, in tenths (87 represents 8.7).
     pub rating_tenths: Option<u8>,
+    pub external_ratings: Vec<crate::DetailRating>,
+    pub runtime_minutes: Option<u32>,
+    pub genres: Vec<String>,
+    pub certification: Option<String>,
     pub kind: MediaKind,
     pub episodes: Vec<EpisodeRow>,
     pub attribution: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SourceRow {
     pub index: usize,
     /// Resolver recommendation only; never implies selection or starts playback.
@@ -288,6 +316,9 @@ pub struct SourceRow {
     pub video_codec: Option<String>,
     pub audio_codec: Option<String>,
     pub language: Option<String>,
+    /// Search metadata, not verified against the video file.
+    pub resolution: Option<u16>,
+    pub languages: Vec<String>,
     pub origin: String,
     pub license: Option<String>,
     /// Controller-provided size in bytes; absence is not a zero-size download.
@@ -354,6 +385,7 @@ pub struct SourcePreferencesDraft {
     pub commons_enabled: bool,
     pub rutracker_enabled: bool,
     pub popcorn_enabled: bool,
+    pub auto_discover: bool,
     pub torznab: Vec<TorznabDraft>,
     pub preferred_resolution: Option<String>,
     pub preferred_language: Option<String>,
@@ -365,6 +397,7 @@ impl Default for SourcePreferencesDraft {
             commons_enabled: true,
             rutracker_enabled: true,
             popcorn_enabled: false,
+            auto_discover: false,
             torznab: Vec::new(),
             preferred_resolution: None,
             preferred_language: None,
@@ -382,9 +415,11 @@ pub struct TorrentFileRow {
     pub ambiguous: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LibraryRow {
     pub id: String,
+    pub media_id: String,
+    pub episode: Option<(u16, u16)>,
     pub title: String,
     pub poster_url: Option<String>,
     pub details: String,
@@ -404,8 +439,9 @@ impl LibraryRow {
 
     pub fn can_resume(&self) -> bool {
         !self.completed
-            && self.position.is_some_and(|position| position > 0)
-            && self.position != self.duration
+            && self.position.is_some_and(|position| {
+                position > 0 && self.duration.is_none_or(|duration| position < duration)
+            })
     }
 }
 
@@ -549,20 +585,6 @@ impl Default for ShellModel {
 }
 
 impl ShellModel {
-    pub(crate) fn card_watch_event(&self) -> UiEvent {
-        if self
-            .media
-            .as_ref()
-            .is_some_and(|media| media.kind == MediaKind::Movie)
-        {
-            UiEvent::WatchMovie
-        } else if self.playback_available && self.source.is_some() {
-            UiEvent::Play
-        } else {
-            UiEvent::FindSources
-        }
-    }
-
     pub fn can_play(&self) -> bool {
         self.playback_available
             && self.source.is_some()
@@ -580,12 +602,24 @@ impl ShellModel {
         self.source_discovery_starting || self.source_discovery.is_some()
     }
 
+    pub(super) fn can_open_media(&self, id: &str, in_catalog: impl FnOnce() -> bool) -> bool {
+        !self.playback_active
+            && (self
+                .results
+                .iter()
+                .chain(&self.movies)
+                .chain(&self.shows)
+                .chain(&self.media)
+                .any(|media| media.id == id)
+                || in_catalog())
+    }
+
     /// Check again when handling a click/key event, not only when rendering.
     pub fn accepts(&self, event: &UiEvent) -> bool {
         match event {
             UiEvent::Play | UiEvent::PlayFromStart => self.can_play(),
             UiEvent::Stop => self.playback_active,
-            UiEvent::PasteSource | UiEvent::OpenTorrent => {
+            UiEvent::PasteSource | UiEvent::OpenTorrent | UiEvent::ImportSource { .. } => {
                 !self.playback_active
                     && !self.preparing
                     && !self.movie_watch_pending
@@ -605,7 +639,7 @@ impl ShellModel {
                 *section == Section::Sources
                     || matches!(self.states[section.index()], SectionState::Loading(_))
             }
-            UiEvent::ChooseSource(index) => {
+            UiEvent::ChooseSource(index) | UiEvent::WatchSource(index) => {
                 self.sources.iter().any(|row| row.index == *index)
                     && self.accepts(&UiEvent::PasteSource)
             }
@@ -623,10 +657,15 @@ impl ShellModel {
                     .is_some_and(|media| media.kind == MediaKind::Movie)
                     && self.accepts(&UiEvent::PasteSource)
             }
-            UiEvent::FindSources => self.media.is_some() && self.accepts(&UiEvent::PasteSource),
+            UiEvent::WatchDetail { .. } => self.accepts(&UiEvent::FindSources),
+            UiEvent::FindSources | UiEvent::DiscoverSources => {
+                self.media.as_ref().is_some_and(|media| {
+                    media.kind == MediaKind::Movie || self.selected_episode.is_some()
+                }) && self.accepts(&UiEvent::PasteSource)
+            }
             UiEvent::ToggleFavorite => self.media.is_some(),
             UiEvent::SelectEpisode { season, number } => {
-                !self.movie_watch_pending
+                !self.playback_active
                     && self.media.as_ref().is_some_and(|media| {
                         media
                             .episodes
@@ -634,16 +673,7 @@ impl ShellModel {
                             .any(|episode| episode.season == *season && episode.number == *number)
                     })
             }
-            UiEvent::OpenMedia(id) => {
-                !self.playback_active
-                    && self
-                        .results
-                        .iter()
-                        .chain(&self.movies)
-                        .chain(&self.shows)
-                        .chain(&self.media)
-                        .any(|media| media.id == *id)
-            }
+            UiEvent::OpenMedia(id) => self.can_open_media(id, || false),
             UiEvent::Browse => !matches!(self.browse_state, SectionState::Loading(_)),
             UiEvent::OpenLibrary(id) => {
                 !self.playback_active && self.library.iter().any(|row| row.id == *id)
@@ -672,36 +702,47 @@ mod tests {
             poster_url: None,
             backdrop_url: None,
             rating_tenths: None,
+            external_ratings: vec![],
+            runtime_minutes: None,
+            genres: vec![],
+            certification: None,
             kind,
             episodes: vec![EpisodeRow {
                 season: 1,
                 number: 2,
                 title: "Episode".into(),
+                runtime_minutes: None,
+                screenshot_url: None,
             }],
             attribution: String::new(),
         }
     }
 
     #[test]
-    fn movie_watch_intent_preserves_controller_choice_of_play_or_resolution() {
+    fn detail_watch_intent_allows_resolution_but_rejects_duplicate_playback() {
         let mut model = ShellModel::default();
+        let watch = UiEvent::WatchDetail {
+            resume: true,
+            preferences: PlaybackOptions::default(),
+        };
         assert!(!model.accepts(&UiEvent::WatchMovie));
+        assert!(!model.accepts(&watch));
         model.media = Some(media(MediaKind::Movie));
-        assert_eq!(model.card_watch_event(), UiEvent::WatchMovie);
+        assert!(model.accepts(&watch));
         assert!(model.accepts(&UiEvent::WatchMovie));
         model.source = Some(SourcePreview {
             kind: SourceKind::Http,
             title: "Manual HTTP source".into(),
         });
-        assert_eq!(model.card_watch_event(), UiEvent::WatchMovie);
+        assert!(model.accepts(&watch));
         model.playback_available = true;
-        assert_eq!(model.card_watch_event(), UiEvent::WatchMovie);
+        assert!(model.accepts(&watch));
         assert!(model.accepts(&UiEvent::Play));
         assert!(model.accepts(&UiEvent::WatchMovie));
         for (active, preparing) in [(true, false), (false, true)] {
             model.playback_active = active;
             model.preparing = preparing;
-            assert_eq!(model.card_watch_event(), UiEvent::WatchMovie);
+            assert!(!model.accepts(&watch));
             assert!(!model.accepts(&UiEvent::Play));
             assert!(!model.accepts(&UiEvent::WatchMovie));
             assert!(!model.accepts(&UiEvent::FindSources));
@@ -709,14 +750,18 @@ mod tests {
     }
 
     #[test]
-    fn series_keeps_episode_selection_and_explicit_source_flow() {
+    fn series_watch_requires_an_episode_even_with_a_prepared_source() {
         let mut model = ShellModel {
             media: Some(media(MediaKind::Series)),
             ..ShellModel::default()
         };
-        assert_eq!(model.card_watch_event(), UiEvent::FindSources);
+        let watch = UiEvent::WatchDetail {
+            resume: false,
+            preferences: PlaybackOptions::default(),
+        };
+        assert!(!model.accepts(&watch));
         assert!(!model.accepts(&UiEvent::WatchMovie));
-        assert!(model.accepts(&UiEvent::FindSources));
+        assert!(!model.accepts(&UiEvent::FindSources));
         assert!(model.accepts(&UiEvent::SelectEpisode {
             season: 1,
             number: 2
@@ -726,7 +771,10 @@ mod tests {
             title: "Episode".into(),
         });
         model.playback_available = true;
-        assert_eq!(model.card_watch_event(), UiEvent::Play);
+        assert!(!model.accepts(&watch));
+        model.selected_episode = Some((1, 2));
+        assert!(model.accepts(&watch));
+        assert!(model.accepts(&UiEvent::FindSources));
         assert!(model.can_play());
     }
 
@@ -759,10 +807,6 @@ mod tests {
                 season: 1,
                 number: 2,
             },
-            UiEvent::SelectEpisode {
-                season: 1,
-                number: 2,
-            },
             UiEvent::UnlinkMedia,
             UiEvent::SetDefaultPlayer(PlayerChoice::Vlc),
         ] {
@@ -770,6 +814,10 @@ mod tests {
         }
         assert!(model.accepts(&UiEvent::Cancel(Section::Sources)));
         assert!(model.accepts(&UiEvent::OpenMedia("media".into())));
+        assert!(model.accepts(&UiEvent::SelectEpisode {
+            season: 1,
+            number: 2,
+        }));
         assert!(model.accepts(&UiEvent::ToggleFavorite));
         model.movie_watch_pending = false; // Fallback hands control to Sources.
         assert!(model.accepts(&UiEvent::FindSources));
@@ -792,6 +840,8 @@ mod tests {
     fn browser_history_does_not_require_or_invent_resume_position() {
         let mut row = LibraryRow {
             id: "local:item".into(),
+            media_id: "local:item".into(),
+            episode: None,
             title: "Own video".into(),
             poster_url: None,
             details: String::new(),
@@ -902,6 +952,8 @@ mod tests {
                 kind: SourceKind::Magnet,
                 quality: None,
                 language: None,
+                resolution: None,
+                languages: vec![],
                 origin: "Indexer".into(),
                 video_codec: None,
                 audio_codec: None,
@@ -1120,6 +1172,8 @@ mod tests {
             kind: SourceKind::Http,
             quality: None,
             language: None,
+            resolution: None,
+            languages: vec![],
             origin: "Provider".into(),
             video_codec: None,
             audio_codec: None,

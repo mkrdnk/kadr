@@ -227,6 +227,14 @@ fn assert_public_feedback_is_private(event: &Event) {
         Event::SearchState(AsyncState::Error(message))
         | Event::BrowseState(AsyncState::Error(message))
         | Event::SourcesState(AsyncState::Error(message)) => check(message),
+        Event::CatalogPage {
+            result: Err(message),
+            ..
+        }
+        | Event::CatalogGenres {
+            result: Err(message),
+            ..
+        } => check(message),
         // Library snapshots contain no source descriptors and redact private titles.
         Event::Library(items) => check(&format!("{items:?}")),
         _ => {}
@@ -242,6 +250,8 @@ fn browse_cancellation_is_independent_from_search_and_source_discovery() {
     let mut engine = Engine {
         commands,
         browse_stop: shutdown.child_token(),
+        catalog_pages: [shutdown.child_token(), shutdown.child_token()],
+        genre_stop: shutdown.child_token(),
         movie_prefetch_stop: catalog_stop.child_token(),
         catalog_stop,
         source_stop: shutdown.child_token(),

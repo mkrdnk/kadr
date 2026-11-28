@@ -3,9 +3,17 @@
 //! or at compile time for standalone distributions. No OAuth or secret is used.
 //! Construction is offline; missing/invalid configuration is reported only after
 //! the caller's consent and cancellation gates, on an explicit request.
+//!
+//! `Client::catalog` requests bounded server-ranked popular/trending pages with
+//! genre/year filters; `Client::genres` loads official labels and slugs. Home
+//! `browse` and `search` retain their original first-page behavior. Details use
+//! optional `ratings?extended=all` enrichment, preserving the card on failure.
+//! Episode screenshots remain absent unless the returned URL passes the existing
+//! public image allowlist: official docs currently give no episode path example.
 #![forbid(unsafe_code)]
 
 mod browse;
+mod catalog;
 pub mod commons;
 pub mod popcorn;
 pub mod rutracker;
@@ -13,6 +21,7 @@ pub mod torznab;
 mod trakt;
 
 pub use browse::BrowseCatalog;
+pub use catalog::{CatalogPage, CatalogQuery, CatalogSort, Genre, YearRange};
 pub use trakt::is_public_catalog_image;
 
 use kadr_core::catalog::{Episode, Media, MediaKind};
@@ -46,6 +55,7 @@ pub enum Error {
     Cancelled,
     MissingClientId,
     InvalidQuery,
+    InvalidCatalogQuery,
     InvalidId,
     NotFound,
     Network,
@@ -65,6 +75,7 @@ impl fmt::Display for Error {
                 "[TRAKT_MISSING_CLIENT_ID] Set KADR_TRAKT_CLIENT_ID to your public Trakt app Client ID, then restart Kadr. Standalone builds can configure this variable at compile time. No OAuth login or Client Secret is needed.",
             ),
             Self::InvalidQuery => f.write_str("Enter a search of 1–200 characters."),
+            Self::InvalidCatalogQuery => f.write_str("Unsupported catalog filters or page bounds."),
             Self::InvalidId => f.write_str("Unsupported catalog identifier."),
             Self::NotFound => f.write_str("The catalog item is unavailable."),
             Self::Network => {
@@ -198,11 +209,27 @@ impl Client {
             url.set_query(Some("extended=episodes,full"));
             media.episodes = trakt::episodes(&self.json(url, cancel).await?)?;
         }
+        // Ratings are optional enrichment, not a prerequisite for keeping the
+        // successfully loaded card. Cancellation still terminates the request.
+        let mut ratings_url =
+            trakt::endpoint(&[trakt::kind_path(kind), &number.to_string(), "ratings"])?;
+        ratings_url.set_query(Some("extended=all"));
+        if let Ok(ratings) = self.json(ratings_url, cancel).await {
+            media.external_ratings = trakt::external_ratings(&ratings, kind);
+        }
         self.ready(cancel)?;
         Ok(media)
     }
 
     async fn json(&self, url: Url, cancel: &CancellationToken) -> Result<Value, Error> {
+        Ok(self.json_response(url, cancel).await?.data)
+    }
+
+    async fn json_response(
+        &self,
+        url: Url,
+        cancel: &CancellationToken,
+    ) -> Result<JsonResponse, Error> {
         self.ready(cancel)?;
         if !trakt::api_url(&url) {
             return Err(Error::InvalidResponse);
@@ -226,14 +253,23 @@ impl Client {
                 "trakt-api-key",
                 self.client_id.clone().ok_or(Error::MissingClientId)?,
             );
-        self.transport(request, cancel).await
+        self.transport_response(request, cancel).await
     }
 
+    #[cfg(test)]
     async fn transport(
         &self,
         request: reqwest::RequestBuilder,
         cancel: &CancellationToken,
     ) -> Result<Value, Error> {
+        Ok(self.transport_response(request, cancel).await?.data)
+    }
+
+    async fn transport_response(
+        &self,
+        request: reqwest::RequestBuilder,
+        cancel: &CancellationToken,
+    ) -> Result<JsonResponse, Error> {
         self.ready(cancel)?;
         tokio::select! {
             biased;
@@ -271,7 +307,12 @@ fn client_id(raw: &str) -> Option<HeaderValue> {
     Some(header)
 }
 
-async fn read_json(request: reqwest::RequestBuilder) -> Result<Value, Error> {
+struct JsonResponse {
+    data: Value,
+    headers: reqwest::header::HeaderMap,
+}
+
+async fn read_json(request: reqwest::RequestBuilder) -> Result<JsonResponse, Error> {
     let mut response = request.send().await.map_err(network_error)?;
     match response.status().as_u16() {
         200 => {}
@@ -285,6 +326,7 @@ async fn read_json(request: reqwest::RequestBuilder) -> Result<Value, Error> {
     {
         return Err(Error::TooLarge);
     }
+    let headers = response.headers().clone();
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(network_error)? {
         if chunk.len() > BODY_LIMIT - body.len() {
@@ -292,7 +334,10 @@ async fn read_json(request: reqwest::RequestBuilder) -> Result<Value, Error> {
         }
         body.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&body).map_err(|_| Error::InvalidResponse)
+    Ok(JsonResponse {
+        data: serde_json::from_slice(&body).map_err(|_| Error::InvalidResponse)?,
+        headers,
+    })
 }
 
 fn network_error(error: reqwest::Error) -> Error {

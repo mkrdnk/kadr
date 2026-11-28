@@ -61,6 +61,7 @@ fn downgrade_to_v2(connection: &Connection) {
          ALTER TABLE settings DROP COLUMN catalog_enabled;
          ALTER TABLE settings DROP COLUMN cache_directory;
          ALTER TABLE settings DROP COLUMN catalog_proxy;
+         ALTER TABLE settings DROP COLUMN sidebar_collapsed;
          ALTER TABLE playback_progress DROP COLUMN file_id;
          PRAGMA user_version = 2;",
         )
@@ -103,6 +104,7 @@ fn defaults_and_settings_persist_across_reopen() {
 fn defaults_are_explicit_private_and_bounded() {
     let settings = Settings::default();
     assert_eq!(settings.default_player, PlayerPreference::Mpv);
+    assert!(!settings.sidebar_collapsed);
     assert!(!settings.network.torrents_enabled);
     assert!(matches!(
         settings.network.download,

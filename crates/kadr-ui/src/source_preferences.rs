@@ -19,6 +19,7 @@ pub(super) struct SourcePreferencesEditor {
     commons_enabled: bool,
     rutracker_enabled: bool,
     popcorn_enabled: bool,
+    auto_discover: bool,
     endpoints: Vec<Endpoint>,
     next_id: usize,
     resolution: String,
@@ -38,6 +39,7 @@ impl From<SourcePreferencesDraft> for SourcePreferencesEditor {
             commons_enabled: draft.commons_enabled,
             rutracker_enabled: draft.rutracker_enabled,
             popcorn_enabled: draft.popcorn_enabled,
+            auto_discover: draft.auto_discover,
             next_id: draft.torznab.len(),
             endpoints: draft
                 .torznab
@@ -168,6 +170,10 @@ impl SourcePreferencesEditor {
         self.commons_enabled = !self.commons_enabled;
     }
 
+    pub(super) fn toggle_auto_discover(&mut self) {
+        self.auto_discover = !self.auto_discover;
+    }
+
     pub(super) fn toggle_rutracker(&mut self) {
         self.rutracker_enabled = !self.rutracker_enabled;
     }
@@ -212,6 +218,7 @@ impl SourcePreferencesEditor {
             commons_enabled: self.commons_enabled,
             rutracker_enabled: self.rutracker_enabled,
             popcorn_enabled: self.popcorn_enabled,
+            auto_discover: self.auto_discover,
             torznab,
             preferred_resolution: resolution,
             preferred_language: language,
@@ -226,6 +233,12 @@ impl KadrView {
         panel()
             .gap_4()
             .child(eyebrow("ПОИСК ИСТОЧНИКОВ"))
+            .child(self.button(
+                "auto-discover",
+                if editor.auto_discover { "Поиск при открытии: включён" } else { "Поиск при открытии: выключен" },
+                Command::ToggleAutoDiscover, editor.auto_discover, true, cx,
+            ))
+            .child(body("При открытии фильма или выборе эпизода kadr может отправить его название или IMDb ID включённым поставщикам. Поиск не скачивает видео и не запускает плеер."))
             .child(body(COMMONS_DISCLOSURE))
             .child(body(MOVIE_PREFETCH_DISCLOSURE))
             .child(self.button(
@@ -350,6 +363,7 @@ mod tests {
                 commons_enabled,
                 rutracker_enabled: !commons_enabled,
                 popcorn_enabled: false,
+                auto_discover: commons_enabled,
                 torznab: vec![TorznabDraft {
                     name: "One".into(),
                     base_url: "https://one.example/api".into(),
@@ -423,6 +437,7 @@ mod tests {
             commons_enabled: true,
             rutracker_enabled: false,
             popcorn_enabled: true,
+            auto_discover: true,
             torznab: vec![
                 TorznabDraft {
                     name: "One".into(),

@@ -26,6 +26,10 @@ fn movie() -> Media {
             ..Default::default()
         },
         rating_tenths: None,
+        runtime_minutes: None,
+        genres: Vec::new(),
+        certification: None,
+        external_ratings: Vec::new(),
         description: String::new(),
         poster_url: None,
         backdrop_url: None,
@@ -76,7 +80,7 @@ fn start(
     app.command(Command::OpenFixtureMovie(Box::new(media.clone())));
     app.wait("fixture movie with external metadata", |event| {
         metadata_only(event);
-        matches!(event, Event::MediaSelected { media: Some(opened), .. } if opened == &media)
+        matches!(event, Event::MediaSelected { media: Some(opened), .. } if opened.as_ref() == &media)
     });
     app
 }

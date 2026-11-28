@@ -12,6 +12,72 @@ use kadr_ui::{
     TransferView,
 };
 
+pub(super) fn catalog_kind(kind: kadr_ui::MediaKind) -> MediaKind {
+    match kind {
+        kadr_ui::MediaKind::Movie => MediaKind::Movie,
+        kadr_ui::MediaKind::Series => MediaKind::Series,
+    }
+}
+
+pub(super) fn ui_kind(kind: MediaKind) -> kadr_ui::MediaKind {
+    match kind {
+        MediaKind::Movie => kadr_ui::MediaKind::Movie,
+        MediaKind::Series => kadr_ui::MediaKind::Series,
+    }
+}
+
+pub(super) fn catalog_request(request: &kadr_ui::CatalogRequest) -> kadr_engine::Command {
+    use kadr_engine::catalog::{CatalogQuery, CatalogSort, YearRange};
+    kadr_engine::Command::CatalogPage {
+        request: request.id,
+        query: CatalogQuery {
+            kind: catalog_kind(request.query.kind),
+            sort: match request.query.sort {
+                kadr_ui::CatalogSort::Popular => CatalogSort::Popular,
+                kadr_ui::CatalogSort::Trending => CatalogSort::Trending,
+            },
+            genres: request.query.genre.iter().cloned().collect(),
+            years: request.query.year.map(|year| YearRange {
+                start: year,
+                end: year,
+            }),
+            page: request.page,
+            limit: 24,
+        },
+    }
+}
+
+pub(super) fn current_year() -> u16 {
+    let mut days = std::time::UNIX_EPOCH
+        .elapsed()
+        .unwrap_or_default()
+        .as_secs()
+        / 86_400;
+    (1970_u16..=2199)
+        .find(|year| {
+            let leap =
+                year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+            let year_days = 365 + u64::from(leap);
+            if days < year_days {
+                true
+            } else {
+                days -= year_days;
+                false
+            }
+        })
+        .unwrap_or(2199)
+}
+
+pub(super) fn playback_preferences(
+    options: kadr_ui::PlaybackOptions,
+) -> kadr_engine::PlaybackPreferences {
+    kadr_engine::PlaybackPreferences {
+        preferred_resolution: options.preferred_resolution,
+        preferred_language: options.preferred_language,
+        subtitles_off: options.subtitles_off,
+    }
+}
+
 pub(super) fn preference(player: PlayerChoice) -> PlayerPreference {
     match player {
         PlayerChoice::Mpv => PlayerPreference::Mpv,
@@ -107,12 +173,16 @@ pub(super) fn source_kind(kind: Option<SourceKind>) -> UiSourceKind {
 }
 
 pub(super) fn media_card(media: Media) -> MediaCard {
-    let mut attribution = media.attribution;
+    let mut attribution = if media.id.starts_with("trakt:") {
+        "Метаданные: Trakt".to_owned()
+    } else {
+        media.attribution
+    };
     if let Some(license) = media.license {
         attribution.push_str(" · ");
         attribution.push_str(&license);
     }
-    if !media.source_page.is_empty() {
+    if !media.id.starts_with("trakt:") && !media.source_page.is_empty() {
         attribution.push_str(" · ");
         attribution.push_str(&media.source_page);
     }
@@ -125,10 +195,29 @@ pub(super) fn media_card(media: Media) -> MediaCard {
         poster_url: media.poster_url,
         backdrop_url: media.backdrop_url,
         rating_tenths: media.rating_tenths,
-        kind: match media.kind {
-            MediaKind::Movie => kadr_ui::MediaKind::Movie,
-            MediaKind::Series => kadr_ui::MediaKind::Series,
-        },
+        external_ratings: media
+            .external_ratings
+            .into_iter()
+            .map(|rating| {
+                let value = if rating.max_tenths == 1000 {
+                    format!("{}%", rating.rating_tenths / 10)
+                } else {
+                    format!(
+                        "{:.1}/{}",
+                        f32::from(rating.rating_tenths) / 10.,
+                        rating.max_tenths / 10
+                    )
+                };
+                kadr_ui::DetailRating {
+                    provider: rating.source.label().into(),
+                    value,
+                }
+            })
+            .collect(),
+        runtime_minutes: media.runtime_minutes.map(u32::from),
+        genres: media.genres,
+        certification: media.certification,
+        kind: ui_kind(media.kind),
         episodes: media
             .episodes
             .into_iter()
@@ -136,6 +225,8 @@ pub(super) fn media_card(media: Media) -> MediaCard {
                 season: episode.season,
                 number: episode.number,
                 title: episode.title,
+                runtime_minutes: episode.runtime_minutes.map(u32::from),
+                screenshot_url: episode.screenshot_url,
             })
             .collect(),
         attribution,
@@ -147,6 +238,7 @@ pub(super) fn source_preferences_draft(settings: &SourcePreferences) -> SourcePr
         rutracker_enabled: settings.rutracker_enabled,
         commons_enabled: settings.commons_enabled,
         popcorn_enabled: settings.popcorn_enabled,
+        auto_discover: settings.auto_discover,
         torznab: settings
             .torznab
             .iter()
@@ -186,6 +278,7 @@ pub(super) fn source_preferences(
         rutracker_enabled: draft.rutracker_enabled,
         commons_enabled: draft.commons_enabled,
         popcorn_enabled: draft.popcorn_enabled,
+        auto_discover: draft.auto_discover,
         torznab,
         preferred_resolution: optional(&draft.preferred_resolution),
         preferred_language: optional(&draft.preferred_language),
@@ -208,6 +301,8 @@ pub(super) fn source_row(source: SourceCandidate) -> SourceRow {
         audio_codec: source.audio_codec,
         peers: source.peers,
         language: source.language,
+        resolution: source.resolution,
+        languages: source.languages,
         origin: source.origin,
         license: (!source.license.is_empty()).then_some(source.license),
         size: source.size,
@@ -259,6 +354,8 @@ pub(super) fn library_row(item: LibraryItem) -> LibraryRow {
     };
     LibraryRow {
         id: item.id,
+        media_id: item.media_id,
+        episode: item.episode.map(|episode| (episode.season, episode.number)),
         title: item.title,
         poster_url: item.poster_url,
         details,
@@ -305,6 +402,7 @@ mod tests {
                     commons_enabled,
                     rutracker_enabled,
                     popcorn_enabled: false,
+                    auto_discover: !commons_enabled,
                     torznab: vec![TorznabConfig {
                         name: "Local".into(),
                         base_url: "http://localhost:9696/api".into(),
@@ -331,6 +429,7 @@ mod tests {
                     popcorn_enabled,
                     commons_enabled: other_providers_enabled,
                     rutracker_enabled: other_providers_enabled,
+                    auto_discover: false,
                     torznab: vec![TorznabConfig {
                         name: "Local".into(),
                         base_url: "http://localhost:9696/api".into(),
@@ -361,6 +460,7 @@ mod tests {
             rutracker_enabled: false,
             commons_enabled: true,
             popcorn_enabled: true,
+            auto_discover: true,
             torznab: vec![
                 TorznabDraft {
                     name: " Public ".into(),
@@ -382,6 +482,7 @@ mod tests {
         assert!(!preferences.rutracker_enabled);
         assert!(preferences.commons_enabled);
         assert!(preferences.popcorn_enabled);
+        assert!(preferences.auto_discover);
         assert_eq!(preferences.torznab.len(), 2);
         assert!(preferences.torznab[0].enabled);
         assert_eq!(preferences.torznab[0].name, "Public");
@@ -407,6 +508,7 @@ mod tests {
             rutracker_enabled: true,
             commons_enabled: false,
             popcorn_enabled: false,
+            auto_discover: false,
             torznab: vec![TorznabDraft {
                 name: "Endpoint".into(),
                 base_url: "http://localhost:9696".into(),
@@ -528,6 +630,8 @@ mod tests {
             audio_codec: Some("Opus".into()),
             peers: Some(4),
             language: None,
+            resolution: Some(720),
+            languages: vec![],
             license: "CC0".into(),
             origin: "Публичный каталог".into(),
             size: None,
@@ -566,6 +670,8 @@ mod tests {
                 video_codec: None,
                 audio_codec: None,
                 language: None,
+                resolution: Some(1080),
+                languages: vec![],
                 license: String::new(),
                 origin: origin.into(),
                 size: Some(1_024),
@@ -596,6 +702,8 @@ mod tests {
                 audio_codec: None,
                 peers: None,
                 language: None,
+                resolution: None,
+                languages: vec![],
                 license: String::new(),
                 origin: "RuTracker".into(),
                 size: Some(1_024),
@@ -619,6 +727,10 @@ mod tests {
             year: None,
             description: "Описание".into(),
             rating_tenths: None,
+            runtime_minutes: None,
+            genres: vec![],
+            certification: None,
+            external_ratings: vec![],
             backdrop_url: None,
             poster_url: None,
             kind: MediaKind::Series,
@@ -627,6 +739,8 @@ mod tests {
                 number: 3,
                 title: "Эпизод".into(),
                 description: String::new(),
+                runtime_minutes: Some(42),
+                screenshot_url: None,
             }],
             attribution: "Автор".into(),
             license: Some("CC BY".into()),
@@ -667,6 +781,7 @@ mod tests {
     fn library_rows_keep_opaque_ids_and_do_not_invent_progress() {
         let row = library_row(LibraryItem {
             id: "test:series@2:3".into(),
+            media_id: "test:series".into(),
             title: "Series".into(),
             poster_url: None,
             favorite: true,
@@ -690,6 +805,7 @@ mod tests {
     fn library_rows_display_only_measured_progress() {
         let row = library_row(LibraryItem {
             id: "opaque-item".into(),
+            media_id: "opaque-item".into(),
             title: "Movie".into(),
             poster_url: None,
             favorite: false,

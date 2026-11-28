@@ -95,6 +95,7 @@ pub struct Settings {
     pub catalog_proxy: Option<String>,
     /// Persisting this does not move files. None uses the default cache directory.
     pub cache_directory: Option<PathBuf>,
+    pub sidebar_collapsed: bool,
 }
 
 impl fmt::Debug for Settings {
@@ -118,6 +119,7 @@ impl Settings {
             catalog_enabled: value.catalog_enabled,
             catalog_proxy: value.catalog_proxy,
             cache_directory: value.cache_directory,
+            sidebar_collapsed: value.sidebar_collapsed,
         }
     }
 
@@ -129,8 +131,17 @@ impl Settings {
             catalog_enabled: self.catalog_enabled,
             catalog_proxy: self.catalog_proxy,
             cache_directory: self.cache_directory,
+            sidebar_collapsed: self.sidebar_collapsed,
         }
     }
+}
+
+/// Per-watch preferences; selecting them does not change the user's settings.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlaybackPreferences {
+    pub preferred_resolution: Option<String>,
+    pub preferred_language: Option<String>,
+    pub subtitles_off: bool,
 }
 
 /// Logical bytes, not filesystem allocation. Reservations include absent bytes.
@@ -166,6 +177,8 @@ pub struct SourceCandidate {
     pub video_codec: Option<String>,
     pub audio_codec: Option<String>,
     pub language: Option<String>,
+    pub resolution: Option<u16>,
+    pub languages: Vec<String>,
     pub license: String,
     pub origin: String,
     pub size: Option<u64>,
@@ -207,6 +220,13 @@ impl SourceCandidate {
                 .clone()
                 .or_else(|| value.resolution.map(|h| format!("{h}p"))),
             language: (!value.languages.is_empty()).then(|| value.languages.join(", ")),
+            resolution: value.resolution,
+            languages: value
+                .languages
+                .iter()
+                .filter(|tag| crate::playback::preferred_audio_language(tag).is_some())
+                .cloned()
+                .collect(),
             video_codec: value.video_codec.clone(),
             audio_codec: value.audio_codec.clone(),
             license: value.license.clone().unwrap_or_default(),
@@ -224,6 +244,7 @@ impl SourceCandidate {
 #[derive(Clone, PartialEq)]
 pub struct LibraryItem {
     pub id: String,
+    pub media_id: String,
     pub title: String,
     pub poster_url: Option<String>,
     pub favorite: bool,
@@ -268,6 +289,7 @@ impl LibraryItem {
         );
         Self {
             id,
+            media_id: value.target.media_id.as_str().to_owned(),
             title,
             poster_url,
             favorite: value.entry.favorite,
@@ -358,6 +380,7 @@ mod tests {
                                 catalog_enabled: !enabled,
                                 catalog_proxy: enabled.then(|| "socks5h://127.0.0.1:1080".into()),
                                 cache_directory: directory,
+                                sidebar_collapsed: enabled,
                             };
                             let stored = settings.clone().into_storage();
                             assert_eq!(
@@ -443,6 +466,8 @@ mod tests {
         )
         .unwrap();
         source.quality = Some("1080p".into());
+        source.resolution = Some(1080);
+        source.languages = vec!["en".into()];
         source.size = Some(1024);
         source.seeds = Some(20);
         let candidate = SourceCandidate::from_source(9, &source, "RuTracker".into());
@@ -456,6 +481,8 @@ mod tests {
             video_codec,
             audio_codec,
             language,
+            resolution,
+            languages,
             license,
             origin,
             size,
@@ -470,7 +497,9 @@ mod tests {
         assert_eq!(title, "Source title");
         assert_eq!(quality.as_deref(), Some("1080p"));
         assert_eq!((video_codec, audio_codec, peers), (None, None, None));
-        assert_eq!(language, None);
+        assert_eq!(language.as_deref(), Some("en"));
+        assert_eq!(resolution, Some(1080));
+        assert_eq!(languages, ["en"]);
         assert!(license.is_empty());
         assert_eq!(origin, "RuTracker");
         assert_eq!((size, seeds, rutracker), (Some(1024), Some(20), true));
@@ -530,6 +559,7 @@ mod tests {
         // Exhaustive destructuring ensures no source descriptor is retained.
         let LibraryItem {
             id,
+            media_id,
             title,
             poster_url,
             favorite,
@@ -538,6 +568,7 @@ mod tests {
             progress,
         } = item;
         assert_eq!(id, "catalog:series@0:7");
+        assert_eq!(media_id, "catalog:series");
         assert_eq!(title, "/private/title.mkv");
         assert!(poster_url.is_none());
         assert!(favorite);

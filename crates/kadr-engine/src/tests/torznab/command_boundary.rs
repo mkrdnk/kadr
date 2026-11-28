@@ -302,6 +302,86 @@ fn discovery(app: &mut App, target: &PlaybackTarget) -> (DiscoveryStamp, SourceC
 }
 
 #[test]
+fn discover_on_open_needs_opt_in_but_not_hover_or_prefetch() {
+    if isolated(
+        "tests::torznab::command_boundary::discover_on_open_needs_opt_in_but_not_hover_or_prefetch",
+    ) {
+        return;
+    }
+    for automatic in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let paths = paths(root.path());
+        let origin = Origin::new();
+        let mut db = Storage::open_default(&paths).unwrap();
+        let target = catalog_fixture(&mut db);
+        let mut app = App::start(&paths);
+        configure(&mut app, &origin);
+        let preferences = SourcePreferences {
+            auto_discover: automatic,
+            ..origin.preferences()
+        };
+        app.command(Command::SetSourcePreferences(preferences.clone()));
+        app.wait(
+            "automatic discovery opt-in acknowledged",
+            |event| matches!(event, Event::SourcePreferences(saved) if saved == &preferences),
+        );
+        open_card(&mut app, &target);
+        // Keyboard/no-motion opening uses this command directly: no hover,
+        // PrefetchMovieSources, or explicit FindSources is sent when opted in.
+        app.command(Command::DiscoverOnOpen);
+        if !automatic {
+            // This acknowledged command is ordered after DiscoverOnOpen on the
+            // worker queue, so a fixed sleep is not needed for the no-op case.
+            app.command(Command::SetSidebarCollapsed(true));
+            app.wait("automatic discovery remains disabled", |event| {
+                assert!(!matches!(
+                    event,
+                    Event::SourceDiscovery { .. }
+                        | Event::SourcesState(AsyncState::Loading)
+                        | Event::PlaybackActive(true)
+                        | Event::Transfer(Some(_))
+                ));
+                matches!(event, Event::SidebarCollapsed(true))
+            });
+            assert!(origin.requests().is_empty());
+            // Opting out must not remove the explicit source-search action.
+            app.command(Command::FindSources);
+        }
+        let Event::SourceDiscovery {
+            stamp,
+            rows,
+            succeeded,
+            failures,
+            ..
+        } = app.wait("source rows without motion or payload activity", |event| {
+            assert!(!matches!(
+                event,
+                Event::PlaybackActive(true) | Event::Transfer(Some(_))
+            ));
+            matches!(event, Event::SourceDiscovery { media_id, pending: 0, .. }
+                if media_id == target.media_id.as_str())
+        })
+        else {
+            unreachable!()
+        };
+        assert!(stamp.is_current());
+        assert_eq!(succeeded, 1);
+        assert!(failures.is_empty());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "Fixture 2020 1080p");
+        assert_eq!(rows[0].resolution, Some(1080));
+        assert!(rows[0].languages.is_empty());
+        app.finish();
+        let requests = origin.requests();
+        assert_eq!(requests.len(), 2, "one caps and one search, no metainfo");
+        assert!(requests.iter().any(|request| request.contains("t=caps")));
+        assert!(requests.iter().any(|request| request.contains("q=Fixture")));
+        assert!(db.history(10).unwrap().is_empty());
+        assert!(db.saved_files().unwrap().is_empty());
+    }
+}
+
+#[test]
 fn e2e_04_restart_reads_sqlite_cache_and_respects_privacy_gates() {
     if isolated(
         "tests::torznab::command_boundary::e2e_04_restart_reads_sqlite_cache_and_respects_privacy_gates",

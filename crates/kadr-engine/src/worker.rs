@@ -34,7 +34,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::playback::{Stream, engine_options};
 use super::{
-    AsyncState, BrowseCatalog, Command, Event, FileChoice, Level, Request, TransferStatus,
+    AsyncState, BrowseCatalog, Command, Event, FileChoice, Level, PlaybackPreferences, Request,
+    TransferStatus, catalog,
 };
 
 mod discovery;
@@ -165,8 +166,11 @@ struct Active {
 
 enum CatalogAnswer {
     Browse(Result<BrowseCatalog, String>),
+    Page(u64, Result<catalog::CatalogPage, String>),
+    Genres(MediaKind, Result<Vec<catalog::Genre>, String>),
     Search(Result<Vec<Media>, String>),
     Details(Result<Box<Media>, String>),
+    LibraryDetails(Box<Media>),
     Sources(crate::resolver::ProviderResult),
 }
 
@@ -423,6 +427,34 @@ impl Worker {
                     });
                 });
             }
+            Command::CatalogPage { request, query } => {
+                let client = self.catalog.clone();
+                let output = self.catalog_results.clone();
+                self.catalog_jobs.spawn(async move {
+                    let result = client
+                        .catalog(&query, &cancel)
+                        .await
+                        .map_err(|e| e.to_string());
+                    let _ = output.send(CatalogResult {
+                        cancel,
+                        answer: CatalogAnswer::Page(request, result),
+                    });
+                });
+            }
+            Command::CatalogGenres(kind) => {
+                let client = self.catalog.clone();
+                let output = self.catalog_results.clone();
+                self.catalog_jobs.spawn(async move {
+                    let result = client
+                        .genres(kind, &cancel)
+                        .await
+                        .map_err(|e| e.to_string());
+                    let _ = output.send(CatalogResult {
+                        cancel,
+                        answer: CatalogAnswer::Genres(kind, result),
+                    });
+                });
+            }
             Command::Search(query) => {
                 self.send(Event::SearchState(AsyncState::Loading));
                 let client = self.catalog.clone();
@@ -475,6 +507,14 @@ impl Worker {
             Command::FindSources => {
                 if self.idle() {
                     self.reset_tracker_prompt();
+                    self.find_sources(cancel);
+                }
+            }
+            Command::DiscoverOnOpen => {
+                if self.settings.catalog_enabled
+                    && self.source_preferences.auto_discover
+                    && self.active.is_none()
+                {
                     self.find_sources(cancel);
                 }
             }
@@ -533,6 +573,23 @@ impl Worker {
                 });
                 self.publish_source_offers();
             }
+            Command::ImportSource { source, attach } => {
+                if self.idle() {
+                    self.reset_tracker_prompt();
+                    self.discovery.clear();
+                    if !attach {
+                        self.media = None;
+                        self.episode = None;
+                        self.episode_explicit = false;
+                        self.send(Event::MediaSelected {
+                            media: None,
+                            favorite: false,
+                            episode: None,
+                        });
+                    }
+                    self.select_source(source, None, None, cancel).await;
+                }
+            }
             Command::SelectSource(source) => {
                 if self.idle() {
                     self.reset_tracker_prompt();
@@ -544,7 +601,37 @@ impl Worker {
                     self.choose_offer(index, cancel).await;
                 }
             }
-            Command::WatchRelease(index) => self.watch_release(index, cancel).await,
+            Command::WatchRelease(index) => {
+                let valid = self.validate_legacy_watch_recommendation(index);
+                self.watch_offer(
+                    index,
+                    valid,
+                    true,
+                    true,
+                    PlaybackPreferences::default(),
+                    cancel,
+                )
+                .await;
+            }
+            Command::RecommendPlayback(preferences) => self.recommend_playback(preferences),
+            Command::WatchRecommended {
+                index,
+                preferences,
+                resume,
+            } => {
+                let valid = self.validate_watch_recommendation(index, &preferences);
+                self.watch_offer(index, valid, true, resume, preferences, cancel)
+                    .await;
+            }
+            Command::WatchSource {
+                index,
+                preferences,
+                resume,
+            } => {
+                let valid = self.can_choose_offer(index);
+                self.watch_offer(index, valid, false, resume, preferences, cancel)
+                    .await;
+            }
             Command::SignInRuTracker { username, password } => {
                 if self.idle() {
                     self.sign_in_tracker(username, password, cancel).await;
@@ -569,6 +656,8 @@ impl Worker {
                         number,
                         title: format!("S{season:02}E{number:02}"),
                         description: String::new(),
+                        runtime_minutes: None,
+                        screenshot_url: None,
                     });
                     self.episode_explicit = true;
                     if let Some(selection) = self.selection.as_mut() {
@@ -586,6 +675,18 @@ impl Worker {
             Command::Play { resume } => {
                 self.play(resume, self.settings.default_player, cancel)
                     .await
+            }
+            Command::PlayWithPreferences {
+                resume,
+                preferences,
+            } => {
+                self.play_with_preferences(
+                    resume,
+                    self.settings.default_player,
+                    preferences,
+                    cancel,
+                )
+                .await;
             }
             Command::OpenIn(player) => {
                 let player = player.into_storage();
@@ -605,7 +706,20 @@ impl Worker {
                     self.open_library(&id, cancel).await;
                 }
             }
-            Command::UpdateSettings(settings) => self.update_settings(settings.into_storage()),
+            Command::UpdateSettings(mut settings) => {
+                settings.sidebar_collapsed = self.settings.sidebar_collapsed;
+                self.update_settings(settings.into_storage());
+            }
+            Command::SetSidebarCollapsed(collapsed) => {
+                let mut settings = self.settings.clone();
+                settings.sidebar_collapsed = collapsed;
+                if self.storage.save_settings(&settings).is_ok() {
+                    self.settings.sidebar_collapsed = collapsed;
+                } else {
+                    self.status(Level::Error, "Не удалось сохранить состояние сайдбара.");
+                }
+                self.send(Event::SidebarCollapsed(self.settings.sidebar_collapsed));
+            }
             Command::SetSourcePreferences(preferences) => self.set_source_preferences(preferences),
             Command::ClearCache => {
                 match self.cache.clear_inactive() {
@@ -652,7 +766,7 @@ impl Worker {
                     );
                 }
             }
-            Command::Cancel => {
+            Command::CancelSources | Command::Cancel => {
                 self.reset_tracker_prompt();
                 self.discovery.clear();
                 if self.active.is_none() {
@@ -665,7 +779,9 @@ impl Worker {
                         suggested_filename: String::new(),
                     });
                 }
-                self.send(Event::SearchState(AsyncState::Ready(Vec::new())));
+                if matches!(request.command, Command::Cancel) {
+                    self.send(Event::SearchState(AsyncState::Ready(Vec::new())));
+                }
                 self.send(Event::SourcesState(AsyncState::Ready(Vec::new())));
                 self.status(Level::Info, "Операция отменена.");
             }
@@ -676,28 +792,42 @@ impl Worker {
         self.resolve_sources(cancel, false);
     }
 
-    async fn watch_release(&mut self, index: usize, cancel: CancellationToken) {
+    async fn watch_offer(
+        &mut self,
+        index: usize,
+        valid: bool,
+        automatic: bool,
+        resume: bool,
+        preferences: PlaybackPreferences,
+        cancel: CancellationToken,
+    ) {
         if !self.idle() {
             self.send(Event::PlaybackActive(true));
             return;
         }
-        if self.tracker_search.is_cancelled() || self.discovery.recommended_handle() != Some(index)
-        {
+        if !valid || super::playback::validate_preferences(&preferences).is_err() {
             self.source_error(
                 Level::Warning,
-                "Рекомендация больше не актуальна. Обновите источники.",
+                "Не удалось подтвердить источник для просмотра. Обновите список.",
             );
         } else {
             // Never play a previous selection if preparing this release fails.
             self.selection = None;
             self.choose_offer(index, cancel.clone()).await;
             if !cancel.is_cancelled()
+                && (!automatic || self.recommended_selection_is_unambiguous(index))
                 && self.selection.as_ref().is_some_and(|source| {
                     source.is_playable(self.settings.network.torrents_enabled)
                 })
             {
                 // Play owns process startup, progress reporting, and Stop from here.
-                self.play(true, self.settings.default_player, cancel).await;
+                self.play_with_preferences(
+                    resume,
+                    self.settings.default_player,
+                    preferences,
+                    cancel,
+                )
+                .await;
                 return;
             }
         }
@@ -716,6 +846,29 @@ impl Worker {
                 Ok(catalog) => AsyncState::Ready(catalog),
                 Err(message) => AsyncState::Error(message),
             })),
+            CatalogAnswer::Page(request, result) => {
+                self.send(Event::CatalogPage { request, result })
+            }
+            CatalogAnswer::Genres(kind, result) => self.send(Event::CatalogGenres { kind, result }),
+            CatalogAnswer::LibraryDetails(media) => {
+                if self.settings.catalog_enabled
+                    && self
+                        .media
+                        .as_ref()
+                        .is_some_and(|current| current.id == media.id)
+                {
+                    let favorite = MediaId::new(&media.id)
+                        .ok()
+                        .and_then(|id| self.storage.library_entry(&id).ok().flatten())
+                        .is_some_and(|entry| entry.favorite);
+                    self.media = Some(*media);
+                    self.send(Event::MediaSelected {
+                        media: self.media.clone().map(Box::new),
+                        favorite,
+                        episode: self.catalog_episode().map(|ep| (ep.season, ep.number)),
+                    });
+                }
+            }
             CatalogAnswer::Search(result) => self.send(Event::SearchState(match result {
                 Ok(media) => AsyncState::Ready(media),
                 Err(message) => AsyncState::Error(message),
@@ -758,7 +911,7 @@ impl Worker {
                     });
                     self.send(Event::SearchState(AsyncState::Ready(Vec::new())));
                     self.send(Event::MediaSelected {
-                        media: Some(media),
+                        media: Some(Box::new(media)),
                         favorite,
                         episode: None,
                     });
@@ -991,6 +1144,8 @@ impl Worker {
                     number,
                     title: format!("S{season:02}E{number:02}"),
                     description: String::new(),
+                    runtime_minutes: None,
+                    screenshot_url: None,
                 });
             }
         }
@@ -1074,6 +1229,22 @@ impl Worker {
     }
 
     async fn play(&mut self, resume: bool, player: PlayerPreference, cancel: CancellationToken) {
+        self.play_with_preferences(resume, player, PlaybackPreferences::default(), cancel)
+            .await;
+    }
+
+    async fn play_with_preferences(
+        &mut self,
+        resume: bool,
+        player: PlayerPreference,
+        preferences: PlaybackPreferences,
+        cancel: CancellationToken,
+    ) {
+        if let Err(error) = super::playback::validate_preferences(&preferences) {
+            self.send(Event::PlaybackActive(false));
+            self.status(Level::Error, &error.to_string());
+            return;
+        }
         if self.active.is_some() {
             self.status(
                 Level::Warning,
@@ -1098,7 +1269,7 @@ impl Worker {
                 return;
             }
         }
-        if let Err(error) = self.launch_player(player, resume).await {
+        if let Err(error) = self.launch_player(player, resume, &preferences).await {
             self.close_active("").await;
             self.status(Level::Error, &error.to_string());
         } else {
@@ -1215,6 +1386,7 @@ impl Worker {
         &mut self,
         preference: PlayerPreference,
         restore: bool,
+        preferences: &PlaybackPreferences,
     ) -> io::Result<()> {
         let active = self
             .active
@@ -1265,13 +1437,16 @@ impl Worker {
                     options.executable = (*path).into();
                 }
             }
-            let player = PlayerSession::launch(
+            let track_preferences =
+                super::playback::player_preferences(preferences, &self.source_preferences)?;
+            let player = PlayerSession::launch_with_preferences(
                 kind,
                 PlayRequest {
                     media: OsString::from(&active.stream.url),
                     resume,
                 },
                 options,
+                track_preferences,
                 &active.stop,
             )
             .await
@@ -1317,7 +1492,10 @@ impl Worker {
             }
             active.browser = false;
         }
-        if let Err(error) = self.launch_player(preference, true).await {
+        if let Err(error) = self
+            .launch_player(preference, true, &PlaybackPreferences::default())
+            .await
+        {
             self.status(Level::Error, &error.to_string());
             // Keep the source/cache available for another explicit player choice.
         }
@@ -1695,7 +1873,7 @@ impl Worker {
                 .is_some_and(|media| media.id == id.as_str())
             {
                 self.send(Event::MediaSelected {
-                    media: self.media.clone(),
+                    media: self.media.clone().map(Box::new),
                     favorite,
                     episode: self.catalog_episode().map(|ep| (ep.season, ep.number)),
                 });
@@ -1733,6 +1911,10 @@ impl Worker {
             original_title: record.original_title,
             year: record.year,
             rating_tenths: None,
+            runtime_minutes: None,
+            genres: Vec::new(),
+            certification: None,
+            external_ratings: Vec::new(),
             kind: if record.kind == kadr_storage::MediaKind::Series {
                 MediaKind::Series
             } else {
@@ -1751,13 +1933,34 @@ impl Worker {
             number: key.episode,
             title: format!("S{:02}E{:02}", key.season, key.episode),
             description: String::new(),
+            runtime_minutes: None,
+            screenshot_url: None,
         });
         self.episode_explicit = false;
         self.send(Event::MediaSelected {
-            media: self.media.clone(),
+            media: self.media.clone().map(Box::new),
             favorite: item.entry.favorite,
             episode: target.episode.map(|ep| (ep.season, ep.episode)),
         });
+        if self.settings.catalog_enabled
+            && let Some(media) = self
+                .media
+                .as_ref()
+                .filter(|media| media.id.starts_with("trakt:"))
+        {
+            let id = media.id.clone();
+            let client = self.catalog.clone();
+            let output = self.catalog_results.clone();
+            let cancel = cancel.clone();
+            self.catalog_jobs.spawn(async move {
+                if let Ok(media) = client.details(&id, &cancel).await {
+                    let _ = output.send(CatalogResult {
+                        cancel,
+                        answer: CatalogAnswer::LibraryDetails(Box::new(media)),
+                    });
+                }
+            });
+        }
         let saved = self.storage.saved_file(&target).ok().flatten();
         self.send(Event::LibraryOpened {
             source_available: saved.is_some() || item.source.is_some(),

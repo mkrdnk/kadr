@@ -5,7 +5,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use kadr_engine::{AsyncState, Command, Engine, EngineDirectories, Event, Settings};
+use kadr_engine::{
+    AsyncState, Command, Engine, EngineDirectories, Event, Settings, SourcePreferences,
+};
 
 fn directories(root: &std::path::Path) -> EngineDirectories {
     EngineDirectories {
@@ -68,6 +70,85 @@ fn starts_updates_preferences_and_restarts_using_only_public_api() {
         |event| matches!(event, Event::Ready { settings: value, .. } if value == &settings),
     );
     assert!(engine.join());
+}
+
+#[test]
+fn sidebar_and_automatic_discovery_preferences_persist_without_enabling_network() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut engine, mut events) =
+        Engine::start_with_directories(directories(root.path())).unwrap();
+    let Event::Ready { mut settings, .. } =
+        wait(&mut events, |event| matches!(event, Event::Ready { .. }))
+    else {
+        unreachable!()
+    };
+    assert!(!settings.sidebar_collapsed);
+    assert!(!settings.network.torrents_enabled);
+    let Event::SourcePreferences(mut preferences) = wait(&mut events, |event| {
+        matches!(event, Event::SourcePreferences(_))
+    }) else {
+        unreachable!()
+    };
+    assert!(!preferences.auto_discover);
+    preferences.auto_discover = true;
+    assert!(engine.dispatch(Command::SetSourcePreferences(preferences.clone())));
+    wait(
+        &mut events,
+        |event| matches!(event, Event::SourcePreferences(saved) if saved == &preferences),
+    );
+    assert!(engine.dispatch(Command::SetSidebarCollapsed(true)));
+    wait(&mut events, |event| {
+        matches!(event, Event::SidebarCollapsed(true))
+    });
+    // A preferences form opened before the toggle must not restore its stale
+    // sidebar value when saving otherwise unchanged settings.
+    assert!(engine.dispatch(Command::UpdateSettings(settings.clone())));
+    settings.sidebar_collapsed = true;
+    wait(
+        &mut events,
+        |event| matches!(event, Event::PreferencesSaved(saved) if saved == &settings),
+    );
+    assert!(engine.join());
+
+    let (mut engine, mut events) =
+        Engine::start_with_directories(directories(root.path())).unwrap();
+    wait(
+        &mut events,
+        |event| matches!(event, Event::Ready { settings: saved, .. } if saved == &settings),
+    );
+    wait(
+        &mut events,
+        |event| matches!(event, Event::SourcePreferences(saved) if saved == &preferences),
+    );
+    assert!(engine.dispatch(Command::SetSidebarCollapsed(false)));
+    wait(&mut events, |event| {
+        matches!(event, Event::SidebarCollapsed(false))
+    });
+    assert!(engine.dispatch(Command::SetSourcePreferences(SourcePreferences::default())));
+    wait(
+        &mut events,
+        |event| matches!(event, Event::SourcePreferences(saved) if saved == &SourcePreferences::default()),
+    );
+    assert!(engine.join());
+
+    let (mut engine, mut events) =
+        Engine::start_with_directories(directories(root.path())).unwrap();
+    settings.sidebar_collapsed = false;
+    wait(
+        &mut events,
+        |event| matches!(event, Event::Ready { settings: saved, .. } if saved == &settings),
+    );
+    wait(
+        &mut events,
+        |event| matches!(event, Event::SourcePreferences(saved) if saved == &SourcePreferences::default()),
+    );
+    assert!(engine.join());
+    while let Ok(event) = events.try_recv() {
+        assert!(!matches!(
+            event,
+            Event::BrowseState(_) | Event::SourceDiscovery { .. } | Event::PlaybackActive(true)
+        ));
+    }
 }
 
 #[test]
