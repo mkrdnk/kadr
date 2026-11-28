@@ -38,6 +38,9 @@ impl AssetSource for IconAssets {
             "kadr/chevron.svg" => glyph!("m9 18 6-6-6-6"),
             "kadr/back.svg" => glyph!("m15 18-6-6 6-6"),
             "kadr/close.svg" => glyph!("m6 6 12 12M18 6 6 18"),
+            "kadr/panel-left.svg" => glyph!(
+                "M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm4 0v16"
+            ),
             "kadr/link.svg" => glyph!(
                 "M10 13a4 4 0 0 0 6 .3l3-3a4 4 0 0 0-5.7-5.7L11.6 6m2.4 5a4 4 0 0 0-6-.3l-3 3a4 4 0 0 0 5.7 5.7l1.7-1.4"
             ),

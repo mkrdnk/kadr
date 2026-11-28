@@ -2,7 +2,9 @@
 
 use std::{fs, io, os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
 
-use kadr_media::players::{PlayRequest, PlayerKind, PlayerOptions, PlayerSession, Telemetry};
+use kadr_media::players::{
+    PlayRequest, PlayerKind, PlayerOptions, PlayerPlaybackOptions, PlayerSession, Telemetry,
+};
 use serde_json::Value;
 use tempfile::TempDir;
 use tokio::time::{sleep, timeout};
@@ -79,6 +81,165 @@ fn request() -> PlayRequest {
     PlayRequest {
         media: "--not-an-option; $(touch should-not-exist) & \"private\"".into(),
         resume: Some(Duration::from_millis(3500)),
+    }
+}
+
+#[tokio::test]
+async fn playback_preferences_are_real_startup_argv_before_the_media_separator() {
+    for kind in [PlayerKind::Mpv, PlayerKind::Vlc] {
+        for subtitles_off in [false, true] {
+            for language in [None, Some("RU"), Some("ENG")] {
+                let fake = Fake::new("normal");
+                let mut session = PlayerSession::launch_with_preferences(
+                    kind,
+                    request(),
+                    PlayerOptions {
+                        executable: fake.executable.clone(),
+                        ..PlayerOptions::for_player(kind)
+                    },
+                    PlayerPlaybackOptions {
+                        subtitles_off,
+                        audio_language: language.map(str::to_owned),
+                    },
+                    &CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+                let record = fake.record();
+                let args: Vec<_> = record["args"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|arg| arg.as_str().unwrap())
+                    .collect();
+                assert_eq!(args[args.len() - 2], "--");
+                assert_eq!(args.last().copied(), request().media.to_str());
+                let startup = &args[..args.len() - 2];
+                let (subtitle_flag, language_prefix, resume_flag) = match kind {
+                    PlayerKind::Mpv => ("--sid=no", "--alang=", "--start=3.500000"),
+                    PlayerKind::Vlc => ("--no-spu", "--audio-language=", "--start-time=3.500000"),
+                };
+                assert!(startup.contains(&resume_flag));
+                assert_eq!(
+                    startup.iter().filter(|arg| **arg == subtitle_flag).count(),
+                    usize::from(subtitles_off)
+                );
+                let language_args: Vec<_> = startup
+                    .iter()
+                    .filter(|arg| arg.starts_with(language_prefix))
+                    .copied()
+                    .collect();
+                let expected: Vec<_> = language
+                    .map(|code| format!("{language_prefix}{}", code.to_ascii_lowercase()))
+                    .into_iter()
+                    .collect();
+                assert_eq!(language_args, expected);
+                assert!(session.stop().await.unwrap().success());
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn legacy_launch_and_default_preferences_have_identical_argv() {
+    assert_eq!(
+        PlayerPlaybackOptions::default(),
+        PlayerPlaybackOptions {
+            subtitles_off: false,
+            audio_language: None,
+        }
+    );
+    for kind in [PlayerKind::Mpv, PlayerKind::Vlc] {
+        let fake = Fake::new("normal");
+        let mut legacy = PlayerSession::launch(
+            kind,
+            request(),
+            PlayerOptions {
+                executable: fake.executable.clone(),
+                ..PlayerOptions::for_player(kind)
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let legacy_record = fake.record();
+        assert!(legacy.stop().await.unwrap().success());
+        let mut explicit = PlayerSession::launch_with_preferences(
+            kind,
+            request(),
+            PlayerOptions {
+                executable: fake.executable.clone(),
+                ..PlayerOptions::for_player(kind)
+            },
+            PlayerPlaybackOptions::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let explicit_record = fake.record();
+        let without_socket = |record: &Value| {
+            record["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|arg| {
+                    let arg = arg.as_str().unwrap();
+                    !arg.starts_with("--input-ipc-server=") && !arg.starts_with("--rc-unix=")
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let args = without_socket(&explicit_record);
+        assert_eq!(without_socket(&legacy_record), args);
+        assert!(!args.iter().any(|arg| {
+            let arg = arg.as_str().unwrap();
+            arg == "--sid=no"
+                || arg == "--no-spu"
+                || arg.starts_with("--alang=")
+                || arg.starts_with("--audio-language=")
+        }));
+        assert!(explicit.stop().await.unwrap().success());
+    }
+}
+
+#[tokio::test]
+async fn invalid_language_and_option_injection_are_rejected_before_spawn() {
+    for kind in [PlayerKind::Mpv, PlayerKind::Vlc] {
+        for language in [
+            "",
+            "e",
+            "english",
+            "ru-RU",
+            "en,ru",
+            "en ru",
+            " en",
+            "en\n",
+            "en\0",
+            "рус",
+            "--script=/private",
+            "en --audio-file=/private",
+            "en;$(touch should-not-exist)",
+        ] {
+            let fake = Fake::new("normal");
+            let result = PlayerSession::launch_with_preferences(
+                kind,
+                request(),
+                fake.options(kind),
+                PlayerPlaybackOptions {
+                    subtitles_off: true,
+                    audio_language: Some(language.into()),
+                },
+                &CancellationToken::new(),
+            )
+            .await;
+            let error = result.err().expect("invalid language must fail");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{language:?}");
+            assert_eq!(
+                error.to_string(),
+                "audio language must contain two or three ASCII letters"
+            );
+            assert!(!fake.directory.path().join("record.json").exists());
+        }
     }
 }
 

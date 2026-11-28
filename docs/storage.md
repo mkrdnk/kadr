@@ -116,6 +116,7 @@ Invalid/corrupt values produce errors rather than silently resetting defaults.
 | Setting | Default | Accepted values |
 |---|---|---|
 | `default_player` | `PlayerPreference::Mpv` | `Mpv`, `Vlc`, `Browser` |
+| `sidebar_collapsed` | `false` | bool; persists the compact sidebar without changing playback or network settings |
 | `network.torrents_enabled` | `false` | explicit bool |
 | `network.download` | 10 MiB/s | `Paused`, `BytesPerSecond(1..=i64::MAX)`, `Unlimited` |
 | `network.upload` | `Paused` | same explicit rate-limit enum |
@@ -131,8 +132,10 @@ engine must honor explicit pause/limit/unlimited semantics (zero must not turn
 into unlimited). No telemetry, network request, source resolution, or background
 download is started by opening storage.
 Catalog enabled does not authorize startup/background fetching: the application
-must issue a request only after an explicit search/browse action. Source-provider
-preferences never override the catalog or BitTorrent permission. Settings writes
+must issue a request only after a user action. Source-provider preferences never
+override the catalog or BitTorrent permission. The separate `auto_discover`
+source preference is off by default, including after migration, and permits
+card-scoped source lookup but not automatic playback. Settings writes
 preserve all fields in one atomic singleton
 upsert; editors should load, clone/edit, and save the full snapshot.
 
@@ -182,6 +185,8 @@ The public connection is opaque; callers cannot bypass validation via it.
     unchanged. Resolver cache is retained: Popcorn results are memory-only, so
     no persistent Popcorn results need invalidation. A subsequent explicit
     preference change still clears resolver cache through the normal save path.
+11. Persist `sidebar_collapsed` and the separate `auto_discover` permission.
+    Both default to false; no existing provider permission is expanded.
 
 Opening uses `BEGIN IMMEDIATE`, checks the version, applies the entire missing
 migration chain and updates `user_version` in **one transaction**. Any failure

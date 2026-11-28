@@ -112,6 +112,7 @@ fn v5_migration_preserves_existing_settings_and_has_no_proxy() {
          DROP TABLE torznab_configs;
          DROP TABLE source_preferences;
          ALTER TABLE settings DROP COLUMN catalog_proxy;
+         ALTER TABLE settings DROP COLUMN sidebar_collapsed;
          PRAGMA user_version = 5;",
     )
     .unwrap();
@@ -147,6 +148,7 @@ fn v6_migration_collision_rolls_back_without_replacing_existing_values() {
         "DROP TABLE source_cache;
          DROP TABLE torznab_configs;
          DROP TABLE source_preferences;
+         ALTER TABLE settings DROP COLUMN sidebar_collapsed;
          PRAGMA user_version = 5;",
     )
     .unwrap();

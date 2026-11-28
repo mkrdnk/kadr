@@ -9,6 +9,11 @@ use std::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[path = "catalog_tests.rs"]
+mod catalog_tests;
+#[path = "metadata_tests.rs"]
+mod metadata_tests;
+
 const FAKE_CLIENT_ID: &str = "synthetic-test-client_id";
 
 fn client() -> Client {
@@ -919,6 +924,18 @@ impl Drop for Fixture {
 }
 
 async fn fixture(routes: Vec<(String, Route)>) -> Fixture {
+    fixture_headers(
+        routes
+            .into_iter()
+            .map(|(path, (status, data))| (path, (status, data, Vec::new())))
+            .collect(),
+    )
+    .await
+}
+
+type HeaderRoute = (u16, Value, Vec<(String, String)>);
+
+async fn fixture_headers(routes: Vec<(String, HeaderRoute)>) -> Fixture {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
     let routes: Arc<HashMap<_, _>> = Arc::new(routes.into_iter().collect());
@@ -951,14 +968,22 @@ async fn fixture(routes: Vec<(String, Route)>) -> Fixture {
                 let request = String::from_utf8(request).unwrap();
                 let target = request.split_whitespace().nth(1).unwrap();
                 let path = target.split('?').next().unwrap();
-                let (status, body) = routes.get(path).cloned().unwrap_or((404, json!({})));
+                let (status, body, headers) =
+                    routes
+                        .get(path)
+                        .cloned()
+                        .unwrap_or((404, json!({}), vec![]));
                 saved.lock().unwrap().push(request);
                 let current = active.fetch_add(1, Ordering::SeqCst) + 1;
                 max.fetch_max(current, Ordering::SeqCst);
                 tokio::time::sleep(Duration::from_millis(30)).await;
                 let body = body.to_string();
+                let headers = headers
+                    .iter()
+                    .map(|(name, value)| format!("{name}: {value}\r\n"))
+                    .collect::<String>();
                 let response = format!(
-                    "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status} Fixture\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 let _ = stream.write_all(response.as_bytes()).await;
@@ -1063,13 +1088,20 @@ async fn search_browse_details_use_exact_routes_and_client_id_only_in_header() {
         results[0]
     );
     let requests = fixture.requests.lock().unwrap();
-    assert_eq!(requests.len(), 5);
+    assert_eq!(requests.len(), 6);
     assert_eq!(fixture.max_active.load(Ordering::SeqCst), 2);
     for request in requests.iter() {
         assert_trakt_headers(request);
         let url = request_url(request);
         let pairs: HashMap<_, _> = url.query_pairs().into_owned().collect();
-        assert_eq!(pairs["extended"], "full");
+        assert_eq!(
+            pairs["extended"],
+            if url.path().ends_with("/ratings") {
+                "all"
+            } else {
+                "full"
+            }
+        );
         if url.path().starts_with("/search/") {
             assert_eq!(pairs["limit"], "20");
             assert_eq!(pairs["query"], query);
@@ -1078,7 +1110,7 @@ async fn search_browse_details_use_exact_routes_and_client_id_only_in_header() {
             assert_eq!(pairs["limit"], "20");
             assert_eq!(url.query_pairs().count(), 2);
         } else {
-            assert_eq!(url.path(), "/movies/1");
+            assert!(["/movies/1", "/movies/1/ratings"].contains(&url.path()));
             assert_eq!(url.query_pairs().count(), 1);
         }
     }
@@ -1353,7 +1385,7 @@ async fn show_details_fetch_all_seasons_once_without_per_season_fanout() {
         (9, 2)
     );
     let requests = fixture.requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
     assert_eq!(fixture.max_active.load(Ordering::SeqCst), 1);
     for request in requests.iter() {
         assert_trakt_headers(request);
@@ -1362,13 +1394,14 @@ async fn show_details_fetch_all_seasons_once_without_per_season_fanout() {
         assert_eq!(url.query_pairs().count(), 1);
         assert_eq!(
             pairs["extended"],
-            if url.path() == "/shows/2" {
-                "full"
-            } else {
-                "episodes,full"
+            match url.path() {
+                "/shows/2" => "full",
+                "/shows/2/seasons" => "episodes,full",
+                "/shows/2/ratings" => "all",
+                _ => panic!("unexpected request"),
             }
         );
-        assert!(["/shows/2", "/shows/2/seasons"].contains(&url.path()));
+        assert!(["/shows/2", "/shows/2/seasons", "/shows/2/ratings"].contains(&url.path()));
     }
 }
 
@@ -1442,7 +1475,7 @@ async fn unavailable_invalid_or_wrong_details_never_invent_results() {
             .episodes
             .is_empty()
     );
-    assert_eq!(fixture.requests.lock().unwrap().len(), 2);
+    assert_eq!(fixture.requests.lock().unwrap().len(), 3);
 }
 
 async fn server(response: Vec<u8>) -> (Url, tokio::task::JoinHandle<()>) {

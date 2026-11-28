@@ -41,6 +41,18 @@ pub struct PlayRequest {
     pub resume: Option<Duration>,
 }
 
+/// Direct-player startup preferences, not a guarantee of a particular track.
+/// Defaults leave track selection to the player's built-in defaults.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlayerPlaybackOptions {
+    /// Disable subtitle rendering at startup.
+    pub subtitles_off: bool,
+    /// One ISO 639-style language code: exactly two or three ASCII letters,
+    /// case-insensitive. Unsupported/missing track languages fall back according
+    /// to the player; language names, lists, and regional tags are not accepted.
+    pub audio_language: Option<String>,
+}
+
 pub struct PlayerOptions {
     /// Explicit binary path, or a name resolved by the OS using PATH.
     pub executable: PathBuf,
@@ -113,9 +125,44 @@ impl PlayerSession {
         options: PlayerOptions,
         cancel: &CancellationToken,
     ) -> io::Result<Self> {
+        Self::launch_with_preferences(
+            kind,
+            request,
+            options,
+            PlayerPlaybackOptions::default(),
+            cancel,
+        )
+        .await
+    }
+
+    /// Apply validated preferences through startup argv before opening media.
+    /// Invalid language syntax fails before creating resources or spawning a
+    /// child. Players retain responsibility for matching available tracks.
+    pub async fn launch_with_preferences(
+        kind: PlayerKind,
+        request: PlayRequest,
+        options: PlayerOptions,
+        preferences: PlayerPlaybackOptions,
+        cancel: &CancellationToken,
+    ) -> io::Result<Self> {
         if cancel.is_cancelled() {
             return Err(cancelled());
         }
+        let audio_language = match preferences.audio_language.as_deref() {
+            Some(language)
+                if matches!(language.len(), 2 | 3)
+                    && language.bytes().all(|byte| byte.is_ascii_alphabetic()) =>
+            {
+                Some(language.to_ascii_lowercase())
+            }
+            Some(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "audio language must contain two or three ASCII letters",
+                ));
+            }
+            None => None,
+        };
         if options.connect_timeout.is_zero()
             || options.command_timeout.is_zero()
             || options.stop_timeout.is_zero()
@@ -177,6 +224,12 @@ impl PlayerSession {
                 if let Some(start) = start {
                     command.arg(format!("--start={start}"));
                 }
+                if preferences.subtitles_off {
+                    command.arg("--sid=no");
+                }
+                if let Some(language) = &audio_language {
+                    command.arg(format!("--alang={language}"));
+                }
                 if options.headless {
                     command.args(["--vo=null", "--ao=null"]);
                 }
@@ -201,6 +254,12 @@ impl PlayerSession {
                 command.arg(format!("--rc-unix={}", socket_path.display()));
                 if let Some(start) = start {
                     command.arg(format!("--start-time={start}"));
+                }
+                if preferences.subtitles_off {
+                    command.arg("--no-spu");
+                }
+                if let Some(language) = &audio_language {
+                    command.arg(format!("--audio-language={language}"));
                 }
                 if options.headless {
                     command.args(["--intf=dummy", "--vout=dummy", "--aout=dummy"]);

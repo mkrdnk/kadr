@@ -19,6 +19,10 @@ fn media() -> Media {
         year: Some(2021),
         external: ExternalMetadata::default(),
         rating_tenths: None,
+        runtime_minutes: None,
+        genres: Vec::new(),
+        certification: None,
+        external_ratings: Vec::new(),
         description: String::new(),
         poster_url: None,
         backdrop_url: None,
@@ -59,6 +63,8 @@ fn queries_require_canonical_trakt_identity_kind_and_concrete_episode() {
         number: 1,
         title: String::new(),
         description: String::new(),
+        runtime_minutes: None,
+        screenshot_url: None,
     };
     assert!(MediaQuery::from_media(&media, Some(&episode)).is_none());
     for id in [
@@ -359,6 +365,8 @@ fn exact_episode_is_required_even_with_a_show_id_and_specials_work() {
         number: 2,
         title: String::new(),
         description: String::new(),
+        runtime_minutes: None,
+        screenshot_url: None,
     };
     let query = MediaQuery::from_media(&media, Some(&episode)).unwrap();
     let mut offer = source(1);

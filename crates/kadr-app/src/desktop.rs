@@ -42,6 +42,11 @@ pub struct Desktop {
     episode: Option<(u16, u16)>,
     sources: SourcePresentation,
     movie_choice: MovieChoice,
+    watch_preferences: kadr_engine::PlaybackPreferences,
+    watch_resume: bool,
+    auto_discover: bool,
+    catalog_requests: [Option<kadr_ui::CatalogRequest>; 2],
+    genre_requested: [bool; 2],
     requested_source_preferences: VecDeque<SourcePreferencesDraft>,
     source_input_invalid: bool,
 }
@@ -128,12 +133,22 @@ impl Desktop {
         } else {
             Command::FindSources
         };
+        self.begin_discovery(command, force, intent, media_id, view, cx);
+    }
+
+    fn begin_discovery(
+        &mut self,
+        command: Command,
+        force: bool,
+        intent: DiscoveryIntent,
+        media_id: String,
+        view: &mut KadrView,
+        cx: &mut Context<KadrView>,
+    ) {
         if self.dispatch(command, view, cx) {
             self.sources.discover(media_id, self.episode, force);
             self.sources.intent = intent;
-            if intent == DiscoveryIntent::Browse {
-                view.show_source_overlay(cx);
-            } else {
+            if intent != DiscoveryIntent::Browse {
                 view.set_movie_watch_pending(true, cx);
             }
             view.begin_source_discovery(cx);
@@ -150,6 +165,84 @@ impl Desktop {
             return;
         }
         self.start_player(command, view, cx);
+    }
+
+    fn background_discovery(&mut self, view: &mut KadrView, cx: &mut Context<KadrView>) {
+        if self.auto_discover
+            && !self.sources.discovering()
+            && self
+                .settings
+                .as_ref()
+                .is_some_and(|settings| settings.catalog_enabled)
+            && let Some(id) = self.media_id.clone()
+        {
+            self.begin_discovery(
+                Command::DiscoverOnOpen,
+                false,
+                DiscoveryIntent::Browse,
+                id,
+                view,
+                cx,
+            );
+        }
+    }
+
+    fn watch(
+        &mut self,
+        resume: bool,
+        preferences: kadr_engine::PlaybackPreferences,
+        view: &mut KadrView,
+        cx: &mut Context<KadrView>,
+    ) {
+        if self.active {
+            view.set_movie_watch_pending(false, cx);
+            return;
+        }
+        self.watch_preferences = preferences.clone();
+        self.watch_resume = resume;
+        if self.movie_choice == MovieChoice::Explicit {
+            view.set_movie_watch_pending(false, cx);
+            if self.playback_available() {
+                self.launch(
+                    Command::PlayWithPreferences {
+                        resume,
+                        preferences,
+                    },
+                    view,
+                    cx,
+                );
+            } else {
+                view.show_source_overlay(cx);
+            }
+            return;
+        }
+        let intent = DiscoveryIntent::WatchMovie {
+            navigation: view.navigation_revision(),
+        };
+        if self.sources.discovering() {
+            self.sources.intent = intent;
+            view.set_movie_watch_pending(true, cx);
+            self.request_recommendation(view, cx);
+        } else {
+            self.discover(false, intent, view, cx);
+        }
+    }
+
+    fn request_recommendation(&mut self, view: &mut KadrView, cx: &mut Context<KadrView>) {
+        if self.sources.complete
+            && self.sources.intent != DiscoveryIntent::Browse
+            && !self.sources.requested_recommendation
+        {
+            self.sources.requested_recommendation = self.dispatch(
+                Command::RecommendPlayback(self.watch_preferences.clone()),
+                view,
+                cx,
+            );
+            if !self.sources.requested_recommendation {
+                self.sources.intent = DiscoveryIntent::Browse;
+                view.show_source_overlay(cx);
+            }
+        }
     }
 
     fn start_player(&mut self, command: Command, view: &mut KadrView, cx: &mut Context<KadrView>) {
@@ -200,12 +293,17 @@ pub fn attach(
         episode: None,
         sources: SourcePresentation::default(),
         movie_choice: MovieChoice::None,
+        watch_preferences: kadr_engine::PlaybackPreferences::default(),
+        watch_resume: true,
+        auto_discover: false,
+        catalog_requests: std::array::from_fn(|_| None),
+        genre_requested: [false; 2],
         requested_source_preferences: VecDeque::new(),
         source_input_invalid: false,
     }));
     let state = desktop.clone();
     cx.subscribe(view, move |view, event, cx| match event {
-        UiEvent::PasteSource => {
+        UiEvent::PasteSource | UiEvent::ImportSource { torrent: false, .. } => {
             if state.borrow().active || !state.borrow().ready {
                 return;
             }
@@ -215,9 +313,13 @@ pub fn attach(
                 .and_then(|item| item.text())
                 .ok_or_else(|| "Буфер обмена не содержит текстовую ссылку.".to_owned())
                 .and_then(|text| ManualSource::parse_link(text.trim()).map_err(|e| e.to_string()));
-            select_source(&state, &view, result, cx);
+            let attach = !matches!(event, UiEvent::ImportSource { attach: false, .. });
+            select_source(&state, &view, result, attach, cx);
         }
-        UiEvent::OpenTorrent => open_torrent(&state, &view, cx),
+        UiEvent::OpenTorrent | UiEvent::ImportSource { torrent: true, .. } => {
+            let attach = !matches!(event, UiEvent::ImportSource { attach: false, .. });
+            open_torrent(&state, &view, attach, cx);
+        }
         UiEvent::Save => save_to(&state, &view, cx),
         UiEvent::ChooseCacheDirectory => choose_cache_directory(&state, &view, cx),
         _ => view.update(cx, |view, cx| {
@@ -233,6 +335,37 @@ pub fn attach(
                             SectionState::Loading("Загружаем каталог…".into()),
                             cx,
                         );
+                    }
+                }
+                UiEvent::CatalogPage(request) => {
+                    let slot = usize::from(request.query.kind == kadr_ui::MediaKind::Series);
+                    if state.dispatch(models::catalog_request(request), view, cx) {
+                        state.catalog_requests[slot] = Some(request.clone());
+                    } else {
+                        view.set_catalog_page(
+                            request,
+                            Err("Не удалось начать загрузку.".into()),
+                            cx,
+                        );
+                    }
+                }
+                UiEvent::CatalogGenres(kind) => {
+                    let slot = usize::from(*kind == kadr_ui::MediaKind::Series);
+                    if !state.genre_requested[slot] {
+                        if state.dispatch(
+                            Command::CatalogGenres(models::catalog_kind(*kind)),
+                            view,
+                            cx,
+                        ) {
+                            state.genre_requested[slot] = true;
+                            view.set_catalog_genres_loading(*kind, cx);
+                        } else {
+                            view.set_catalog_genres(
+                                *kind,
+                                Err("Не удалось загрузить жанры.".into()),
+                                cx,
+                            );
+                        }
                     }
                 }
                 UiEvent::OpenMedia(id) | UiEvent::OpenLibrary(id) => {
@@ -258,6 +391,7 @@ pub fn attach(
                         };
                         state.episode = None;
                         if opening_library {
+                            state.watch_resume = true;
                             state.sources.prepare();
                             state.library_intent = Some(view.navigation_revision());
                         }
@@ -265,22 +399,60 @@ pub fn attach(
                 }
                 UiEvent::FindSources => {
                     if !state.active {
-                        state.discover(false, DiscoveryIntent::Browse, view, cx);
+                        state.watch_resume = true;
+                        view.show_source_overlay(cx);
+                        if !state.sources.discovering()
+                            && state.movie_choice != MovieChoice::Explicit
+                        {
+                            state.discover(false, DiscoveryIntent::Browse, view, cx);
+                        }
+                    }
+                }
+                UiEvent::DiscoverSources => {
+                    if !state.active
+                        && (!state.sources.discovering() || state.sources.complete)
+                        && state.movie_choice != MovieChoice::Explicit
+                    {
+                        let refresh = state.sources.complete;
+                        state.discover(refresh, DiscoveryIntent::Browse, view, cx);
                     }
                 }
                 UiEvent::WatchMovie => {
-                    if state.active {
-                        view.set_movie_watch_pending(false, cx);
-                    } else if state.movie_choice == MovieChoice::Explicit {
-                        view.set_movie_watch_pending(false, cx);
-                        if state.playback_available() {
-                            state.launch(Command::Play { resume: true }, view, cx);
-                        } else {
-                            view.show_source_overlay(cx);
-                        }
-                    } else {
-                        let navigation = view.navigation_revision();
-                        state.discover(false, DiscoveryIntent::WatchMovie { navigation }, view, cx);
+                    state.watch(
+                        true,
+                        models::playback_preferences(view.playback_options()),
+                        view,
+                        cx,
+                    );
+                }
+                UiEvent::WatchDetail {
+                    resume,
+                    preferences,
+                } => {
+                    state.watch(
+                        *resume,
+                        models::playback_preferences(preferences.clone()),
+                        view,
+                        cx,
+                    );
+                }
+                UiEvent::WatchSource(index) => {
+                    if !state.active {
+                        let resume = state.watch_resume;
+                        state.movie_choice = MovieChoice::Recommended {
+                            navigation: view.navigation_revision(),
+                        };
+                        state.sources.prepare();
+                        view.set_source_discovery(None, cx);
+                        state.start_player(
+                            Command::WatchSource {
+                                index: *index,
+                                preferences: models::playback_preferences(view.playback_options()),
+                                resume,
+                            },
+                            view,
+                            cx,
+                        );
                     }
                 }
                 UiEvent::SelectEpisode { season, number }
@@ -293,6 +465,7 @@ pub fn attach(
                         state.invalidate_source(view, cx);
                         if state.dispatch(Command::SelectEpisode(*season, *number), view, cx) {
                             state.episode = Some((*season, *number));
+                            state.background_discovery(view, cx);
                         }
                     } else if state.dispatch(Command::AssignEpisode(*season, *number), view, cx) {
                         state.episode = Some((*season, *number));
@@ -366,13 +539,17 @@ pub fn attach(
                         cx,
                     );
                 }
-                UiEvent::Play | UiEvent::PlayFromStart => state.launch(
-                    Command::Play {
-                        resume: matches!(event, UiEvent::Play),
-                    },
-                    view,
-                    cx,
-                ),
+                UiEvent::Play | UiEvent::PlayFromStart => {
+                    let resume = matches!(event, UiEvent::Play) && state.watch_resume;
+                    state.launch(
+                        Command::PlayWithPreferences {
+                            resume,
+                            preferences: models::playback_preferences(view.playback_options()),
+                        },
+                        view,
+                        cx,
+                    );
+                }
                 UiEvent::OpenIn(player) => {
                     let command = Command::OpenIn(models::preference(*player));
                     if state.active {
@@ -390,17 +567,22 @@ pub fn attach(
                         view.set_status(UiStatus::info("Остановка сессии…"), cx);
                     }
                 }
-                UiEvent::Cancel(_) => {
+                UiEvent::Cancel(section) => {
                     state.source_requests.begin();
                     state.requested_media = None;
                     state.library_intent = None;
-                    if !state.active {
+                    if !state.active && *section == Section::Sources {
                         // Engine cancellation drops idle selections as well as searches.
                         // Do not leave the previous preview launchable after ignoring
                         // its untagged cancellation replies.
                         state.invalidate_source(view, cx);
                     }
-                    if state.dispatch(Command::Cancel, view, cx) {
+                    let command = match section {
+                        Section::Sources if view.is_preparing() => Command::Stop,
+                        Section::Sources => Command::CancelSources,
+                        _ => Command::Cancel,
+                    };
+                    if state.dispatch(command, view, cx) {
                         view.set_status(UiStatus::info("Отмена операции…"), cx);
                     }
                 }
@@ -414,6 +596,9 @@ pub fn attach(
                         settings.default_player = models::preference(*player);
                         state.update_settings(settings, view, cx);
                     }
+                }
+                UiEvent::SetSidebarCollapsed(collapsed) => {
+                    state.dispatch(Command::SetSidebarCollapsed(*collapsed), view, cx);
                 }
                 UiEvent::SavePreferences(draft) => {
                     if let Some(settings) = state.editable_settings() {
@@ -495,7 +680,8 @@ pub fn attach(
                         cx,
                     ),
                 },
-                UiEvent::PasteSource
+                UiEvent::ImportSource { .. }
+                | UiEvent::PasteSource
                 | UiEvent::OpenTorrent
                 | UiEvent::Save
                 | UiEvent::ChooseCacheDirectory => unreachable!(),
@@ -564,6 +750,8 @@ fn apply_event(state: &mut Desktop, view: &mut KadrView, event: Event, cx: &mut 
                 return;
             }
             state.ready = true;
+            view.set_sidebar_collapsed(settings.sidebar_collapsed, cx);
+            view.set_catalog_years((1888..=models::current_year()).rev().collect(), cx);
             publish_settings(view, &settings, cx);
             state.settings = Some(settings);
             view.set_preferences_status("Настройки загружены из локального хранилища.", cx);
@@ -582,8 +770,19 @@ fn apply_event(state: &mut Desktop, view: &mut KadrView, event: Event, cx: &mut 
             view.set_playback_available(state.playback_available(), cx);
         }
         Event::PreferencesSaved(settings) => {
-            if state.requested_settings.as_ref() == Some(&settings) {
+            if state.requested_settings.as_ref().is_some_and(|requested| {
+                let mut requested = requested.clone();
+                requested.sidebar_collapsed = settings.sidebar_collapsed;
+                requested == settings
+            }) {
                 state.requested_settings = None;
+            }
+            if !settings.catalog_enabled {
+                state.catalog_requests = std::array::from_fn(|_| None);
+                state.genre_requested = [false; 2];
+                if state.sources.discovering() {
+                    state.invalidate_source(view, cx);
+                }
             }
             publish_settings(view, &settings, cx);
             state.settings = Some(settings);
@@ -607,6 +806,10 @@ fn apply_event(state: &mut Desktop, view: &mut KadrView, event: Event, cx: &mut 
             view.set_status(UiStatus::error(message), cx);
         }
         Event::SourcePreferences(preferences) => {
+            state.auto_discover = preferences.auto_discover;
+            if state.sources.discovering() {
+                state.invalidate_source(view, cx);
+            }
             let confirmed = models::source_preferences_draft(&preferences);
             let expected = state.requested_source_preferences.pop_front();
             let rejected = expected
@@ -639,11 +842,20 @@ fn apply_event(state: &mut Desktop, view: &mut KadrView, event: Event, cx: &mut 
                 cx,
             );
         }
+        Event::SidebarCollapsed(collapsed) => {
+            if let Some(settings) = &mut state.settings {
+                settings.sidebar_collapsed = collapsed;
+            }
+            view.set_sidebar_collapsed(collapsed, cx);
+        }
         Event::PlaybackActive(active) => {
             state.active = active;
             view.set_preparing(false, cx);
             view.set_playback_active(active, cx);
             view.set_playback_available(state.playback_available(), cx);
+            if active {
+                view.close_source_after_launch(cx);
+            }
         }
         Event::MovieWatchNeedsInput(stamp) => {
             if stamp.is_current()
@@ -696,6 +908,47 @@ fn apply_event(state: &mut Desktop, view: &mut KadrView, event: Event, cx: &mut 
             }
             AsyncState::Error(message) => view.set_browse_state(SectionState::Error(message), cx),
         },
+        Event::CatalogPage { request, result } => {
+            if let Some(slot) = state
+                .catalog_requests
+                .iter_mut()
+                .find(|slot| slot.as_ref().is_some_and(|pending| pending.id == request))
+                && let Some(pending) = slot.take()
+            {
+                view.set_catalog_page(
+                    &pending,
+                    result.map(|page| kadr_ui::CatalogPage {
+                        items: page.items.into_iter().map(models::media_card).collect(),
+                        next_page: page.next_page,
+                    }),
+                    cx,
+                );
+            }
+        }
+        Event::CatalogGenres { kind, result } => {
+            if state
+                .settings
+                .as_ref()
+                .is_some_and(|settings| settings.catalog_enabled)
+            {
+                let kind = models::ui_kind(kind);
+                state.genre_requested[usize::from(kind == kadr_ui::MediaKind::Series)] =
+                    result.is_ok();
+                view.set_catalog_genres(
+                    kind,
+                    result.map(|genres| {
+                        genres
+                            .into_iter()
+                            .map(|genre| kadr_ui::CatalogGenre {
+                                slug: genre.slug,
+                                name: genre.name,
+                            })
+                            .collect()
+                    }),
+                    cx,
+                );
+            }
+        }
         Event::MediaSelected {
             media,
             favorite,
@@ -703,38 +956,49 @@ fn apply_event(state: &mut Desktop, view: &mut KadrView, event: Event, cx: &mut 
         } => {
             let media_id = media.as_ref().map(|media| media.id.clone());
             // Details/favorite replies never get to replace a newer requested card.
-            if let Some(requested) = &state.requested_media
-                && media_id.as_deref() != Some(requested.media_id.as_str())
-            {
-                return;
+            if let Some(requested) = &state.requested_media {
+                if media_id.as_deref() != Some(requested.media_id.as_str()) {
+                    return;
+                }
+                if requested.navigation != view.navigation_revision() {
+                    state.requested_media = None;
+                    return;
+                }
             }
-            let prefetch = state.requested_media.take().filter(|request| {
-                request.should_prefetch(
-                    media_id.as_deref(),
-                    media
-                        .as_ref()
-                        .is_some_and(|media| media.kind == kadr_engine::catalog::MediaKind::Movie),
-                    view.navigation_revision(),
-                )
+            let is_movie = media
+                .as_ref()
+                .is_some_and(|media| media.kind == kadr_engine::catalog::MediaKind::Movie);
+            let opened_card = state.requested_media.take().filter(|request| {
+                request.should_prefetch(media_id.as_deref(), true, view.navigation_revision())
             });
             if state.media_id != media_id {
                 state.source_requests.begin();
                 state.media_id = media_id;
             }
             state.episode = episode;
-            view.set_media_detail(media.map(models::media_card), cx);
+            view.set_media_detail(media.map(|media| models::media_card(*media)), cx);
             view.set_catalog_episode(episode, cx);
             view.set_media_favorite(favorite, cx);
-            if let Some(request) = prefetch
-                && view.movie_card_open()
+            if let Some(request) = opened_card
+                && view.detail_visible()
                 && state.ready
                 && !state.closed
             {
-                // The engine enforces permissions and keeps this quiet: no
-                // discovery UI, login prompts, selection changes or playback.
-                state
-                    .backend
-                    .dispatch(Command::PrefetchMovieSources(request.media_id));
+                if is_movie {
+                    if state.auto_discover {
+                        state.background_discovery(view, cx);
+                    } else {
+                        state
+                            .backend
+                            .dispatch(Command::PrefetchMovieSources(request.media_id));
+                    }
+                } else if let Some((season, number)) = view.preferred_episode()
+                    && state.dispatch(Command::SelectEpisode(season, number), view, cx)
+                {
+                    state.episode = Some((season, number));
+                    view.set_catalog_episode(state.episode, cx);
+                    state.background_discovery(view, cx);
+                }
             }
         }
         Event::SourceDiscovery {
@@ -755,11 +1019,6 @@ fn apply_event(state: &mut Desktop, view: &mut KadrView, event: Event, cx: &mut 
             }
             state.sources.received_discovery = true;
             state.sources.preparing = false;
-            let action = state.sources.intent.finish(
-                view.navigation_revision(),
-                pending,
-                rows.iter().find(|row| row.recommended).map(|row| row.index),
-            );
             view.set_sources(rows.into_iter().map(models::source_row).collect(), cx);
             view.set_source_discovery(
                 Some(SourceDiscovery {
@@ -770,9 +1029,26 @@ fn apply_event(state: &mut Desktop, view: &mut KadrView, event: Event, cx: &mut 
                 }),
                 cx,
             );
+            state.sources.complete = pending == 0;
             if pending == 0 {
-                view.set_movie_watch_pending(false, cx);
+                view.set_section_state(
+                    Section::Sources,
+                    SectionState::Empty("Поиск завершён.".into()),
+                    cx,
+                );
             }
+            state.request_recommendation(view, cx);
+        }
+        Event::PlaybackRecommendation { stamp, index } => {
+            if !stamp.is_current() || !state.sources.requested_recommendation {
+                return;
+            }
+            state.sources.requested_recommendation = false;
+            let action = state
+                .sources
+                .intent
+                .finish(view.navigation_revision(), 0, index);
+            view.set_movie_watch_pending(false, cx);
             match action {
                 WatchDecision::None => {}
                 WatchDecision::ShowSources => {
@@ -784,7 +1060,15 @@ fn apply_event(state: &mut Desktop, view: &mut KadrView, event: Event, cx: &mut 
                     };
                     state.sources.prepare();
                     view.set_source_discovery(None, cx);
-                    state.start_player(Command::WatchRelease(index), view, cx);
+                    state.start_player(
+                        Command::WatchRecommended {
+                            index,
+                            preferences: state.watch_preferences.clone(),
+                            resume: state.watch_resume,
+                        },
+                        view,
+                        cx,
+                    );
                 }
             }
         }
@@ -926,13 +1210,13 @@ fn apply_event(state: &mut Desktop, view: &mut KadrView, event: Event, cx: &mut 
         Event::LibraryOpened { source_available } => {
             // Preserve the legacy detail-only path for a card without a source.
             // A delayed reply cannot reopen Sources after navigation/dismissal.
-            if state.library_intent.take() == Some(view.navigation_revision())
-                && (source_available || state.media_id.is_none())
-            {
+            if state.library_intent.take() == Some(view.navigation_revision()) {
                 if source_available {
                     state.movie_choice = MovieChoice::Explicit;
                 }
-                view.show_source_overlay(cx);
+                if state.media_id.is_none() {
+                    view.show_source_overlay(cx);
+                }
             }
         }
         Event::Transfer(transfer) => {
@@ -970,6 +1254,7 @@ fn select_source(
     state: &Rc<RefCell<Desktop>>,
     view: &Entity<KadrView>,
     result: Result<ManualSource, String>,
+    attach: bool,
     cx: &mut App,
 ) {
     view.update(cx, |view, cx| {
@@ -980,10 +1265,11 @@ fn select_source(
         state.invalidate_source(view, cx);
         match result {
             Ok(source) => {
-                if state.dispatch(Command::SelectSource(source), view, cx) {
+                if state.dispatch(Command::ImportSource { source, attach }, view, cx) {
+                    state.requested_media = None;
+                    state.watch_resume = true;
                     state.movie_choice = MovieChoice::Explicit;
                     state.sources.prepare();
-                    view.show_source_overlay(cx);
                     view.set_section_state(
                         Section::Sources,
                         SectionState::Loading("Проверка источника…".into()),
@@ -994,7 +1280,7 @@ fn select_source(
             Err(message) => {
                 // Cancel in-flight metadata too; an old source must not become
                 // launchable after a failed replacement.
-                state.dispatch(Command::Cancel, view, cx);
+                state.dispatch(Command::CancelSources, view, cx);
                 state.source_input_invalid = true;
                 view.set_status(UiStatus::error(message.clone()), cx);
                 view.set_section_state(Section::Sources, SectionState::Error(message), cx);
@@ -1003,11 +1289,12 @@ fn select_source(
     });
 }
 
-fn open_torrent(state: &Rc<RefCell<Desktop>>, view: &Entity<KadrView>, cx: &mut App) {
+fn open_torrent(state: &Rc<RefCell<Desktop>>, view: &Entity<KadrView>, attach: bool, cx: &mut App) {
     if state.borrow().active || !state.borrow().ready {
         return;
     }
     let revision = state.borrow_mut().source_requests.begin();
+    let navigation = view.read(cx).navigation_revision();
     let paths = cx.prompt_for_paths(PathPromptOptions {
         files: true,
         directories: false,
@@ -1029,6 +1316,9 @@ fn open_torrent(state: &Rc<RefCell<Desktop>>, view: &Entity<KadrView>, cx: &mut 
             }
             drop(state_ref);
             let Some(view) = view.upgrade() else { return };
+            if view.read(cx).navigation_revision() != navigation {
+                return;
+            }
             match result {
                 Ok(Ok(Some(paths))) => {
                     if let Some(path) = paths.into_iter().next() {
@@ -1036,6 +1326,7 @@ fn open_torrent(state: &Rc<RefCell<Desktop>>, view: &Entity<KadrView>, cx: &mut 
                             &state,
                             &view,
                             ManualSource::torrent_file(path).map_err(|e| e.to_string()),
+                            attach,
                             cx,
                         );
                     }

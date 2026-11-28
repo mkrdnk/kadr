@@ -30,6 +30,8 @@ fn discovery(query: MediaQuery, sources: Vec<MediaSource>, pending: usize) -> Di
     let mut discovery = Discovery {
         next_handle: 0,
         movie_prefetch: None,
+        rank_preferences: RankPreferences::default(),
+        playback_request: None,
         current: Some(SearchState {
             query,
             key: "fixture".into(),
@@ -88,7 +90,7 @@ fn recommendation_waits_for_all_providers_and_uses_the_final_seed_order() {
 }
 
 #[test]
-fn zero_unknown_http_manual_and_episodic_offers_are_not_film_recommendations() {
+fn zero_unknown_http_and_manual_offers_are_not_recommendations_but_exact_episodes_are() {
     let mut http = source(1, Some(100));
     http.locator = Locator::Http("https://example.org/video.mp4".into());
     let mut manual = source(2, Some(100));
@@ -106,8 +108,230 @@ fn zero_unknown_http_manual_and_episodic_offers_are_not_film_recommendations() {
     episode.episode = episode_query.episode;
     let discovery = discovery(episode_query, vec![episode], 0);
     assert_eq!(discovery.rows().len(), 1);
-    assert_eq!(discovery.recommended_handle(), None);
-    assert!(!discovery.rows()[0].recommended);
+    assert_eq!(
+        discovery.recommended_handle(),
+        Some(discovery.rows()[0].index)
+    );
+    assert!(discovery.rows()[0].recommended);
+}
+
+#[test]
+fn requested_quality_and_language_choose_a_suitable_available_offer_not_the_seed_winner() {
+    let mut popular = source(1, Some(100));
+    popular.resolution = Some(2160);
+    popular.languages = vec!["en".into()];
+    let mut suitable = source(2, Some(1));
+    suitable.resolution = Some(1080);
+    suitable.languages = vec!["ru".into()];
+    let mut unavailable = source(3, Some(0));
+    unavailable.resolution = Some(1080);
+    unavailable.languages = vec!["ru".into()];
+    let mut discovery = discovery(query(), vec![popular, suitable, unavailable], 0);
+    let request = crate::PlaybackPreferences {
+        preferred_resolution: Some("1080p".into()),
+        preferred_language: Some("RU".into()),
+        subtitles_off: true,
+    };
+    let handle = discovery.recommendation(&request, |_| true).unwrap();
+    let rows = discovery.rows();
+    assert_eq!(rows[0].seeds, Some(100), "display order remains seed-first");
+    assert_ne!(handle, rows[0].index);
+    assert_eq!(handle, rows[1].index);
+    discovery.playback_request = Some(request);
+    assert_eq!(discovery.recommended_handle(), Some(handle));
+    assert!(discovery.rows()[1].recommended);
+}
+
+#[test]
+fn recommendation_inherits_stored_preferences_but_explicit_request_overrides_them() {
+    let mut high = source(1, Some(100));
+    high.resolution = Some(2160);
+    high.languages = vec!["en".into()];
+    let mut low = source(2, Some(1));
+    low.resolution = Some(720);
+    low.languages = vec!["ru".into()];
+    let mut discovery = discovery(query(), vec![high, low], 0);
+    discovery.rank(&crate::SourcePreferences {
+        preferred_resolution: Some("720p".into()),
+        preferred_language: Some("ru".into()),
+        ..Default::default()
+    });
+    let rows = discovery.rows();
+    assert_eq!(discovery.recommended_handle(), Some(rows[1].index));
+    let explicit = crate::PlaybackPreferences {
+        preferred_resolution: Some("2160p".into()),
+        preferred_language: Some("en".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        discovery.recommendation(&explicit, |_| true),
+        Some(rows[0].index)
+    );
+    assert_eq!(discovery.recommendation(&explicit, |_| false), None);
+}
+
+#[test]
+fn regional_language_request_matches_a_base_language_source_before_a_foreign_one() {
+    let mut foreign = source(1, Some(100));
+    foreign.languages = vec!["ru".into()];
+    let mut matching = source(2, Some(1));
+    matching.languages = vec!["en".into()];
+    let discovery = discovery(query(), vec![foreign, matching], 0);
+    let request = crate::PlaybackPreferences {
+        preferred_language: Some("EN-us".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        discovery.recommendation(&request, |_| true),
+        Some(discovery.rows()[1].index)
+    );
+}
+
+#[test]
+fn episode_recommendations_reject_mismatched_missing_and_possible_scope() {
+    let mut query = query();
+    query.kind = MediaKind::Series;
+    query.episode = kadr_core::torrent::EpisodeNumber::new(2, 3);
+    let mut exact = source(1, Some(1));
+    exact.kind = MediaKind::Series;
+    exact.episode = query.episode;
+    let mut missing = exact.clone();
+    missing.locator = Locator::TorrentUrl("https://example.org/missing".into());
+    missing.episode = None;
+    missing.seeds = Some(100);
+    let mut other = exact.clone();
+    other.locator = Locator::TorrentUrl("https://example.org/other".into());
+    other.episode = kadr_core::torrent::EpisodeNumber::new(2, 4);
+    let mut possible = exact.clone();
+    possible.locator = Locator::TorrentUrl("https://example.org/possible".into());
+    possible.possible_match = true;
+    let discovery = discovery(query, vec![missing, other, possible, exact], 0);
+    let winner = discovery.recommended_handle().unwrap();
+    let source = &discovery
+        .current
+        .as_ref()
+        .unwrap()
+        .ranked
+        .iter()
+        .find(|(handle, _)| *handle == winner)
+        .unwrap()
+        .1;
+    assert_eq!(source.seeds, Some(1));
+    assert_eq!(
+        source.locator,
+        Locator::TorrentUrl("https://example.org/download?id=1".into())
+    );
+}
+
+#[test]
+fn exact_rutracker_episode_is_rechecked_without_fabricating_provider_episode_metadata() {
+    let mut query = query();
+    query.kind = MediaKind::Series;
+    query.episode = kadr_core::torrent::EpisodeNumber::new(2, 3);
+    let mut exact = MediaSource::new(
+        "rutracker",
+        Locator::RuTracker(42),
+        "The Thing S02E03 [1982]",
+        MediaKind::Series,
+    )
+    .unwrap();
+    exact.seeds = Some(1);
+    let mut pack = MediaSource::new(
+        "rutracker",
+        Locator::RuTracker(43),
+        "The Thing S02 [1982]",
+        MediaKind::Series,
+    )
+    .unwrap();
+    pack.seeds = Some(100);
+    let rows = matched(&query, "rutracker", vec![pack, exact]);
+    let discovery = discovery(query, rows, 0);
+    let handle = discovery.recommended_handle().unwrap();
+    assert_eq!(
+        discovery
+            .current
+            .as_ref()
+            .unwrap()
+            .ranked
+            .iter()
+            .find(|(candidate, _)| *candidate == handle)
+            .unwrap()
+            .1
+            .locator,
+        Locator::RuTracker(42)
+    );
+}
+
+#[test]
+fn only_reviewed_commons_http_identity_is_eligible_without_media_probes() {
+    let mut query = query();
+    query.title = "Big Buck Bunny".into();
+    query.year = Some(2008);
+    query.external = ExternalMetadata {
+        imdb_id: Some("tt1254207".into()),
+        tmdb_id: Some(10378),
+        alternative_titles: Vec::new(),
+    };
+    let mut trusted = MediaSource::new(
+        kadr_catalog::commons::ID,
+        Locator::Http("https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.1080p.vp9.webm".into()),
+        query.title.clone(),
+        MediaKind::Movie,
+    )
+    .unwrap();
+    trusted.year = query.year;
+    trusted.external = query.external.clone();
+    trusted.provider_item_id = Some("40108642:1080p.vp9.webm".into());
+    trusted.resolution = Some(1080);
+    trusted.video_codec = Some("VP9".into());
+    trusted.audio_codec = Some("Opus".into());
+    trusted.license = Some("(c) copyright Blender Foundation | www.bigbuckbunny.org — Big Buck Bunny; https://commons.wikimedia.org/wiki/File:Big_Buck_Bunny_4K.webm — CC BY 3.0 https://creativecommons.org/licenses/by/3.0".into());
+    let trusted = trusted.normalize().unwrap();
+    assert!(kadr_catalog::commons::accepts(&trusted));
+    let mut forged_url = trusted.clone();
+    forged_url.locator = Locator::Http("https://example.org/video.webm".into());
+    let mut forged_license = trusted.clone();
+    forged_license.license = Some("CC".into());
+    let mut untrusted_provider = trusted.clone();
+    untrusted_provider.provider = "torznab:fixture".into();
+    for forged in [forged_url, forged_license, untrusted_provider] {
+        assert_eq!(
+            discovery(query.clone(), vec![forged], 0).recommended_handle(),
+            None
+        );
+    }
+    let mut manual = trusted.clone();
+    manual.provider = "manual-http".into();
+    manual.origins = vec!["manual-http".into()];
+    manual.match_score = 100;
+    manual.license = None;
+    let duplicates = discovery(query.clone(), vec![trusted.clone(), manual], 0);
+    assert_eq!(duplicates.rows().len(), 1);
+    let preferences = crate::PlaybackPreferences {
+        preferred_resolution: Some("1080p".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        duplicates.recommendation(&preferences, kadr_catalog::commons::accepts),
+        Some(duplicates.rows()[0].index),
+        "dedup display metadata cannot revoke original Commons authority"
+    );
+    let discovery = discovery(query, vec![trusted], 0);
+    let winner = discovery.recommended_handle().unwrap();
+    let source = &discovery
+        .current
+        .as_ref()
+        .unwrap()
+        .ranked
+        .iter()
+        .find(|(handle, _)| *handle == winner)
+        .unwrap()
+        .1;
+    assert!(kadr_catalog::commons::accepts(source));
+    assert_eq!(
+        source.seeds, None,
+        "HTTP availability does not invent torrent seeds"
+    );
 }
 
 #[test]

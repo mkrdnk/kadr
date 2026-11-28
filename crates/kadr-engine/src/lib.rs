@@ -16,7 +16,7 @@ mod worker;
 
 pub use dto::{
     CacheUsage, EngineDirectories, LibraryEpisode, LibraryItem, LibraryProgress, NetworkLimits,
-    PlayerPreference, RateLimit, Settings, SourceCandidate,
+    PlaybackPreferences, PlayerPreference, RateLimit, Settings, SourceCandidate,
 };
 pub use kadr_catalog::BrowseCatalog;
 pub use kadr_core::source;
@@ -31,7 +31,9 @@ pub use kadr_storage::{SourcePreferences, TorznabConfig};
 /// use kadr_engine::catalog::SourceCandidate;
 /// ```
 pub mod catalog {
-    pub use kadr_catalog::is_public_catalog_image;
+    pub use kadr_catalog::{
+        CatalogPage, CatalogQuery, CatalogSort, Genre, YearRange, is_public_catalog_image,
+    };
     pub use kadr_core::catalog::{Episode, Media, MediaKind};
 
     /// A separate, disposable cache for public artwork, outside the torrent cache.
@@ -99,14 +101,23 @@ pub enum Event {
         settings: Settings,
         message: String,
     },
+    SidebarCollapsed(bool),
     Status(Level, String),
     PlaybackActive(bool),
-    /// A requested movie release needs a file choice, login, or another source.
+    /// A requested release needs a file choice, login, or another source.
     MovieWatchNeedsInput(DiscoveryStamp),
     BrowseState(AsyncState<BrowseCatalog>),
+    CatalogPage {
+        request: u64,
+        result: Result<catalog::CatalogPage, String>,
+    },
+    CatalogGenres {
+        kind: catalog::MediaKind,
+        result: Result<Vec<catalog::Genre>, String>,
+    },
     SearchState(AsyncState<Vec<Media>>),
     MediaSelected {
-        media: Option<Media>,
+        media: Option<Box<Media>>,
         favorite: bool,
         episode: Option<(u16, u16)>,
     },
@@ -125,6 +136,10 @@ pub enum Event {
         notices: Vec<String>,
     },
     SourcePreferences(SourcePreferences),
+    PlaybackRecommendation {
+        stamp: DiscoveryStamp,
+        index: Option<usize>,
+    },
     RuTrackerLogin {
         message: Option<String>,
         pending: bool,
@@ -154,6 +169,11 @@ pub enum Level {
 pub enum Command {
     /// Fetch bounded provider shelves in response to explicit user action.
     Browse,
+    CatalogPage {
+        request: u64,
+        query: catalog::CatalogQuery,
+    },
+    CatalogGenres(catalog::MediaKind),
     Search(String),
     /// Supply a local Trakt card to command-boundary tests without API credentials.
     #[cfg(test)]
@@ -163,12 +183,28 @@ pub enum Command {
     PrefetchMovieSources(String),
     CancelMoviePrefetch,
     FindSources,
+    DiscoverOnOpen,
     RetrySources,
     SelectEpisode(u16, u16),
     SelectSource(ManualSource),
+    ImportSource {
+        source: ManualSource,
+        attach: bool,
+    },
     ChooseSource(usize),
     /// Explicit Watch action, bound to the winning handle of a completed search.
     WatchRelease(usize),
+    RecommendPlayback(PlaybackPreferences),
+    WatchRecommended {
+        index: usize,
+        preferences: PlaybackPreferences,
+        resume: bool,
+    },
+    WatchSource {
+        index: usize,
+        preferences: PlaybackPreferences,
+        resume: bool,
+    },
     /// Submit the user's own credentials. The command intentionally has no Debug.
     SignInRuTracker {
         username: String,
@@ -180,6 +216,10 @@ pub enum Command {
     Play {
         resume: bool,
     },
+    PlayWithPreferences {
+        resume: bool,
+        preferences: PlaybackPreferences,
+    },
     Stop,
     OpenIn(PlayerPreference),
     SaveTo(PathBuf),
@@ -189,10 +229,12 @@ pub enum Command {
     },
     OpenLibrary(String),
     UpdateSettings(Settings),
+    SetSidebarCollapsed(bool),
     SetSourcePreferences(SourcePreferences),
     ClearCache,
     ClearHistory,
     UnlinkMedia,
+    CancelSources,
     Cancel,
 }
 
@@ -206,6 +248,8 @@ pub struct Engine {
     commands: mpsc::Sender<Request>,
     shutdown: CancellationToken,
     browse_stop: CancellationToken,
+    catalog_pages: [CancellationToken; 2],
+    genre_stop: CancellationToken,
     catalog_stop: CancellationToken,
     movie_prefetch_stop: CancellationToken,
     source_stop: CancellationToken,
@@ -285,6 +329,8 @@ impl Engine {
             Self {
                 commands,
                 browse_stop: shutdown.child_token(),
+                catalog_pages: std::array::from_fn(|_| shutdown.child_token()),
+                genre_stop: shutdown.child_token(),
                 movie_prefetch_stop: catalog_stop.child_token(),
                 catalog_stop,
                 source_stop: shutdown.child_token(),
@@ -323,7 +369,20 @@ impl Engine {
                 self.browse_stop = self.shutdown.child_token();
                 self.browse_stop.clone()
             }
-            Command::FindSources => {
+            Command::CatalogPage { query, .. } => {
+                let stop =
+                    &mut self.catalog_pages[usize::from(query.kind == catalog::MediaKind::Series)];
+                stop.cancel();
+                *stop = self.shutdown.child_token();
+                stop.clone()
+            }
+            Command::CatalogGenres(_) => {
+                if self.genre_stop.is_cancelled() {
+                    self.genre_stop = self.shutdown.child_token();
+                }
+                self.genre_stop.child_token()
+            }
+            Command::FindSources | Command::DiscoverOnOpen => {
                 // The worker coalesces repeated clicks for the current target.
                 self.source_stop.cancel();
                 if self.catalog_stop.is_cancelled() {
@@ -348,6 +407,7 @@ impl Engine {
                 self.catalog_stop.clone()
             }
             Command::SelectSource(_)
+            | Command::ImportSource { .. }
             | Command::ChooseSource(_)
             | Command::OpenLibrary(_)
             | Command::SignInRuTracker { .. }
@@ -358,7 +418,11 @@ impl Engine {
                 self.source_stop = self.shutdown.child_token();
                 self.source_stop.clone()
             }
-            Command::Play { .. } | Command::WatchRelease(_) => {
+            Command::Play { .. }
+            | Command::PlayWithPreferences { .. }
+            | Command::WatchRelease(_)
+            | Command::WatchRecommended { .. }
+            | Command::WatchSource { .. } => {
                 self.playback_stop.cancel();
                 self.playback_stop = self.shutdown.child_token();
                 self.playback_stop.clone()
@@ -387,6 +451,11 @@ impl Engine {
                 self.save_stop.cancel();
                 self.shutdown.child_token()
             }
+            Command::CancelSources => {
+                self.catalog_stop.cancel();
+                self.source_stop.cancel();
+                self.shutdown.child_token()
+            }
             Command::SetSourcePreferences(_) => {
                 self.catalog_stop.cancel();
                 self.source_stop.cancel();
@@ -395,6 +464,10 @@ impl Engine {
             Command::UpdateSettings(settings) => {
                 if !settings.catalog_enabled {
                     self.browse_stop.cancel();
+                    for stop in &self.catalog_pages {
+                        stop.cancel();
+                    }
+                    self.genre_stop.cancel();
                     self.catalog_stop.cancel();
                 }
                 if !settings.network.torrents_enabled {

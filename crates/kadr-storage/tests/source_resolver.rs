@@ -17,6 +17,7 @@ fn preferences() -> SourcePreferences {
         rutracker_enabled: false,
         commons_enabled: false,
         popcorn_enabled: false,
+        auto_discover: false,
         torznab: vec![
             config("https://private.example/indexer/api"),
             TorznabConfig {
@@ -35,6 +36,7 @@ fn downgrade_to_v6(raw: &Connection) {
         "DROP TABLE source_cache;
          DROP TABLE torznab_configs;
          DROP TABLE source_preferences;
+         ALTER TABLE settings DROP COLUMN sidebar_collapsed;
          PRAGMA user_version = 6;",
     )
     .unwrap();
@@ -60,6 +62,11 @@ fn downgrade_to_v8(raw: &Connection) {
 
 fn downgrade_to_v9(raw: &Connection) {
     // v10 changes consent data only; v9 has the same schema.
+    raw.execute_batch(
+        "ALTER TABLE settings DROP COLUMN sidebar_collapsed;
+         ALTER TABLE source_preferences DROP COLUMN auto_discover;",
+    )
+    .unwrap();
     raw.pragma_update(None, "user_version", 9).unwrap();
 }
 
@@ -112,7 +119,7 @@ fn v9_upgrade_resets_only_popcorn_consent_and_v10_reopening_preserves_new_opt_in
                 assert_eq!(
                     raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                         .unwrap(),
-                    10
+                    SCHEMA_VERSION
                 );
                 drop(raw);
 
@@ -466,6 +473,7 @@ fn preferences_defaults_round_trip_and_do_not_change_settings() {
     assert!(SourcePreferences::default().rutracker_enabled);
     assert!(SourcePreferences::default().commons_enabled);
     assert!(!SourcePreferences::default().popcorn_enabled);
+    assert!(!SourcePreferences::default().auto_discover);
     let settings = Settings {
         catalog_enabled: false,
         ..Settings::default()

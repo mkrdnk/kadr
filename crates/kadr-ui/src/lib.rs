@@ -5,14 +5,22 @@
 //! Setters and rendering perform no IO. Leaving Sources or an explicit movie
 //! watch emits cancellation so the controller can discard stale responses.
 
+mod cards;
+mod catalog_page;
 mod cinema;
+mod detail;
 mod dialogs;
 mod icons;
 mod input;
+mod modal;
 mod model;
+mod navigation;
 mod screens;
+mod source_dialog;
 mod source_preferences;
 
+pub use catalog_page::{CatalogGenre, CatalogPage, CatalogRequest, CatalogSort};
+pub use detail::{DetailRating, EpisodeProgress, PlaybackProgress};
 pub use icons::IconAssets;
 pub use model::*;
 
@@ -55,7 +63,12 @@ pub struct KadrView {
     detail_open: bool,
     detail_from: Section,
     modal_from: Option<Section>,
-    catalog_order: cinema::CatalogOrder,
+    modal_focus: modal::ModalFocus,
+    source_dialog: source_dialog::SourceDialogState,
+    sidebar_collapsed: bool,
+    catalogs: catalog_page::CatalogState,
+    detail: detail::DetailState,
+    remembered_episodes: std::collections::HashMap<String, (u16, u16)>,
     search_focus: bool,
     search_last: String,
     search_cursor: usize,
@@ -83,8 +96,18 @@ enum Command {
     Emit(UiEvent),
     Search,
     OpenSearch,
+    OpenSource,
+    ToggleSidebar,
     CloseOverlay,
-    CycleCatalogOrder,
+    Catalog(MediaKind, catalog_page::CatalogAction),
+    SourceDialog(source_dialog::SourceDialogCommand),
+    SelectDetailSeason(u16),
+    ToggleDetailSeasons,
+    SetDetailResolution(Option<String>),
+    SetDetailLanguage(Option<String>),
+    SetDetailSubtitlesOff(bool),
+    WatchDetail,
+    WatchDetailFromStart,
     SourceQuality(SourceQuality),
     ToggleSourceOrder,
     SavePreferences,
@@ -97,6 +120,7 @@ enum Command {
     DismissRuTracker,
     SaveSourcePreferences,
     ToggleCommons,
+    ToggleAutoDiscover,
     ToggleRuTracker,
     TogglePopcorn,
     AddTorznab,
@@ -157,19 +181,6 @@ impl SourceGroup {
             Self::Suitable
         }
     }
-
-    fn heading(self) -> &'static str {
-        match self {
-            Self::Suitable => "Подходящие источники",
-            Self::Possible => "Возможные совпадения",
-        }
-    }
-
-    fn explanation(self) -> Option<&'static str> {
-        (self == Self::Possible).then_some(
-            "Название похоже, год или эпизод не подтверждён. Проверьте раздачу и выберите источник вручную.",
-        )
-    }
 }
 
 impl KadrView {
@@ -192,6 +203,62 @@ impl KadrView {
                 .media
                 .as_ref()
                 .is_some_and(|media| media.kind == MediaKind::Movie)
+    }
+
+    pub fn detail_visible(&self) -> bool {
+        self.detail_open && self.modal_from.is_none()
+    }
+
+    pub fn set_sidebar_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
+        self.sidebar_collapsed = collapsed;
+        cx.notify();
+    }
+
+    pub fn set_catalog_years(&mut self, years: Vec<u16>, cx: &mut Context<Self>) {
+        self.catalogs.set_years(years);
+        cx.notify();
+    }
+
+    pub fn set_catalog_page(
+        &mut self,
+        request: &CatalogRequest,
+        result: Result<CatalogPage, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = match result {
+            Ok(page) => self.catalogs.apply_page(request, page),
+            Err(error) => self.catalogs.apply_failure(request, error),
+        };
+        if changed {
+            cx.notify();
+        }
+    }
+
+    pub fn set_catalog_genres_loading(&mut self, kind: MediaKind, cx: &mut Context<Self>) {
+        self.catalogs.set_genres_loading(kind);
+        cx.notify();
+    }
+
+    pub fn set_catalog_genres(
+        &mut self,
+        kind: MediaKind,
+        result: Result<Vec<CatalogGenre>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(genres) => self.catalogs.set_genres(kind, genres),
+            Err(error) => self.catalogs.set_genres_error(kind, error),
+        }
+        cx.notify();
+    }
+
+    pub fn playback_options(&self) -> PlaybackOptions {
+        PlaybackOptions {
+            preferred_resolution: self.detail.preferred_resolution.clone(),
+            preferred_language: self.detail.preferred_language.clone(),
+            subtitles_off: self.detail.subtitles_off
+                && self.model.default_player != PlayerChoice::Browser,
+        }
     }
 
     fn record_navigation(&mut self) {
@@ -230,6 +297,10 @@ impl KadrView {
     pub fn set_preparing(&mut self, preparing: bool, cx: &mut Context<Self>) {
         self.model.preparing = preparing;
         cx.notify();
+    }
+
+    pub fn is_preparing(&self) -> bool {
+        self.model.preparing
     }
 
     /// Acknowledge the explicit movie-watch intent. The UI sets this before
@@ -281,6 +352,10 @@ impl KadrView {
             self.run_command(&Command::OpenSearch, cx);
             return;
         }
+        if section == Section::Sources {
+            self.run_command(&Command::OpenSource, cx);
+            return;
+        }
         if self.model.section == section {
             if self.detail_open {
                 self.cancel_detail_sources(cx);
@@ -288,8 +363,6 @@ impl KadrView {
             // Even before the details reply, navigating to the same section
             // invalidates the pending card's permission to prefetch.
             self.record_navigation();
-        } else if self.detail_open && section == Section::Sources && !self.source_work_active() {
-            self.cancel_detail_sources(cx);
         }
         self.modal_from = None;
         self.change_section(section, cx);
@@ -319,7 +392,7 @@ impl KadrView {
         if next == self.model.section {
             None
         } else if self.model.movie_watch_pending
-            || (self.model.section == Section::Sources && self.source_work_active())
+            || (next != Section::Sources && self.source_work_active())
         {
             Some(UiEvent::Cancel(Section::Sources))
         } else if self.detail_open && next != Section::Sources {
@@ -331,16 +404,22 @@ impl KadrView {
 
     fn source_work_active(&self) -> bool {
         self.model.movie_watch_pending
-            || self.model.discovering()
+            || self.model.source_discovery_starting
+            || self
+                .model
+                .source_discovery
+                .as_ref()
+                .is_some_and(|value| value.pending > 0)
             || self.rutracker_login.is_some()
-            || matches!(
-                self.model.states[Section::Sources.index()],
-                SectionState::Loading(_)
-            )
+            || (!self.model.discovering()
+                && matches!(
+                    self.model.states[Section::Sources.index()],
+                    SectionState::Loading(_)
+                ))
     }
 
     fn cancel_detail_sources(&mut self, cx: &mut Context<Self>) {
-        if self.source_work_active() {
+        if self.source_work_active() || self.model.discovering() {
             self.model.movie_watch_pending = false;
             self.clear_rutracker_login(cx);
             cx.emit(UiEvent::Cancel(Section::Sources));
@@ -371,24 +450,29 @@ impl KadrView {
     /// The controller must also clear its automatic watch intent before calling.
     pub fn show_source_overlay(&mut self, cx: &mut Context<Self>) {
         self.model.movie_watch_pending = false;
+        self.source_dialog.show_picker();
         self.show_overlay(Section::Sources, cx);
         cx.notify();
     }
 
+    pub fn close_source_after_launch(&mut self, cx: &mut Context<Self>) {
+        if self.model.section == Section::Sources
+            && let Some(section) = self.modal_from.take()
+        {
+            self.record_section_change(section);
+            self.clear_rutracker_login(cx);
+            cx.notify();
+        }
+    }
+
     fn dismiss_overlay(&mut self, cx: &mut Context<Self>) {
         if let Some(section) = self.modal_from.take() {
-            if self.returns_to_movie_with_results() {
+            if self.keep_sources_on_dismiss() {
                 // Closing the table is not leaving the movie. Keep its finished
                 // lookup for Watch, but never leave a pending watch/login running.
                 self.record_section_change(section);
                 cx.notify();
                 return;
-            }
-            // A card opened from Sources has the same section as its overlay.
-            // Closing that overlay still leaves discovery, but not a ready choice.
-            if self.model.section == Section::Sources && section == Section::Sources {
-                self.cancel_detail_sources(cx);
-                self.record_navigation();
             }
             if self.model.section == Section::Search
                 && matches!(
@@ -402,22 +486,9 @@ impl KadrView {
         }
     }
 
-    fn returns_to_movie_with_results(&self) -> bool {
-        self.detail_open
-            && self.model.section == Section::Sources
-            && self
-                .model
-                .media
-                .as_ref()
-                .is_some_and(|card| card.kind == MediaKind::Movie)
-            && self
-                .model
-                .source_discovery
-                .as_ref()
-                .is_some_and(|result| result.pending == 0)
-            && !self.model.movie_watch_pending
-            && self.rutracker_login.is_none()
-            && !self.model.source_discovery_starting
+    fn keep_sources_on_dismiss(&self) -> bool {
+        self.model.section == Section::Sources
+            && !self.source_work_active()
             && !self.model.preparing
     }
 
@@ -428,15 +499,18 @@ impl KadrView {
     }
 
     pub fn set_media_detail(&mut self, media: Option<MediaCard>, cx: &mut Context<Self>) {
-        self.clear_rutracker_login(cx);
         let changed = self.model.media.as_ref().map(|media| &media.id)
             != media.as_ref().map(|media| &media.id);
         if changed {
+            self.clear_rutracker_login(cx);
             self.detail_open = media.is_some() && self.page() == self.detail_from;
             self.model.selected_episode = None;
+            self.detail = detail::DetailState::default();
+            self.source_dialog.reset();
         }
         self.model.media = media;
         self.model.media_favorite = false;
+        self.refresh_detail_progress();
         cx.notify();
     }
 
@@ -447,7 +521,92 @@ impl KadrView {
 
     pub fn set_catalog_episode(&mut self, episode: Option<(u16, u16)>, cx: &mut Context<Self>) {
         self.model.selected_episode = episode;
+        if let Some(episode) = episode {
+            self.detail.selected_season = Some(episode.0);
+        }
+        self.refresh_detail_progress();
         cx.notify();
+    }
+
+    /// Prefer an explicit previous selection, then measured history, then a
+    /// regular episode. Specials never become the implicit default.
+    pub fn preferred_episode(&self) -> Option<(u16, u16)> {
+        let media = self.model.media.as_ref()?;
+        let valid = |key: (u16, u16)| {
+            media
+                .episodes
+                .iter()
+                .any(|row| (row.season, row.number) == key)
+        };
+        let regular = || {
+            media
+                .episodes
+                .iter()
+                .filter(|row| row.season > 0)
+                .map(|row| (row.season, row.number))
+        };
+        let next = |key| regular().filter(|candidate| *candidate > key).min();
+        if let Some(key) = self
+            .remembered_episodes
+            .get(&media.id)
+            .copied()
+            .filter(|key| valid(*key))
+        {
+            if key.0 > 0
+                && self.model.library.iter().any(|row| {
+                    row.media_id == media.id && row.episode == Some(key) && row.completed
+                })
+            {
+                return next(key).or(Some(key));
+            }
+            return Some(key);
+        }
+        let last = self
+            .model
+            .library
+            .iter()
+            .filter(|row| row.media_id == media.id && (row.can_resume() || row.completed))
+            .filter(|row| row.episode.is_some_and(|key| key.0 > 0 && valid(key)))
+            .max_by_key(|row| row.opened_at);
+        if let Some(row) = last
+            && let Some(key) = row.episode
+        {
+            if row.can_resume() {
+                return Some(key);
+            }
+            return next(key).or(Some(key));
+        }
+        regular().min()
+    }
+
+    fn refresh_detail_progress(&mut self) {
+        let Some(media) = &self.model.media else {
+            return;
+        };
+        let progress = |row: &LibraryRow| PlaybackProgress {
+            position: row.position,
+            duration: row.duration,
+            completed: row.completed,
+        };
+        self.detail.progress = self
+            .model
+            .library
+            .iter()
+            .find(|row| row.media_id == media.id && row.episode == self.model.selected_episode)
+            .map(progress);
+        self.detail.episode_progress = self
+            .model
+            .library
+            .iter()
+            .filter_map(|row| {
+                let (season, number) = row.episode?;
+                (row.media_id == media.id).then(|| EpisodeProgress {
+                    season,
+                    number,
+                    progress: progress(row),
+                })
+            })
+            .collect();
     }
 
     pub fn set_cache_directory(&mut self, directory: String, cx: &mut Context<Self>) {
@@ -479,6 +638,7 @@ impl KadrView {
     /// Initial discovery before the controller knows how many providers will run.
     /// Unlike preparation, this keeps manual source actions and arrived rows usable.
     pub fn begin_source_discovery(&mut self, cx: &mut Context<Self>) {
+        self.source_dialog.reset();
         self.model.source_discovery = None;
         self.model.source_discovery_starting = true;
         cx.notify();
@@ -557,6 +717,7 @@ impl KadrView {
 
     pub fn set_library(&mut self, rows: Vec<LibraryRow>, cx: &mut Context<Self>) {
         self.model.library = rows;
+        self.refresh_detail_progress();
         cx.notify();
     }
 
@@ -570,6 +731,7 @@ impl KadrView {
             inputs.set_preferences(&preferences, cx);
         }
         if !preferences.catalog_enabled {
+            self.catalogs.reset();
             self.model.movies.clear();
             self.model.shows.clear();
             self.model.results.clear();
@@ -583,6 +745,13 @@ impl KadrView {
         cx.notify();
     }
 
+    fn accepts(&self, event: &UiEvent) -> bool {
+        match event {
+            UiEvent::OpenMedia(id) => self.model.can_open_media(id, || self.catalogs.contains(id)),
+            _ => self.model.accepts(event),
+        }
+    }
+
     fn run_command(&mut self, command: &Command, cx: &mut Context<Self>) {
         match command {
             Command::Navigate(Section::Search) | Command::OpenSearch => {
@@ -592,22 +761,83 @@ impl KadrView {
             }
             Command::Navigate(section) => {
                 self.show_section(*section, cx);
-                if matches!(section, Section::Movies | Section::Shows)
-                    && self.preferences_loaded
-                    && self.applied_catalog_enabled
-                    && self.model.movies.is_empty()
-                    && self.model.shows.is_empty()
-                    && matches!(self.model.browse_state, SectionState::Empty(_))
+                if self.applied_catalog_enabled
+                    && self.model.preferences.catalog_enabled
+                    && let Some(kind) = catalog_kind(*section)
                 {
-                    cx.emit(UiEvent::Browse);
+                    if let Some(request) = self.catalogs.ensure(kind) {
+                        cx.emit(UiEvent::CatalogPage(request));
+                    }
+                    cx.emit(UiEvent::CatalogGenres(kind));
                 }
+            }
+            Command::OpenSource => {
+                self.run_source_dialog_command(&source_dialog::SourceDialogCommand::OpenImport, cx)
+            }
+            Command::ToggleSidebar => {
+                cx.emit(UiEvent::SetSidebarCollapsed(!self.sidebar_collapsed))
+            }
+            Command::CloseOverlay if self.model.preparing => {
+                self.run_command(&Command::Emit(UiEvent::Stop), cx);
             }
             Command::CloseOverlay => {
                 self.record_navigation();
                 self.dismiss_overlay(cx);
             }
-            Command::CycleCatalogOrder => {
-                self.catalog_order.cycle();
+            Command::Catalog(kind, action) => {
+                if self.applied_catalog_enabled
+                    && self.model.preferences.catalog_enabled
+                    && let Some(request) = self.catalogs.dispatch(*kind, action.clone())
+                {
+                    cx.emit(UiEvent::CatalogPage(request));
+                }
+                cx.notify();
+            }
+            Command::SourceDialog(command) => self.run_source_dialog_command(command, cx),
+            Command::WatchDetail | Command::WatchDetailFromStart => self.run_command(
+                &Command::Emit(UiEvent::WatchDetail {
+                    resume: matches!(command, Command::WatchDetail),
+                    preferences: self.playback_options(),
+                }),
+                cx,
+            ),
+            Command::SetDetailResolution(value) => {
+                self.detail.preferred_resolution = value.clone();
+                cx.notify();
+            }
+            Command::SetDetailLanguage(value) => {
+                self.detail.preferred_language = value.clone();
+                cx.notify();
+            }
+            Command::SetDetailSubtitlesOff(off) => {
+                self.detail.subtitles_off = *off;
+                cx.notify();
+            }
+            Command::SelectDetailSeason(season) => {
+                self.detail.season_menu = false;
+                if let Some(number) = self.model.media.as_ref().and_then(|media| {
+                    media
+                        .episodes
+                        .iter()
+                        .filter(|episode| episode.season == *season)
+                        .map(|episode| episode.number)
+                        .min()
+                }) {
+                    self.detail.selected_season = Some(*season);
+                    if self.model.selected_episode.map(|key| key.0) != Some(*season) {
+                        self.run_command(
+                            &Command::Emit(UiEvent::SelectEpisode {
+                                season: *season,
+                                number,
+                            }),
+                            cx,
+                        );
+                    }
+                    cx.notify();
+                }
+            }
+            Command::ToggleDetailSeasons => {
+                self.detail.season_menu = !self.detail.season_menu;
                 cx.notify();
             }
             Command::SourceQuality(quality) => {
@@ -618,12 +848,14 @@ impl KadrView {
                 self.source_order_seeds = !self.source_order_seeds;
                 cx.notify();
             }
-            Command::Emit(event) if self.model.accepts(event) => {
+            Command::Emit(event) if self.accepts(event) => {
                 if matches!(
                     event,
                     UiEvent::ChooseSource(_)
+                        | UiEvent::WatchSource(_)
                         | UiEvent::ChooseTorrentFile(_)
                         | UiEvent::WatchMovie
+                        | UiEvent::WatchDetail { .. }
                         | UiEvent::FindSources
                         | UiEvent::SelectEpisode { .. }
                         | UiEvent::UnlinkMedia
@@ -636,8 +868,8 @@ impl KadrView {
                     cx.notify();
                 }
                 match event {
-                    UiEvent::WatchMovie | UiEvent::FindSources => {
-                        self.model.movie_watch_pending = matches!(event, UiEvent::WatchMovie);
+                    UiEvent::WatchMovie | UiEvent::WatchDetail { .. } | UiEvent::FindSources => {
+                        self.model.movie_watch_pending = !matches!(event, UiEvent::FindSources);
                         self.source_quality = SourceQuality::All;
                         self.source_order_seeds = false;
                         cx.notify();
@@ -659,8 +891,12 @@ impl KadrView {
                         self.change_section(self.detail_from, cx);
                     }
                     UiEvent::SelectEpisode { season, number } => {
-                        self.model.selected_episode = Some((*season, *number));
-                        cx.notify();
+                        self.model.movie_watch_pending = false;
+                        if let Some(media) = &self.model.media {
+                            self.remembered_episodes
+                                .insert(media.id.clone(), (*season, *number));
+                        }
+                        self.set_catalog_episode(Some((*season, *number)), cx);
                     }
                     UiEvent::ChooseTorrentFile(index) => {
                         self.model.selected_file = Some(*index);
@@ -699,6 +935,10 @@ impl KadrView {
             }
             Command::ToggleCommons => {
                 self.source_preferences.toggle_commons();
+                cx.notify();
+            }
+            Command::ToggleAutoDiscover => {
+                self.source_preferences.toggle_auto_discover();
                 cx.notify();
             }
             Command::ToggleRuTracker => {
@@ -809,156 +1049,6 @@ impl KadrView {
             })
     }
 
-    fn navigation(&self, width: f32, cx: &mut Context<Self>) -> Div {
-        let compact = width <= 900.;
-        let rail = sidebar_width(width);
-        let page = self.page();
-        div()
-            .flex()
-            .flex_col()
-            .flex_shrink_0()
-            .w(px(rail))
-            .px(px(if compact { 8. } else { 13. }))
-            .pt(px(20.))
-            .pb(px(12.))
-            .bg(rgb(SIDEBAR))
-            .border_r_1()
-            .border_color(rgb(0x2a2a2e))
-            .child(
-                self.action("brand", Command::Navigate(Section::Home), true, cx)
-                    .flex()
-                    .items_center()
-                    .gap(px(0.))
-                    .when(compact, |brand| brand.justify_center())
-                    .px(px(7.))
-                    .mb(px(17.))
-                    .text_size(px(if compact { 22. } else { 29. }))
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .child(if compact { "k" } else { "kadr" })
-                    .child(div().text_color(rgb(ACCENT)).child(".")),
-            )
-            .child(
-                self.action("open-search", Command::OpenSearch, true, cx)
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .h(px(34.))
-                    .px(px(8.))
-                    .mb(px(14.))
-                    .rounded(px(6.))
-                    .border_1()
-                    .border_color(rgb(0x2d2d31))
-                    .bg(rgb(0x242428))
-                    .text_color(rgb(MUTED))
-                    .text_size(px(13.))
-                    .when(compact, |item| item.justify_center())
-                    .child(icon("search", 17., MUTED))
-                    .when(!compact, |item| {
-                        item.child(div().flex_1().child("Поиск")).child(
-                            div().text_size(px(10.)).text_color(rgb(DIM)).child(
-                                if cfg!(target_os = "macos") {
-                                    "⌘ K"
-                                } else {
-                                    "Ctrl K"
-                                },
-                            ),
-                        )
-                    })
-                    .hover(|item| item.bg(rgb(HOVER))),
-            )
-            .children(
-                [Section::Home, Section::Movies, Section::Shows]
-                    .into_iter()
-                    .map(|section| self.nav_item(section, page == section, compact, cx)),
-            )
-            .when(!compact, |rail| {
-                rail.child(eyebrow("БИБЛИОТЕКА").ml(px(9.)).mt(px(24.)).mb(px(7.)))
-            })
-            .children(
-                [Section::Library, Section::History, Section::Transfers]
-                    .into_iter()
-                    .map(|section| self.nav_item(section, page == section, compact, cx)),
-            )
-            .child(div().flex_1())
-            .child(self.nav_item(Section::Sources, page == Section::Sources, compact, cx))
-            .child(self.nav_item(Section::Settings, page == Section::Settings, compact, cx))
-            .child(
-                self.action(
-                    "player-chip",
-                    Command::Navigate(Section::Settings),
-                    true,
-                    cx,
-                )
-                .flex()
-                .items_center()
-                .gap(px(9.))
-                .border_t_1()
-                .border_color(rgb(0x29292d))
-                .mt(px(12.))
-                .pt(px(13.))
-                .px(px(8.))
-                .when(compact, |item| item.justify_center())
-                .child(status_dot())
-                .when(!compact, |item| {
-                    item.child(
-                        div()
-                            .flex_1()
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .child(self.model.default_player.label()),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(DIM))
-                                    .child("Плеер по умолчанию"),
-                            ),
-                    )
-                    .child(icon("chevron", 14., DIM))
-                }),
-            )
-    }
-
-    fn nav_item(
-        &self,
-        section: Section,
-        selected: bool,
-        compact: bool,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let glyph = match section {
-            Section::Home => "home",
-            Section::Movies => "film",
-            Section::Shows => "tv",
-            Section::Search => "search",
-            Section::Library => "bookmark",
-            Section::History => "clock",
-            Section::Transfers => "download",
-            Section::Sources => "link",
-            Section::Settings => "settings",
-        };
-        let fg = if selected { TEXT } else { MUTED };
-        self.action(section.id(), Command::Navigate(section), true, cx)
-            .flex()
-            .items_center()
-            .gap(px(10.))
-            .rounded(px(5.))
-            .h(px(34.))
-            .my(px(1.))
-            .px(px(9.))
-            .text_size(px(13.))
-            .text_color(rgb(fg))
-            .when(compact, |item| item.justify_center())
-            .when(selected, |item| {
-                item.bg(rgb(HOVER)).border_l_2().border_color(rgb(ACCENT))
-            })
-            .focus(|item| item.bg(rgb(HOVER)).border_l_2().border_color(rgb(ACCENT)))
-            .hover(|item| item.bg(rgb(if selected { HOVER } else { 0x242428 })))
-            .child(icon(glyph, 17., fg))
-            .when(!compact, |item| item.child(section.title()))
-    }
-
     fn state_card(&self, section: Section, cx: &mut Context<Self>) -> Div {
         let state = &self.model.states[section.index()];
         let color = match state {
@@ -1008,163 +1098,11 @@ impl KadrView {
         self.button(
             "go-to-sources",
             "Открыть свой источник",
-            Command::Navigate(Section::Sources),
+            Command::OpenSource,
             true,
             true,
             cx,
         )
-    }
-
-    fn sources(&self, cx: &mut Context<Self>) -> Div {
-        let can_paste = self.model.accepts(&UiEvent::PasteSource);
-        let can_open = self.model.accepts(&UiEvent::OpenTorrent);
-        let mut content = column()
-            .gap(px(12.))
-            .when(self.model.media.is_some(), |content| {
-                content.child(self.button(
-                    "refresh-sources",
-                    "Обновить источники",
-                    Command::Emit(UiEvent::Retry(Section::Sources)),
-                    false,
-                    self.model.accepts(&UiEvent::Retry(Section::Sources)),
-                    cx,
-                ))
-            })
-            .when(self.model.discovering(), |content| {
-                content.child(self.source_discovery_status(cx))
-            })
-            .when(self.rutracker_login.is_some(), |content| {
-                content.child(self.rutracker_login_form(cx))
-            })
-            .child(self.source_rows(cx))
-            .child(self.torrent_files(cx));
-        if let Some(source) = &self.model.source {
-            content = content.child(
-                panel()
-                    .child(eyebrow("ВЫБРАННЫЙ ИСТОЧНИК"))
-                    .child(div().text_lg().child(source.title.clone()))
-                    .child(body(source.kind.label()))
-                    .child(body(format!(
-                        "Плеер по умолчанию: {}",
-                        self.model.default_player.label()
-                    )))
-                    .child(
-                        div().flex().flex_wrap().gap_2().children(
-                            PlayerChoice::ALL
-                                .into_iter()
-                                .enumerate()
-                                .map(|(index, player)| {
-                                    self.button(
-                                        ("source-player", index),
-                                        player.label(),
-                                        Command::Emit(UiEvent::SetDefaultPlayer(player)),
-                                        self.model.default_player == player,
-                                        !self.model.playback_active,
-                                        cx,
-                                    )
-                                }),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .gap_2()
-                            .child(self.button(
-                                "play-source",
-                                if self.model.default_player == PlayerChoice::Mpv {
-                                    "Продолжить / смотреть"
-                                } else {
-                                    "Воспроизвести"
-                                },
-                                Command::Emit(UiEvent::Play),
-                                true,
-                                self.model.can_play(),
-                                cx,
-                            ))
-                            .when(self.model.default_player == PlayerChoice::Mpv, |buttons| {
-                                buttons.child(self.button(
-                                    "play-from-start",
-                                    "С начала",
-                                    Command::Emit(UiEvent::PlayFromStart),
-                                    false,
-                                    self.model.can_play(),
-                                    cx,
-                                ))
-                            })
-                            .child(self.button(
-                                "stop-source",
-                                "Остановить",
-                                Command::Emit(UiEvent::Stop),
-                                false,
-                                self.model.playback_active,
-                                cx,
-                            )),
-                    )
-                    .when(self.model.default_player == PlayerChoice::Mpv, |card| {
-                        card.child(body(
-                            "Если сохранена измеренная позиция mpv, обычный запуск продолжит \
-                             просмотр с неё. «С начала» запускает видео без возобновления.",
-                        ))
-                    })
-                    .when(!self.model.playback_available, |card| {
-                        card.child(body("Источник ещё не готов к запуску. Дождитесь проверки или выберите другой."))
-                    })
-                    .when(self.model.playback_active, |card| {
-                        card.child(body(
-                            "Сессия активна или запускается. Остановите её перед сменой источника.",
-                        ))
-                    }),
-            );
-        }
-        // A preview is a real controller-provided success state; don't also show
-        // the default "empty" card. Loading and errors remain visible.
-        if self.show_source_section_state()
-            && self.show_state(
-                Section::Sources,
-                self.model.source.is_some()
-                    || !self.model.sources.is_empty()
-                    || !self.model.files.is_empty(),
-            )
-        {
-            content = content.child(self.state_card(Section::Sources, cx));
-        }
-        content
-            .when(
-                self.model.default_player == PlayerChoice::Browser,
-                |content| content.child(browser_warning()),
-            )
-            .child(
-                div()
-                    .pt(px(11.))
-                    .border_t_1()
-                    .border_color(rgb(BORDER))
-                    .child(eyebrow("СВОЙ ИСТОЧНИК"))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .gap_2()
-                            .my(px(8.))
-                            .child(self.button(
-                                "paste-source",
-                                "Вставить ссылку",
-                                Command::Emit(UiEvent::PasteSource),
-                                false,
-                                can_paste,
-                                cx,
-                            ))
-                            .child(self.button(
-                                "open-torrent",
-                                "Открыть .torrent",
-                                Command::Emit(UiEvent::OpenTorrent),
-                                false,
-                                can_open,
-                                cx,
-                            )),
-                    )
-                    .child(source_disclosure()),
-            )
     }
 
     fn visible_sources(&self) -> Vec<&SourceRow> {
@@ -1193,68 +1131,6 @@ impl KadrView {
                 (!sources.is_empty()).then_some((group, sources))
             })
             .collect()
-    }
-
-    fn show_source_section_state(&self) -> bool {
-        !self.model.discovering()
-            || matches!(
-                self.model.states[Section::Sources.index()],
-                SectionState::Error(_) | SectionState::Unavailable(_)
-            )
-    }
-
-    fn source_discovery_status(&self, cx: &mut Context<Self>) -> Div {
-        let discovery = self.model.source_discovery.as_ref();
-        panel()
-            .child(eyebrow(if self.model.movie_watch_pending {
-                "Подбираем источник для просмотра…"
-            } else {
-                discovery.map_or("Поиск источников…", |discovery| {
-                    discovery.heading(!self.model.sources.is_empty())
-                })
-            }))
-            .when(self.model.movie_watch_pending, |card| {
-                card.child(body(
-                    "Дождитесь подбора источника и запуска плеера. Уход с карточки отменит запрос.",
-                ))
-            })
-            .when_some(discovery, |card, discovery| {
-                card.child(body(format!(
-                    "Ожидается: {} · Успешно: {} · Ошибок: {}",
-                    discovery.pending,
-                    discovery.succeeded,
-                    discovery.failures.len()
-                )))
-                .when(
-                    discovery.pending == 0
-                        && self.model.media.as_ref().is_some_and(|m| m.kind == MediaKind::Movie)
-                        && !self.model.sources.is_empty()
-                        && !self.model.sources.iter().any(|row| row.recommended),
-                    |card| card.child(body("Нет подходящей раздачи с известным числом сидов больше нуля. Выберите источник вручную.")),
-                )
-                .children(discovery.notices.iter().map(|message| body(message.clone())))
-                .children(
-                    discovery
-                        .failures
-                        .iter()
-                        .map(|message| div().text_color(rgb(WARNING)).child(body(message.clone()))),
-                )
-            })
-            .when(
-                self.model.movie_watch_pending
-                    || self.model.source_discovery_starting
-                    || discovery.is_some_and(|discovery| discovery.pending > 0),
-                |card| {
-                    card.child(self.button(
-                        "cancel-discovery",
-                        "Отменить поиск",
-                        Command::Emit(UiEvent::Cancel(Section::Sources)),
-                        false,
-                        true,
-                        cx,
-                    ))
-                },
-            )
     }
 
     fn settings(&self, cx: &mut Context<Self>) -> Div {
@@ -1340,12 +1216,16 @@ impl Render for KadrView {
             window.focus(&focus);
             self.focus = Some(focus);
         }
+        self.sync_source_dialog();
+        let modal_active = self.model.preparing || self.modal_from.is_some();
+        self.modal_focus.update(modal_active, window, cx);
         if self.search_focus && self.model.section == Section::Search {
             if let Some(inputs) = &self.inputs {
                 cx.focus_view(&inputs.search, window);
             }
             self.search_focus = false;
-        } else if self.model.section != Section::Search
+        } else if !modal_active
+            && self.model.section != Section::Search
             && self.inputs.as_ref().is_some_and(|inputs| {
                 inputs
                     .search
@@ -1374,7 +1254,8 @@ impl Render for KadrView {
         }
         // Restore shell navigation when the focused form (including its buttons)
         // disappears. GPUI cannot route keys to a removed focus node.
-        if (self.model.section != Section::Sources || self.rutracker_login.is_none())
+        if !modal_active
+            && (self.model.section != Section::Sources || self.rutracker_login.is_none())
             && self
                 .rutracker_focus
                 .as_ref()
@@ -1384,17 +1265,21 @@ impl Render for KadrView {
         }
         let viewport = window.viewport_size();
         let width = f32::from(viewport.width);
-        let content_width = width - sidebar_width(width);
+        let collapsed = self.sidebar_collapsed || width < 600.;
+        let content_width = (width - navigation::sidebar_width(width, collapsed)).max(1.);
         let section = self.page();
         let detail = self.detail_open && self.model.media.is_some();
+        let listing = (!detail).then(|| catalog_kind(section)).flatten();
+        let catalog_scroll = listing.map(|kind| self.catalogs.listing(kind).scroll().clone());
         let content = if detail {
             self.detail_page(content_width, cx)
         } else {
             match section {
-                Section::Home | Section::Search => self.home(content_width, cx),
-                Section::Movies | Section::Shows => self.catalog_page(section, content_width, cx),
+                Section::Home | Section::Search | Section::Sources => self.home(content_width, cx),
+                Section::Movies | Section::Shows => {
+                    self.render_catalog_page(section, content_width, cx)
+                }
                 Section::Library | Section::History => utility_page(section, self.library(cx)),
-                Section::Sources => utility_page(section, self.sources(cx)),
                 Section::Transfers => utility_page(section, self.transfers(cx)),
                 Section::Settings => utility_page(section, self.settings(cx)),
             }
@@ -1413,12 +1298,24 @@ impl Render for KadrView {
             .tab_stop(false)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
-                if !this.model.preparing && key == "k" && event.keystroke.modifiers.secondary() {
+                if key == "tab" && (this.model.preparing || this.modal_from.is_some()) {
+                    this.modal_focus
+                        .cycle(event.keystroke.modifiers.shift, window, cx);
+                } else if !this.model.preparing
+                    && key == "o"
+                    && event.keystroke.modifiers.secondary()
+                    && !event.is_held
+                {
+                    this.run_command(&Command::OpenSource, cx);
+                } else if !this.model.preparing
+                    && key == "k"
+                    && event.keystroke.modifiers.secondary()
+                {
                     this.run_command(&Command::OpenSearch, cx);
                 } else if key == "escape" && this.model.preparing {
                     this.run_command(&Command::Emit(UiEvent::Stop), cx);
                 } else if key == "escape" && this.modal_from.is_some() {
-                    this.dismiss_overlay(cx);
+                    this.run_command(&Command::CloseOverlay, cx);
                 } else if this.model.section == Section::Search && !this.model.preparing {
                     match key {
                         "up" | "down" => this.move_search_cursor(key == "down", cx),
@@ -1445,7 +1342,7 @@ impl Render for KadrView {
                 div()
                     .size_full()
                     .flex()
-                    .child(self.navigation(width, cx))
+                    .child(self.navigation(width, collapsed, cx))
                     .child(
                         div()
                             .flex()
@@ -1459,8 +1356,24 @@ impl Render for KadrView {
                                         section.index() * 2 + usize::from(detail),
                                     ))
                                     .flex_1()
+                                    .min_w_0()
                                     .min_h_0()
                                     .overflow_y_scroll()
+                                    .when_some(catalog_scroll, |scroll, handle| {
+                                        let kind =
+                                            listing.expect("catalog scroll belongs to a listing");
+                                        let check = Command::Catalog(
+                                            kind,
+                                            catalog_page::CatalogAction::CheckScroll,
+                                        );
+                                        let on_scroll = cx.listener(move |_, _, window, cx| {
+                                            let check = check.clone();
+                                            cx.defer_in(window, move |this, _, cx| {
+                                                this.run_command(&check, cx);
+                                            });
+                                        });
+                                        scroll.track_scroll(&handle).on_scroll_wheel(on_scroll)
+                                    })
                                     .child(content),
                             )
                             .when(
@@ -1484,13 +1397,11 @@ impl Render for KadrView {
     }
 }
 
-fn sidebar_width(width: f32) -> f32 {
-    if width <= 900. {
-        58.
-    } else if width <= 1120. {
-        190.
-    } else {
-        220.
+fn catalog_kind(section: Section) -> Option<MediaKind> {
+    match section {
+        Section::Movies => Some(MediaKind::Movie),
+        Section::Shows => Some(MediaKind::Series),
+        _ => None,
     }
 }
 
@@ -1512,14 +1423,6 @@ fn utility_page(section: Section, content: Div) -> Div {
             ),
         )
         .child(content)
-}
-
-fn status_dot() -> Div {
-    div()
-        .size(px(6.))
-        .rounded_full()
-        .bg(rgb(ACCENT))
-        .flex_shrink_0()
 }
 
 fn column() -> Div {
@@ -1556,18 +1459,19 @@ const COMMONS_DISCLOSURE: &str = "Встроенный Wikimedia Commons раб�
      внешнего каталога, но BitTorrent не нужен.";
 
 const POPCORN_DISCLOSURE: &str = "Popcorn API / YTS выключен по умолчанию; прежнее согласие не переносится. \
-     Только кнопки «Источники» и «Смотреть» отправляют IMDb ID: \
+     При поиске источников передаётся IMDb ID: \
      Popcorn (fusme.link, jfper.link, uxert.link, yrkde.link) — фильмы и нумерованные эпизоды, включая аниме с IMDb; \
      YTS (yts.lt, yts.gg) — только фильмы. Нужную серию kadr выбирает локально из ответа по IMDb ID сериала. \
-     Открытие карточки не вызывает запросов к этим сервисам. Фильмы могут запрашиваться в обеих группах независимо. \
+     При открытии карточки или выборе эпизода запросы идут только с отдельно включённым автоматическим поиском. \
+     Фильмы могут запрашиваться в обеих группах независимо. \
      В каждой группе резервные зеркала используются при временных сбоях, но не при 401/403/429. \
      Только YTS: один переход на https://yts.pw с тем же путём и параметрами запроса; \
      другие перенаправления запрещены. Нужны разрешения каталога и BitTorrent.";
 
 const MOVIE_PREFETCH_DISCLOSURE: &str = "При открытии карточки фильма kadr может заранее найти раздачи и magnet-ссылки RuTracker, \
-     если RuTracker включён, а внешний каталог и BitTorrent разрешены. Для сериалов такого поиска нет. \
+     если RuTracker включён, а внешний каталог и BitTorrent разрешены. \
      Фоновый поиск не запрашивает пароль и не запускает скачивание видео или воспроизведение. \
-     Wikimedia Commons, Torznab и Popcorn API запрашиваются по кнопке «Источники» или «Смотреть».";
+     Для остальных поставщиков нужен явный запрос или отдельно разрешённый поиск при открытии.";
 
 const SOURCE_DISCLOSURE: &str = "Trakt предоставляет только метаданные и ссылки на изображения, не видео. \
      При сетевом поиске приложение обращается только к включённым поставщикам: \
@@ -1604,6 +1508,42 @@ mod shell_tests {
     use super::*;
 
     #[test]
+    fn cards_from_catalog_pages_can_open_without_home_shelves_or_search_results() {
+        let mut view = KadrView::new();
+        let movie = "trakt:movie:123";
+        let show = "trakt:show:456";
+        for (kind, id) in [(MediaKind::Movie, movie), (MediaKind::Series, show)] {
+            let request = view.catalogs.ensure(kind).unwrap();
+            assert!(view.catalogs.apply_page(
+                &request,
+                CatalogPage {
+                    items: vec![MediaCard {
+                        id: id.into(),
+                        kind,
+                        ..MediaCard::default()
+                    }],
+                    next_page: None,
+                },
+            ));
+        }
+        let open_movie = UiEvent::OpenMedia(movie.into());
+        let open_show = UiEvent::OpenMedia(show.into());
+        assert!(!view.model.accepts(&open_movie));
+        assert!(view.accepts(&open_movie));
+        assert!(view.accepts(&open_show));
+        assert!(!view.accepts(&UiEvent::OpenMedia("trakt:movie:999".into())));
+
+        view.model.playback_active = true;
+        assert!(!view.accepts(&open_movie));
+        assert!(!view.accepts(&open_show));
+
+        view.model.playback_active = false;
+        view.catalogs.reset();
+        assert!(!view.accepts(&open_movie));
+        assert!(!view.accepts(&open_show));
+    }
+
+    #[test]
     fn source_disclosure_distinguishes_commons_scope_and_consent_from_torrents() {
         for text in [
             "Wikimedia Commons",
@@ -1631,10 +1571,9 @@ mod shell_tests {
             "При открытии карточки фильма",
             "RuTracker включён",
             "внешний каталог и BitTorrent разрешены",
-            "Для сериалов такого поиска нет",
             "не запрашивает пароль",
             "не запускает скачивание видео или воспроизведение",
-            "Wikimedia Commons, Torznab и Popcorn API запрашиваются по кнопке",
+            "Для остальных поставщиков нужен явный запрос или отдельно разрешённый поиск при открытии",
         ] {
             assert!(MOVIE_PREFETCH_DISCLOSURE.contains(text), "{text}");
         }
@@ -1645,12 +1584,12 @@ mod shell_tests {
         for text in [
             "выключен по умолчанию",
             "прежнее согласие не переносится",
-            "Только кнопки «Источники» и «Смотреть» отправляют IMDb ID",
+            "При поиске источников передаётся IMDb ID",
             "Popcorn (fusme.link, jfper.link, uxert.link, yrkde.link)",
             "фильмы и нумерованные эпизоды, включая аниме с IMDb",
             "YTS (yts.lt, yts.gg) — только фильмы",
             "Нужную серию kadr выбирает локально",
-            "Открытие карточки не вызывает запросов к этим сервисам",
+            "При открытии карточки или выборе эпизода запросы идут только с отдельно включённым автоматическим поиском",
             "Фильмы могут запрашиваться в обеих группах независимо",
             "В каждой группе резервные зеркала используются при временных сбоях, но не при 401/403/429",
             "Только YTS: один переход на https://yts.pw с тем же путём и параметрами запроса",
@@ -1671,6 +1610,8 @@ mod shell_tests {
             kind: SourceKind::Magnet,
             quality: quality.map(str::to_owned),
             language: None,
+            languages: Vec::new(),
+            resolution: None,
             origin: "RuTracker".into(),
             video_codec: None,
             audio_codec: None,
@@ -1777,13 +1718,6 @@ mod shell_tests {
         assert!(!view.model.accepts(&UiEvent::ChooseSource(0)));
         assert!(view.model.source.is_none());
         assert!(!view.model.can_play());
-        assert_eq!(
-            SourceGroup::Possible.explanation(),
-            Some(
-                "Название похоже, год или эпизод не подтверждён. Проверьте раздачу и выберите источник вручную."
-            )
-        );
-        assert!(SourceGroup::Suitable.explanation().is_none());
         view.source_quality = SourceQuality::UltraHd;
         assert!(groups(&view).is_empty(), "do not render empty groups");
     }
@@ -1891,6 +1825,10 @@ mod shell_tests {
             poster_url: None,
             backdrop_url: None,
             rating_tenths: None,
+            runtime_minutes: None,
+            certification: None,
+            genres: Vec::new(),
+            external_ratings: Vec::new(),
             kind: MediaKind::Movie,
             episodes: vec![],
             attribution: String::new(),
@@ -1903,14 +1841,14 @@ mod shell_tests {
         view.model.section = Section::Sources;
         view.model.source_discovery = Some(SourceDiscovery::default());
         assert!(
-            view.returns_to_movie_with_results(),
+            view.keep_sources_on_dismiss(),
             "dismissing settled Sources returns to the same movie and keeps prepared links"
         );
         view.model.source_discovery.as_mut().unwrap().pending = 1;
-        assert!(!view.returns_to_movie_with_results());
+        assert!(!view.keep_sources_on_dismiss());
         view.model.source_discovery.as_mut().unwrap().pending = 0;
         view.model.movie_watch_pending = true;
-        assert!(!view.returns_to_movie_with_results());
+        assert!(!view.keep_sources_on_dismiss());
         view.model.movie_watch_pending = false;
         view.modal_from = None;
         view.model.media.as_mut().unwrap().kind = MediaKind::Series;
@@ -1928,7 +1866,10 @@ mod shell_tests {
         assert!(view.opens_overlay(Section::Sources));
         view.modal_from = Some(Section::Sources);
         assert!(!view.opens_overlay(Section::Sources));
-        view.model.source_discovery = Some(SourceDiscovery::default());
+        view.model.source_discovery = Some(SourceDiscovery {
+            pending: 1,
+            ..SourceDiscovery::default()
+        });
         assert!(
             view.source_work_active(),
             "same-section dismiss must cancel discovery"
@@ -1944,7 +1885,7 @@ mod shell_tests {
     }
 
     #[test]
-    fn leaving_sources_cancels_completed_empty_failed_and_login_states() {
+    fn leaving_sources_cancels_pending_search_or_login_but_keeps_completed_lookup() {
         let mut view = KadrView::new();
         view.model.section = Section::Sources;
         view.model.source_discovery = Some(SourceDiscovery {
@@ -1972,12 +1913,14 @@ mod shell_tests {
                     );
                 }
                 view.rutracker_login = None;
-                assert_eq!(
-                    view.source_exit_event(Section::Home),
-                    Some(UiEvent::Cancel(Section::Sources))
-                );
+                assert_eq!(view.source_exit_event(Section::Home), None);
             }
         }
+        view.model.source_discovery.as_mut().unwrap().pending = 1;
+        assert_eq!(
+            view.source_exit_event(Section::Home),
+            Some(UiEvent::Cancel(Section::Sources))
+        );
         view.model.source_discovery = None;
         view.model.states[Section::Sources.index()] = SectionState::Empty("Источник готов.".into());
         assert_eq!(
@@ -1987,6 +1930,24 @@ mod shell_tests {
         );
         view.model.section = Section::Home;
         assert_eq!(view.source_exit_event(Section::Settings), None);
+    }
+
+    #[test]
+    fn closing_import_cancels_unfinished_metadata_but_keeps_a_ready_source() {
+        let mut view = KadrView::new();
+        view.model.section = Section::Sources;
+        view.model.states[Section::Sources.index()] = SectionState::Loading("Checking".into());
+        assert!(!view.keep_sources_on_dismiss());
+        assert_eq!(
+            view.source_exit_event(Section::Home),
+            Some(UiEvent::Cancel(Section::Sources))
+        );
+
+        view.model.states[Section::Sources.index()] = SectionState::Empty("Ready".into());
+        assert!(view.keep_sources_on_dismiss());
+        assert_eq!(view.source_exit_event(Section::Home), None);
+        view.model.preparing = true;
+        assert!(!view.keep_sources_on_dismiss());
     }
 
     #[test]
@@ -2001,6 +1962,10 @@ mod shell_tests {
             poster_url: None,
             backdrop_url: None,
             rating_tenths: None,
+            runtime_minutes: None,
+            certification: None,
+            genres: Vec::new(),
+            external_ratings: Vec::new(),
             kind: MediaKind::Movie,
             episodes: vec![],
             attribution: String::new(),
@@ -2023,29 +1988,35 @@ mod shell_tests {
     }
 
     #[test]
-    fn discovery_does_not_hide_later_source_errors_or_unavailability() {
+    fn episode_defaults_use_measured_history_and_preserve_explicit_specials() {
         let mut view = KadrView::new();
-        view.model.source_discovery = Some(SourceDiscovery {
-            pending: 0,
-            succeeded: 1,
-            failures: Vec::new(),
-            notices: Vec::new(),
+        view.model.media = Some(MediaCard {
+            id: "series".into(),
+            kind: MediaKind::Series,
+            episodes: [(0, 1), (1, 1), (1, 2), (2, 1)]
+                .into_iter()
+                .map(|(season, number)| EpisodeRow {
+                    season,
+                    number,
+                    ..EpisodeRow::default()
+                })
+                .collect(),
+            ..MediaCard::default()
         });
-        for state in [
-            SectionState::Error("Selected source failed".into()),
-            SectionState::Unavailable("Sources disabled".into()),
-        ] {
-            view.model.states[Section::Sources.index()] = state;
-            assert!(view.show_source_section_state());
-        }
-        view.model.states[Section::Sources.index()] = SectionState::Empty("Complete".into());
-        assert!(!view.show_source_section_state());
-        view.model.states[Section::Sources.index()] = SectionState::Loading("Discovery".into());
-        assert!(!view.show_source_section_state());
-        view.model.source_discovery = None;
-        assert!(view.show_source_section_state());
-        view.model.source_discovery_starting = true;
-        assert!(!view.show_source_section_state());
+        assert_eq!(view.preferred_episode(), Some((1, 1)));
+        view.model.library = vec![LibraryRow {
+            media_id: "series".into(),
+            episode: Some((1, 2)),
+            position: Some(42),
+            ..LibraryRow::default()
+        }];
+        assert_eq!(view.preferred_episode(), Some((1, 2)));
+        view.model.library[0].completed = true;
+        assert_eq!(view.preferred_episode(), Some((2, 1)));
+        view.remembered_episodes.insert("series".into(), (0, 1));
+        assert_eq!(view.preferred_episode(), Some((0, 1)));
+        view.remembered_episodes.insert("series".into(), (99, 1));
+        assert_eq!(view.preferred_episode(), Some((2, 1)));
     }
 
     #[test]
@@ -2062,13 +2033,5 @@ mod shell_tests {
         assert_eq!(view.navigation_revision(), sources);
         view.record_navigation(); // A detail/overlay navigation within the same section.
         assert_ne!(view.navigation_revision(), sources);
-    }
-
-    #[test]
-    fn sidebar_breakpoints_follow_the_reference_widths() {
-        assert_eq!(sidebar_width(900.), 58.);
-        assert_eq!(sidebar_width(901.), 190.);
-        assert_eq!(sidebar_width(1120.), 190.);
-        assert_eq!(sidebar_width(1121.), 220.);
     }
 }

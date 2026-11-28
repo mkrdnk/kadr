@@ -8,6 +8,10 @@ fn movie(title: &str, original: Option<&str>, year: Option<u16>) -> Media {
         external: Default::default(),
         year,
         rating_tenths: None,
+        runtime_minutes: None,
+        genres: Vec::new(),
+        certification: None,
+        external_ratings: Vec::new(),
         description: String::new(),
         poster_url: None,
         backdrop_url: None,
@@ -49,6 +53,8 @@ fn episode(season: u16, number: u16) -> Episode {
         number,
         title: String::new(),
         description: String::new(),
+        runtime_minutes: None,
+        screenshot_url: None,
     }
 }
 

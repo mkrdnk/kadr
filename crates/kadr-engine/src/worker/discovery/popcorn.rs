@@ -147,7 +147,7 @@ impl Worker {
     }
 }
 
-fn unique_video_hint(
+pub(super) fn unique_video_hint(
     files: &[kadr_torrent::TorrentFile],
     hint: &str,
     target: Option<kadr_core::torrent::EpisodeNumber>,
@@ -169,14 +169,17 @@ fn unique_video_hint(
             path,
             file.len,
         )?;
-        match video.episode() {
-            EpisodeRecognition::Ambiguous(_) => None,
-            EpisodeRecognition::Recognized(number) if *number != target => None,
-            _ => Some(file.id),
-        }
+        Some(video)
     });
-    let id = matches.next()?;
-    matches.next().is_none().then_some(id)
+    let video = matches.next()?;
+    if matches.next().is_some() || video.size() == 0 {
+        return None;
+    }
+    match video.episode() {
+        EpisodeRecognition::Ambiguous(_) => None,
+        EpisodeRecognition::Recognized(number) if *number != target => None,
+        _ => Some(video.index().0.try_into().ok()?),
+    }
 }
 
 #[cfg(test)]
@@ -207,5 +210,24 @@ mod tests {
         assert_eq!(unique_video_hint(&files, "../02.mkv", ep), None);
         assert_eq!(unique_video_hint(&files, "A/02.txt", ep), None);
         assert_eq!(unique_video_hint(&files, "missing.mkv", ep), None);
+    }
+
+    #[test]
+    fn episode_hint_rejects_duplicate_videos_before_using_episode_markers() {
+        let files = ["A/S01E02.mkv", "B/S01E02.mkv"]
+            .into_iter()
+            .enumerate()
+            .map(|(id, path)| kadr_torrent::TorrentFile {
+                id,
+                relative_filename: PathBuf::from(path),
+                len: 4096,
+            })
+            .collect::<Vec<_>>();
+        let ep = kadr_core::torrent::EpisodeNumber::new(1, 2);
+        assert_eq!(unique_video_hint(&files, "S01E02.mkv", ep), None);
+        assert_eq!(unique_video_hint(&files, "A/S01E02.mkv", ep), Some(0));
+        let mut empty = files[0].clone();
+        empty.len = 0;
+        assert_eq!(unique_video_hint(&[empty], "A/S01E02.mkv", ep), None);
     }
 }

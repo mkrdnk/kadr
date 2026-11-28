@@ -9,26 +9,25 @@ the application to configure a GPUI HTTP client.
 
 ## Screens
 
-- **Home** (initial screen) and **Movies/Shows**: a measured-resume hero or
-  a real catalog spotlight, series and movie shelves, adaptive poster grid,
-  and sort by provider order, title, year or rating. A user action loads
-  the shelves; there are no startup requests or placeholder films.
+- **Home** (initial screen): a measured-resume hero or a catalog spotlight,
+  with movie and show shelves. The **Movies/Shows** catalog uses server-side
+  popular/trending feeds, genre/year filters and incremental pages. Cards
+  share hover and keyboard styling with search and library; no startup requests
+  or placeholder films. The sidebar can collapse to icons with tooltips.
 - **Search overlay** (`Ctrl+K` / `⌘K`): explicit Enter/button submission, poster
   results, Arrow key selection and Escape to close. Detail view shows
   available title, year, rating, description, attribution, favorite control
   and series season/episode selection.
-- **Sources dialog** (also a page for manual input): quality tabs, optional
-  seed sorting, and found sources with quality, language, origin and
-  license; manual clipboard attachment and `.torrent` picker; explicit unlink
-  from the current media; player selection and playback controls. Private URLs
-  and stream tokens have no fields in the presentation DTOs and are not shown.
-  A discovery snapshot reports pending/successful/failed providers. Fast
-  results are selectable while others run, and manual input works before
-  the first result. Refresh bypasses the discovery cache; dismissing the
-  dialog invalidates its search, not an already prepared manual input.
-  RuTracker rows also show available size and seed count, without asserting
-  playback rights. If the selected topic has no magnet, Sources shows a masked
-  sign-in form only when requested by the engine.
+- **Details**: shared film/show metadata, labelled ratings and source
+  preferences. Only the selected season's episodes are shown. Discovery and
+  playback are separate intents, and only explicit Watch can start playback.
+- **Source picker**: a modal with quality, codec, language, size, seeds and
+  provider when available. Details and provider diagnostics are expandable.
+  Partial failures leave successful rows selectable. Refresh bypasses the
+  discovery cache. RuTracker sign-in is masked and shown only when requested.
+- **Open source** (`Ctrl+O` / `⌘O`): a separate dialog for clipboard HTTP(S) or
+  magnet links and the native `.torrent` picker. Private URLs and stream
+  tokens are not shown. There is no standalone Sources page.
 - **Torrent files**, within Sources: video-file names, byte sizes, recognized
   season/episode and ambiguity indication; file selection and editable numeric
   season/episode correction. The controller decides which files are videos.
@@ -96,13 +95,16 @@ PreferencesDraft {
 
 Enums: `MediaKind::{Movie,Series}`, `RateLimit::{Paused,Unlimited,Bps(u64)}`,
 `SourceKind::{Http,Magnet,TorrentFile,LocalFile}`, `PlayerChoice::{Mpv,Vlc,Browser}`.
-The shell adds `Home, Movies, Shows, History` to the existing sections. Search
-and the detail's Sources open over the current page rather than replacing it.
+Search, source selection and manual import open over the current page.
+`Section::Sources` is an internal dialog state, not a sidebar destination.
 
-New events:
+Relevant events:
 
 ```rust,ignore
-Search(String), Browse, OpenMedia(String), WatchMovie, FindSources,
+Search(String), Browse, CatalogPage(CatalogRequest), CatalogGenres(MediaKind),
+OpenMedia(String), WatchDetail { resume: bool, preferences: PlaybackOptions },
+DiscoverSources, FindSources, WatchSource(usize), SetSidebarCollapsed(bool),
+ImportSource { torrent: bool, attach: bool },
 SelectEpisode { season: u16, number: u16 }, ChooseSource(usize),
 ToggleFavorite, SetFavorite { id: String, favorite: bool }, OpenLibrary(String),
 ChooseTorrentFile(usize), AssignEpisode { season: u16, number: u16 },
@@ -113,9 +115,11 @@ SignInRuTracker(RuTrackerCredentials), ForgetRuTracker
 
 Existing events remain `PasteSource,OpenTorrent,Play,PlayFromStart,Stop`,
 `SetDefaultPlayer(PlayerChoice),Retry(Section),Cancel(Section)`.
-`WatchMovie` is the movie card's explicit play intent; `FindSources` only
-shows options. The view renders the engine's `recommended` marker and never
-derives a winner from a partially received or visually filtered list.
+`WatchDetail` requests explicit playback on the current movie or episode.
+`DiscoverSources` looks up options in place; `FindSources` opens the picker.
+Neither starts playback. A highlighted source in the picker is a UI selection
+until the user confirms `WatchSource`. The view renders the engine's
+`recommended` marker and does not determine which source can launch automatically.
 The source/torrent indices are controller-provided identifiers, not visual row
 positions. `AssignEpisode` applies to the last selected torrent-file index.
 The controller must reject stale selections or operations when their underlying
@@ -130,6 +134,9 @@ Every setter takes `(&mut self, value, &mut Context<KadrView>)` and notifies GPU
 set_search_results(Vec<MediaCard>)
 set_browse_catalog(Vec<MediaCard>, Vec<MediaCard>) // movies, shows
 set_browse_state(SectionState)
+set_catalog_page(&CatalogRequest, Result<CatalogPage, String>)
+set_catalog_genres(MediaKind, Result<Vec<CatalogGenre>, String>)
+set_sidebar_collapsed(bool)
 set_media_detail(Option<MediaCard>)
 set_catalog_episode(Option<(u16, u16)>)
 set_media_favorite(bool)
@@ -149,8 +156,8 @@ with `set_media_favorite` after setting detail. `set_torrent_files` resets local
 file selection. `set_preferences` replaces all editable fields, so call it for
 initial load or acknowledged save, not on every telemetry tick.
 Returning to search results does not implicitly unlink media from Sources.
-`set_search_results` closes detail but retains the displayed source-binding
-context; acknowledge an explicit unlink with `set_media_detail(None)`.
+`set_search_results` updates results without changing detail or source binding.
+Acknowledge an explicit unlink with `set_media_detail(None)`.
 `set_cache_directory` changes only the path field and preserves other unsaved
 settings edits. Numeric form validation rejects overflow, negative sizes,
 non-positive peer caps and invalid rate strings without emitting a save event.

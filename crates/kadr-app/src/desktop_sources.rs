@@ -90,6 +90,8 @@ pub(super) struct SourcePresentation {
     pub(super) intent: DiscoveryIntent,
     pub(super) preparing: bool,
     pub(super) received_discovery: bool,
+    pub(super) complete: bool,
+    pub(super) requested_recommendation: bool,
 }
 
 impl SourcePresentation {

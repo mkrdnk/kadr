@@ -7,6 +7,71 @@ use kadr_storage::{RateLimit, Settings};
 use kadr_torrent::engine::{EngineOptions, PlaybackTorrent, PreparedTorrent};
 use tokio_util::sync::CancellationToken;
 
+/// Parse a declared pixel height, not a codec or an arbitrary player argument.
+pub(crate) fn preferred_height(value: &str) -> Option<u16> {
+    let value = value.strip_suffix(['p', 'i']).unwrap_or(value);
+    (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| value.parse::<u16>().ok())
+        .flatten()
+        .filter(|height| (1..=16_384).contains(height))
+}
+
+pub(crate) fn preferred_audio_language(value: &str) -> Option<String> {
+    if value.len() > 35 {
+        return None;
+    }
+    let mut parts = value.split('-');
+    let primary = parts.next()?;
+    if !(2..=3).contains(&primary.len())
+        || !primary.bytes().all(|byte| byte.is_ascii_alphabetic())
+        || !parts.all(|part| {
+            !part.is_empty()
+                && part.len() <= 8
+                && part.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
+    {
+        return None;
+    }
+    // Players accept ISO 639 language preferences, not a promise of a
+    // particular regional variant, track index, codec, or dubbing.
+    Some(primary.to_ascii_lowercase())
+}
+
+pub(crate) fn validate_preferences(preferences: &crate::PlaybackPreferences) -> io::Result<()> {
+    if preferences
+        .preferred_resolution
+        .as_deref()
+        .is_some_and(|value| preferred_height(value).is_none())
+        || preferences
+            .preferred_language
+            .as_deref()
+            .is_some_and(|value| preferred_audio_language(value).is_none())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Некорректные предпочтения качества или языка.",
+        ));
+    }
+    Ok(())
+}
+
+/// Direct-player capabilities only. Browser playback deliberately has no
+/// corresponding options. Legacy free-text stored labels are not CLI input.
+pub(crate) fn player_preferences(
+    preferences: &crate::PlaybackPreferences,
+    stored: &crate::SourcePreferences,
+) -> io::Result<kadr_media::players::PlayerPlaybackOptions> {
+    validate_preferences(preferences)?;
+    Ok(kadr_media::players::PlayerPlaybackOptions {
+        subtitles_off: preferences.subtitles_off,
+        audio_language: preferences
+            .preferred_language
+            .as_deref()
+            .or(stored.preferred_language.as_deref())
+            .and_then(preferred_audio_language),
+    })
+}
+
 pub(super) fn engine_options(settings: &Settings) -> io::Result<EngineOptions> {
     fn rate(limit: RateLimit) -> io::Result<kadr_torrent::engine::RateLimit> {
         Ok(match limit {
@@ -203,5 +268,77 @@ pub(super) fn mime_for_name(name: &str) -> &'static str {
         "wav" => "audio/wav",
         "mp3" => "audio/mpeg",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn direct_player_preferences_use_only_validated_language_and_subtitle_capabilities() {
+        let stored = crate::SourcePreferences {
+            preferred_language: Some("RU".into()),
+            ..Default::default()
+        };
+        let inherited =
+            player_preferences(&crate::PlaybackPreferences::default(), &stored).unwrap();
+        assert_eq!(inherited.audio_language.as_deref(), Some("ru"));
+        assert!(!inherited.subtitles_off);
+        let explicit = player_preferences(
+            &crate::PlaybackPreferences {
+                preferred_resolution: Some("1080p".into()),
+                preferred_language: Some("EN-us".into()),
+                subtitles_off: true,
+            },
+            &stored,
+        )
+        .unwrap();
+        assert_eq!(explicit.audio_language.as_deref(), Some("en"));
+        assert!(explicit.subtitles_off);
+        // Storage historically accepts labels; those labels are not CLI options.
+        let stored = crate::SourcePreferences {
+            preferred_language: Some("Russian --script=unsafe".into()),
+            ..Default::default()
+        };
+        assert!(
+            player_preferences(&crate::PlaybackPreferences::default(), &stored)
+                .unwrap()
+                .audio_language
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn invalid_request_preferences_fail_before_any_playback() {
+        for language in [
+            "",
+            "--script=x",
+            "en,ru",
+            "ru\n",
+            "r",
+            "English",
+            "en--US",
+            "en_US",
+        ] {
+            let preferences = crate::PlaybackPreferences {
+                preferred_language: Some(language.into()),
+                ..Default::default()
+            };
+            assert!(validate_preferences(&preferences).is_err(), "{language:?}");
+        }
+        for resolution in ["0p", "1080p --script=x", "65535p", "-1", "4K", ""] {
+            let preferences = crate::PlaybackPreferences {
+                preferred_resolution: Some(resolution.into()),
+                ..Default::default()
+            };
+            assert!(
+                validate_preferences(&preferences).is_err(),
+                "{resolution:?}"
+            );
+        }
+        for resolution in ["720", "1080p", "2160p", "1080i"] {
+            assert!(preferred_height(resolution).is_some(), "{resolution}");
+        }
     }
 }
