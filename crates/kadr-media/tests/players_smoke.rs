@@ -5,7 +5,9 @@ use std::{io, sync::Arc, time::Duration};
 
 use kadr_media::{
     LocalFile, Server, ServerOptions,
-    players::{PlayRequest, PlayerKind, PlayerOptions, PlayerSession, Telemetry},
+    players::{
+        PlayRequest, PlayerKind, PlayerOptions, PlayerPlaybackOptions, PlayerSession, Telemetry,
+    },
 };
 use tempfile::TempDir;
 use tokio::time::{Instant, sleep, timeout};
@@ -71,6 +73,47 @@ async fn wait_for_exit(session: &mut PlayerSession) {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires real mpv and VLC 3 oldrc; run explicitly on Linux/macOS"]
+async fn real_players_accept_startup_preferences_without_requiring_a_matching_track() {
+    let fixture = wav_fixture();
+    let server = serve_fixture(&fixture).await;
+    // The WAV has no language metadata or subtitles. These preferences must
+    // not make playback contingent on finding a particular track.
+    for kind in [PlayerKind::Mpv, PlayerKind::Vlc] {
+        let mut options = PlayerOptions::for_player(kind);
+        options.headless = true;
+        let mut session = PlayerSession::launch_with_preferences(
+            kind,
+            PlayRequest {
+                media: server.private_url().into(),
+                resume: Some(Duration::from_secs(7)),
+            },
+            options,
+            PlayerPlaybackOptions {
+                subtitles_off: true,
+                audio_language: Some("rus".into()),
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        wait_for_exit(&mut session).await;
+        if kind == PlayerKind::Mpv {
+            assert!(
+                session
+                    .snapshot(&CancellationToken::new())
+                    .await
+                    .unwrap()
+                    .completed,
+                "unmatched language preference must still allow playback to EOF"
+            );
+        }
+        assert!(session.stop().await.unwrap().success());
+    }
+    server.shutdown().await.unwrap();
 }
 
 #[tokio::test]
